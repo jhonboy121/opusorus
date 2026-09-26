@@ -173,3 +173,33 @@ pub fn assert_slice_eq<T: PartialEq + core::fmt::Debug>(what: &str, rust: &[T], 
         );
     }
 }
+
+/// `FLOAT2RES` for test signals: the library's (`opusorus::celt::arch::float2res`), or with
+/// `disable-float-api` (where libopus and the port compile `FLOAT2INT16` / `FLOAT2INT24` out) a
+/// copy of the `celt/float_cast.h` definition, as the oracle shims use (`oracle_float_cast.h`).
+#[must_use]
+#[cfg_attr(
+    not(feature = "fixed-point"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "`FLOAT2RES` is only a const identity in the float build"
+    )
+)]
+pub fn float2res(x: f32) -> opusorus::celt::arch::OpusRes {
+    #[cfg(not(feature = "disable-float-api"))]
+    return opusorus::celt::arch::float2res(x);
+    #[cfg(all(feature = "disable-float-api", feature = "fixed-res24"))]
+    {
+        let x = x * (32768.0 * 256.0);
+        let x = if x > -16_777_216.0 { x } else { -16_777_216.0 };
+        let x = if x < 16_777_216.0 { x } else { 16_777_216.0 };
+        opusorus::math::lrintf(x)
+    }
+    #[cfg(all(feature = "disable-float-api", not(feature = "fixed-res24")))]
+    {
+        let x = x * 32768.0;
+        let x = if x > -32768.0 { x } else { -32768.0 };
+        let x = if x < 32767.0 { x } else { 32767.0 };
+        opusorus::math::lrintf(x) as i16
+    }
+}

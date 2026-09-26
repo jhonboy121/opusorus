@@ -38,14 +38,17 @@ use alloc::vec::Vec;
 
 use crate::celt::arch::OpusRes;
 use crate::decoder::OPTIONAL_CLIP;
+#[cfg(not(feature = "disable-float-api"))]
+use crate::mapping_matrix::mapping_matrix_multiply_channel_out_float;
 use crate::mapping_matrix::{
-    MappingMatrix, mapping_matrix_get_size, mapping_matrix_multiply_channel_out_float,
-    mapping_matrix_multiply_channel_out_int24, mapping_matrix_multiply_channel_out_short,
+    MappingMatrix, mapping_matrix_get_size, mapping_matrix_multiply_channel_out_int24,
+    mapping_matrix_multiply_channel_out_short,
 };
 use crate::ms_decoder::MsDecoder;
 use crate::{Error, Result};
 
 /// Port of `src/opus_projection_decoder.c:opus_projection_copy_channel_out_float`.
+#[cfg(not(feature = "disable-float-api"))]
 fn opus_projection_copy_channel_out_float(
     matrix: &MappingMatrix,
     dst: &mut [f32],
@@ -309,6 +312,7 @@ impl ProjectionDecoder {
     /// # Errors
     /// As [`ProjectionDecoder::decode_float`].
     #[doc(hidden)]
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_projection_decode_float(
         &mut self,
         data: Option<&[u8]>,
@@ -364,10 +368,12 @@ impl ProjectionDecoder {
     }
 
     /// Decodes a projection packet to interleaved float PCM. See
-    /// [`ProjectionDecoder::decode`].
+    /// [`ProjectionDecoder::decode`]. Not available with the `disable-float-api` feature
+    /// (libopus `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`MsDecoder::decode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn decode_float(
         &mut self,
         data: Option<&[u8]>,

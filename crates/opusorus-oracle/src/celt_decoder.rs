@@ -116,6 +116,7 @@ unsafe extern "C" {
         pcm: *mut i32,
         frame_size: c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     #[cfg(feature = "custom-modes")]
     fn oracle_cd_custom_decode_float(
         p: *mut c_void,
@@ -380,6 +381,7 @@ impl CeltDec {
         }
     }
 
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_custom_decode_float`.
     #[cfg(feature = "custom-modes")]
     pub fn custom_decode_float(

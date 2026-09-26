@@ -41,8 +41,20 @@ fn custom_96k_mode_without_qext_layout() {
                 let nb = 60 + 7 * k as i32;
                 let mut a = vec![0u8; nb as usize];
                 let mut b = a.clone();
-                let rr = r.opus_custom_encode_float(&pcm, frame, &mut a, nb);
-                let cr = c.custom_encode_float(&pcm, ch, frame, &mut b, nb);
+                #[cfg(not(feature = "disable-float-api"))]
+                let (rr, cr) = (
+                    r.opus_custom_encode_float(&pcm, frame, &mut a, nb),
+                    c.custom_encode_float(&pcm, ch, frame, &mut b, nb),
+                );
+                // DISABLE_FLOAT_API: the same signal as 24-bit PCM.
+                #[cfg(feature = "disable-float-api")]
+                let (rr, cr) = {
+                    let p24: Vec<i32> = pcm.iter().map(|&v| (v * 8_388_607.0) as i32).collect();
+                    (
+                        r.opus_custom_encode24(&p24, frame, &mut a, nb),
+                        c.custom_encode24(&p24, ch, frame, &mut b, nb),
+                    )
+                };
                 assert_eq!(rr, cr, "{what} frame {k}: return");
                 assert!(rr > 0, "{what} frame {k}: {rr}");
                 assert_eq!(

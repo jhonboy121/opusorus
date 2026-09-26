@@ -42,6 +42,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn oracle_isqrt32(x: u32) -> u32;
     fn oracle_float2int(x: f32) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_float2int16(x: f32) -> i16;
 }
 
@@ -175,7 +176,8 @@ pub fn float2int(x: f32) -> i32 {
     // SAFETY: pure function.
     unsafe { oracle_float2int(x) }
 }
-/// C `FLOAT2INT16`.
+/// C `FLOAT2INT16` (not with `DISABLE_FLOAT_API`).
+#[cfg(not(feature = "disable-float-api"))]
 #[must_use]
 pub fn float2int16(x: f32) -> i16 {
     // SAFETY: pure function.

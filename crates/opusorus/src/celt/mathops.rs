@@ -20,6 +20,7 @@ pub use fixed::*;
 #[cfg(not(feature = "fixed-point"))]
 pub use float::*;
 
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::arch::{CELT_SIG_SCALE, max32, min32};
 use crate::celt::entcode::ec_ilog;
 use crate::math;
@@ -121,7 +122,8 @@ pub fn float2int(x: f32) -> i32 {
     math::lrintf(x)
 }
 
-/// `FLOAT2INT16`.
+/// `FLOAT2INT16` (`celt/float_cast.h`; not with `DISABLE_FLOAT_API`).
+#[cfg(not(feature = "disable-float-api"))]
 #[inline(always)]
 #[must_use]
 pub fn float2int16(mut x: f32) -> i16 {
@@ -131,7 +133,8 @@ pub fn float2int16(mut x: f32) -> i16 {
     float2int(x) as i16
 }
 
-/// `FLOAT2INT24`.
+/// `FLOAT2INT24` (not with `DISABLE_FLOAT_API`).
+#[cfg(not(feature = "disable-float-api"))]
 #[inline(always)]
 #[must_use]
 pub fn float2int24(mut x: f32) -> i32 {
@@ -141,7 +144,8 @@ pub fn float2int24(mut x: f32) -> i32 {
     float2int(x)
 }
 
-/// Port of `celt_float2int16_c`.
+/// Port of `celt_float2int16_c` (not with `DISABLE_FLOAT_API`).
+#[cfg(not(feature = "disable-float-api"))]
 pub fn celt_float2int16(input: &[f32], out: &mut [i16]) {
     for (o, &i) in out.iter_mut().zip(input) {
         *o = float2int16(i);
@@ -150,6 +154,8 @@ pub fn celt_float2int16(input: &[f32], out: &mut [i16]) {
 
 /// Port of `opus_limit2_checkwithin1_c`: clamps to [-2, 2]; returns whether all samples are
 /// known to be within [-1, 1] (the C version never knows, so it returns `false` unless empty).
+/// Not with `DISABLE_FLOAT_API`.
+#[cfg(not(feature = "disable-float-api"))]
 pub fn opus_limit2_checkwithin1(samples: &mut [f32]) -> bool {
     if samples.is_empty() {
         return true;
@@ -180,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "disable-float-api"))]
     fn float2int16_saturates() {
         assert_eq!(float2int16(1.0), 32767);
         assert_eq!(float2int16(-1.0), -32768);

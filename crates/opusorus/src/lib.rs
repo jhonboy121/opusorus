@@ -66,8 +66,35 @@
 //! * `lossgen` (libopus `--enable-lossgen`): `lossgen`, the generative packet loss model of
 //!   `opus_demo -sim_loss` (upstream links it into its tools only). Its small model is compiled
 //!   in; it works in every build, float or fixed-point, without the DNN features.
+//!
+//! # No float API (feature `disable-float-api`, requires `fixed-point`)
+//!
+//! libopus' `--disable-float-api` (`DISABLE_FLOAT_API`): the float entry points
+//! (`Encoder::encode_float`, `Decoder::decode_float`, their multistream, projection and
+//! Opus Custom counterparts, `packet::pcm_soft_clip`) do not exist, and neither does the
+//! encoder's float tonality/music analysis (`src/analysis.c`, `mlp.c`): the encoder then makes
+//! its mode, bandwidth, DTX and CELT allocation decisions without it, bit-exact with a libopus
+//! built with the same option. Like upstream, where the float build does not compile with
+//! `DISABLE_FLOAT_API`, the feature requires `fixed-point` (`compile_error!` otherwise).
+//!
+//! # Checking fixed-point arithmetic (feature `fixed-point-debug`, implies `fixed-point`)
+//!
+//! libopus' `--enable-fixed-point-debug` (`FIXED_DEBUG`): the fixed-point macros are the
+//! checking versions of `celt/fixed_debug.h` and `silk/MacroDebug.h`, which verify their operand
+//! and result ranges, report every violation with libopus' message (to standard error with
+//! `std`, or to a handler installed with `fixed_debug::set_handler`) and continue, and count
+//! operations (`fixed_debug::celt_mips`). The output is bit-exact with libopus built with
+//! `FIXED_DEBUG` (which differs from a release build where operands are out of range). For
+//! debugging only: it is several times slower. See the `fixed_debug` module.
 
 #![no_std]
+#![cfg_attr(
+    feature = "disable-float-api",
+    allow(
+        rustdoc::broken_intra_doc_links,
+        reason = "the docs link the float API, which `disable-float-api` removes"
+    )
+)]
 #![allow(
     clippy::excessive_precision,
     clippy::approx_constant,
@@ -93,6 +120,15 @@ compile_error!(
      --enable-fixed-point); use explicit feature lists instead of --all-features"
 );
 
+// Upstream's float build does not compile with DISABLE_FLOAT_API (`FLOAT2INT16`,
+// `celt_float2int16` and `opus_pcm_soft_clip_impl` are compiled out but used by the float
+// decoder); CMake only uses it with OPUS_FIXED_POINT.
+#[cfg(all(feature = "disable-float-api", not(feature = "fixed-point")))]
+compile_error!(
+    "feature `disable-float-api` requires `fixed-point` (libopus' float build does not compile \
+     with DISABLE_FLOAT_API)"
+);
+
 #[allow(
     unused_extern_crates,
     reason = "alloc is used by modules still being ported"
@@ -101,8 +137,22 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+/// Declares a function `const` except with `fixed-point-debug`, where it (transitively) calls
+/// the checking fixed-point macros, which report and count and so cannot be `const`.
+macro_rules! const_unless_fixed_debug {
+    ($(#[$m:meta])* $v:vis const fn $name:ident $($rest:tt)*) => {
+        #[cfg(not(feature = "fixed-point-debug"))]
+        $(#[$m])* $v const fn $name $($rest)*
+        #[cfg(feature = "fixed-point-debug")]
+        $(#[$m])* $v fn $name $($rest)*
+    };
+}
+
 mod error;
 pub use error::{Error, Result};
+
+#[cfg(feature = "fixed-point-debug")]
+pub mod fixed_debug;
 
 pub mod constants;
 pub use constants::*;
@@ -166,10 +216,10 @@ pub mod extensions;
 pub mod mapping_matrix;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod mapping_matrix;
-#[cfg(feature = "internals")]
+#[cfg(all(feature = "internals", not(feature = "disable-float-api")))]
 #[doc(hidden)]
 pub mod mlp;
-#[cfg(not(feature = "internals"))]
+#[cfg(all(not(feature = "internals"), not(feature = "disable-float-api")))]
 pub(crate) mod mlp;
 pub mod ms_decoder;
 pub mod ms_encoder;

@@ -85,7 +85,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-#[cfg(feature = "fixed-point")]
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
 use crate::celt::arch::res2float;
 #[cfg(feature = "fixed-res24")]
 use crate::celt::arch::{COEF_ONE, add32, mult_coef, mult_coef_32, mult32_32_q16_ovflw, res2int16};
@@ -342,9 +342,9 @@ const fn must_succeed(r: Result<()>) -> Result<()> {
 /// # fn main() -> opusorus::Result<()> {
 /// let mut dec = Decoder::new(16000, 1)?;
 /// dec.set_gain(-256)?; // -1 dB (Q8)
-/// let mut pcm = vec![0f32; 320];
+/// let mut pcm = vec![0i16; 320];
 /// // A SILK wideband 20 ms mono DTX frame (TOC only) is concealed.
-/// let n = dec.decode_float(Some(&[0x48]), &mut pcm, 320, false)?;
+/// let n = dec.decode(Some(&[0x48]), &mut pcm, 320, false)?;
 /// assert_eq!(n, 320);
 /// assert_eq!(dec.last_packet_duration(), 320);
 /// # Ok(())
@@ -1491,6 +1491,7 @@ impl Decoder {
     /// # Errors
     /// As [`Decoder::decode_float`].
     #[doc(hidden)]
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_decode_float(
         &mut self,
         data: Option<&[u8]>,
@@ -1565,10 +1566,12 @@ impl Decoder {
     /// Decodes an Opus packet to interleaved float PCM in `[-1, 1]` nominal range (port of
     /// `opus_decode_float`; no soft clipping, so samples may exceed ±1; in fixed-point builds
     /// `RES2FLOAT` of the integer output). Arguments and errors
-    /// as [`Decoder::decode`].
+    /// as [`Decoder::decode`]. Not available with the `disable-float-api` feature (libopus
+    /// `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`Decoder::decode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn decode_float(
         &mut self,
         data: Option<&[u8]>,

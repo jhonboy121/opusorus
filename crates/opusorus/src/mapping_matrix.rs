@@ -7,13 +7,15 @@
 
 use alloc::vec::Vec;
 
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::int24tores;
 #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
 use crate::celt::arch::saturate16;
 use crate::celt::arch::{OpusRes, OpusVal32, OpusVal64, res2int16, res2int24};
 #[cfg(feature = "fixed-res24")]
 use crate::celt::arch::{RES_SHIFT, shl32};
-#[cfg(feature = "fixed-point")]
-use crate::celt::arch::{float2res, int24tores, res2float};
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
+use crate::celt::arch::{float2res, res2float};
 use crate::packet::align;
 
 /// Port of `MATRIX_INDEX(nb_rows, row, col)`: column-major cell index.
@@ -100,7 +102,8 @@ const fn len_bytes(n: usize) -> i32 {
 
 /// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_in_float`: computes matrix
 /// row `output_row` applied to the `input_rows`-channel interleaved float `input`, writing one
-/// sample every `output_rows` values of `output`.
+/// sample every `output_rows` values of `output`. Not with `DISABLE_FLOAT_API`.
+#[cfg(not(feature = "disable-float-api"))]
 pub fn mapping_matrix_multiply_channel_in_float(
     matrix: &MappingMatrix,
     input: &[f32],
@@ -134,7 +137,8 @@ pub fn mapping_matrix_multiply_channel_in_float(
 
 /// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_out_float`: accumulates
 /// matrix column `input_row` times the (strided) `input` channel into the
-/// `output_rows`-channel interleaved float `output`.
+/// `output_rows`-channel interleaved float `output`. Not with `DISABLE_FLOAT_API`.
+#[cfg(not(feature = "disable-float-api"))]
 pub fn mapping_matrix_multiply_channel_out_float(
     matrix: &MappingMatrix,
     input: &[OpusRes],

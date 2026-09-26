@@ -34,6 +34,18 @@ fixed-point = []
 # 24-bit internal resolution for the fixed-point build (libopus `ENABLE_RES24`, which upstream
 # autotools enables by default for fixed-point builds; `--disable-fixed-res24` turns it off).
 fixed-res24 = ["fixed-point"]
+# Removes the float API (libopus `--disable-float-api` / meson `-Dfloat-api=false` / CMake
+# `OPUS_ENABLE_FLOAT_API=OFF`, `DISABLE_FLOAT_API`): no `encode_float` / `decode_float` /
+# `pcm_soft_clip` / float `opus_custom_*`, and the encoder's float tonality analysis (src/analysis.c,
+# mlp.c) is compiled out, which changes the encoder's decisions (as in libopus). Requires
+# `fixed-point` (libopus' float build does not compile with `DISABLE_FLOAT_API`).
+disable-float-api = []
+# Checking fixed-point arithmetic (libopus `--enable-fixed-point-debug`, `FIXED_DEBUG`): the
+# `celt/fixed_debug.h` and `silk/MacroDebug.h` macro versions, which check their operand ranges,
+# report violations (the `fixed_debug` module; printed to stderr with `std`) and count operations
+# (`celt_mips`). Implies `fixed-point` (CMake ties it to fixed point; the float build does not
+# compile with `FIXED_DEBUG`). Slow: for debugging only.
+fixed-point-debug = ["fixed-point"]
 # Compiled-in DNN weights (libopus built without `USE_WEIGHTS_FILE`): embeds the weight blob
 # at the absolute path given by the `OPUSORUS_DNN_BLOB` environment variable at build time
 # (`scripts/gen_dnn_blob.sh` generates one) and binds the models when a decoder, encoder or DRED

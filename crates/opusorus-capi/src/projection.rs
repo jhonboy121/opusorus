@@ -269,6 +269,7 @@ pub unsafe extern "C" fn opus_projection_encode24(
 ///
 /// # Safety
 /// See [`projection_encode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_projection_encode_float(
     st: *mut OpusProjectionEncoder,
@@ -465,6 +466,7 @@ pub unsafe extern "C" fn opus_projection_decode24(
 ///
 /// # Safety
 /// See [`projection_decode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_projection_decode_float(
     st: *mut OpusProjectionDecoder,

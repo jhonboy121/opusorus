@@ -585,6 +585,9 @@ fn lib_config_matches(lib: &[u8]) -> bool {
         // csrc/dnn_debug_float.c (no DISABLE_DEBUG_FLOAT) and the training file names.
         && has(b"opusorus-oracle: dnn-debug-float build") == (DNN && cfg!(feature = "dnn-debug-float"))
         && has(b"features_lpc.f32") == cfg!(feature = "osce-training-data")
+        // DISABLE_FLOAT_API oracles have no src/analysis.c; FIXED_DEBUG ones the capture shim.
+        && has(b"tonality_analysis_init") != cfg!(feature = "disable-float-api")
+        && has(b"oracle_fixed_debug_fprintf") == cfg!(feature = "fixed-point-debug")
 }
 
 /// The oracle `libopus.a` files whose optional components match this crate's features

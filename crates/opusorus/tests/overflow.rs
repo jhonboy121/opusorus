@@ -77,11 +77,15 @@ fn to_i24(x: &[f32]) -> Vec<i32> {
         .collect()
 }
 
-/// Encodes `pcm` in `fmt` (0: int16, 1: int24, 2: float).
+/// Encodes `pcm` in `fmt` (0: int16, 1: int24, 2: float; int24 without the float API).
 fn encode(enc: &mut Encoder, fmt: u32, pcm: &[f32], n: usize, out: &mut [u8]) -> Option<usize> {
     let r = match fmt {
         0 => enc.encode(&to_i16(pcm), n, out),
+        #[cfg(feature = "disable-float-api")]
+        _ => enc.encode24(&to_i24(pcm), n, out),
+        #[cfg(not(feature = "disable-float-api"))]
         1 => enc.encode24(&to_i24(pcm), n, out),
+        #[cfg(not(feature = "disable-float-api"))]
         _ => enc.encode_float(pcm, n, out),
     };
     r.ok()
@@ -133,10 +137,13 @@ fn decoder_max_gain() {
         for p in &packets {
             let mut a = [0i16; 1920];
             let mut b = [0i32; 1920];
-            let mut c = [0f32; 1920];
             assert_eq!(dec.decode(Some(p), &mut a, 960, false).unwrap(), 960);
             assert_eq!(dec.decode24(Some(p), &mut b, 960, false).unwrap(), 960);
-            assert_eq!(dec.decode_float(Some(p), &mut c, 960, false).unwrap(), 960);
+            #[cfg(not(feature = "disable-float-api"))]
+            {
+                let mut c = [0f32; 1920];
+                assert_eq!(dec.decode_float(Some(p), &mut c, 960, false).unwrap(), 960);
+            }
         }
     }
 }
@@ -248,10 +255,17 @@ fn random_public_api() {
                     let mut out = vec![0i16; max * dch];
                     dec.decode(data, &mut out, frame, fec).is_ok()
                 }
+                #[cfg(feature = "disable-float-api")]
+                _ => {
+                    let mut out = vec![0i32; max * dch];
+                    dec.decode24(data, &mut out, frame, fec).is_ok()
+                }
+                #[cfg(not(feature = "disable-float-api"))]
                 1 => {
                     let mut out = vec![0i32; max * dch];
                     dec.decode24(data, &mut out, frame, fec).is_ok()
                 }
+                #[cfg(not(feature = "disable-float-api"))]
                 _ => {
                     let mut out = vec![0f32; max * dch];
                     dec.decode_float(data, &mut out, frame, fec).is_ok()

@@ -364,6 +364,7 @@ unsafe fn custom_encode<T>(
 ///
 /// # Safety
 /// See [`custom_encode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_custom_encode_float(
     st: *mut OpusCustomEncoder,
@@ -545,6 +546,7 @@ unsafe fn custom_decode<T>(
 ///
 /// # Safety
 /// See [`custom_decode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_custom_decode_float(
     st: *mut OpusCustomDecoder,

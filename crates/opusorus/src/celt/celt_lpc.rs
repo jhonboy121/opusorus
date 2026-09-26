@@ -11,9 +11,11 @@ use crate::celt::arch::{
 };
 #[cfg(feature = "fixed-point")]
 use crate::celt::arch::{
-    OPUS_FAST_INT64, abs32, div32, int32, int64, min32, mult32_32_32, mult32_32_q16, pshr32,
-    qconst32, shr32, shr64,
+    OPUS_FAST_INT64, abs32, div32, min32, mult32_32_32, mult32_32_q16, pshr32, qconst32, shr32,
+    shr64,
 };
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-point-debug")))]
+use crate::celt::arch::{int32, int64};
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::arch::{mult32_32_q31, shr32};
 #[cfg(feature = "fixed-point")]
@@ -85,6 +87,10 @@ pub fn _celt_lpc_fast_int64<const FAST_INT64: bool>(
     p: usize,
 ) {
     let q31 = |a: i32, b: i32| -> i32 {
+        // FIXED_DEBUG: `MULT32_32_Q31` is always the checking 16-bit partial-product form.
+        #[cfg(feature = "fixed-point-debug")]
+        return crate::celt::arch::mult32_32_q31(a, b);
+        #[cfg(not(feature = "fixed-point-debug"))]
         if FAST_INT64 {
             int64::mult32_32_q31(a, b)
         } else {

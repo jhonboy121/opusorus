@@ -28,11 +28,18 @@
 //! `OPUS_FAST_INT64` selects the 64-bit or the 32-bit forms of the 32-bit multiplies per target
 //! ([`super::OPUS_FAST_INT64`]); both forms are available as [`int64`] / [`int32`] for tests.
 
-use super::{DB_SHIFT, OPUS_FAST_INT64};
+use super::DB_SHIFT;
+#[cfg(not(feature = "fixed-point-debug"))]
+use super::OPUS_FAST_INT64;
+// FIXED_DEBUG: `celt/fixed_debug.h` replaces the `fixed_generic.h` macros below that are
+// `#[cfg(not(feature = "fixed-point-debug"))]`; everything here then uses the checking ones.
+#[cfg(feature = "fixed-point-debug")]
+pub use super::fixed_debug::*;
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::mathops::float2int;
-#[cfg(not(feature = "fixed-res24"))]
+#[cfg(all(not(feature = "fixed-res24"), not(feature = "disable-float-api")))]
 use crate::celt::mathops::float2int16;
-#[cfg(feature = "fixed-res24")]
+#[cfg(all(feature = "fixed-res24", not(feature = "disable-float-api")))]
 use crate::celt::mathops::float2int24;
 
 /// `opus_val16`.
@@ -209,7 +216,7 @@ pub fn sig2res(a: CeltSig) -> OpusRes {
     sig2word16(a)
 }
 /// `RES2INT16`.
-#[cfg(feature = "fixed-res24")]
+#[cfg(all(feature = "fixed-res24", not(feature = "fixed-point-debug")))]
 #[inline(always)]
 #[must_use]
 pub const fn res2int16(a: OpusRes) -> i16 {
@@ -235,7 +242,7 @@ pub const fn res2int24(a: OpusRes) -> i32 {
 #[inline(always)]
 #[must_use]
 pub fn res2int24(a: OpusRes) -> i32 {
-    shl32(a, 8)
+    shl32(extend32(a), 8)
 }
 /// `RES2FLOAT` (C: `(1.f/32768.f/256.f)*(a)`).
 #[cfg(feature = "fixed-res24")]
@@ -256,7 +263,7 @@ pub const fn res2float(a: OpusRes) -> f32 {
 #[inline(always)]
 #[must_use]
 pub fn int16tores(a: i16) -> OpusRes {
-    shl32(a, RES_SHIFT)
+    shl32(extend32(a), RES_SHIFT)
 }
 /// `INT16TORES`.
 #[cfg(not(feature = "fixed-res24"))]
@@ -293,25 +300,28 @@ pub fn add_res(a: OpusRes, b: OpusRes) -> OpusRes {
 pub fn add_res(a: OpusRes, b: OpusRes) -> OpusRes {
     sat16(add32(a, b))
 }
-/// `FLOAT2RES` (`FLOAT2INT24`).
-#[cfg(feature = "fixed-res24")]
+/// `FLOAT2RES` (`FLOAT2INT24`; not with `DISABLE_FLOAT_API`, which removes `FLOAT2INT24`).
+#[cfg(all(feature = "fixed-res24", not(feature = "disable-float-api")))]
 #[inline(always)]
 #[must_use]
 pub fn float2res(a: f32) -> OpusRes {
     float2int24(a)
 }
-/// `FLOAT2RES` (`FLOAT2INT16`).
-#[cfg(not(feature = "fixed-res24"))]
+/// `FLOAT2RES` (`FLOAT2INT16`; not with `DISABLE_FLOAT_API`, which removes `FLOAT2INT16`).
+#[cfg(all(not(feature = "fixed-res24"), not(feature = "disable-float-api")))]
 #[inline(always)]
 #[must_use]
 pub fn float2res(a: f32) -> OpusRes {
     float2int16(a)
 }
-/// `RES2SIG`.
+/// `RES2SIG` (`SHL32((a), SIG_SHIFT-RES_SHIFT)`; 16-bit: `SHL32(EXTEND32(a), SIG_SHIFT)`).
 #[inline(always)]
 #[must_use]
 pub fn res2sig(a: OpusRes) -> CeltSig {
-    shl32(a, SIG_SHIFT - RES_SHIFT)
+    #[cfg(feature = "fixed-res24")]
+    return shl32(a, SIG_SHIFT - RES_SHIFT);
+    #[cfg(not(feature = "fixed-res24"))]
+    return shl32(extend32(a), SIG_SHIFT);
 }
 /// `MULT16_RES_Q15`: `MULT16_32_Q15` (res24) / `MULT16_16_Q15` (res16). Every C use assigns the
 /// result to an `opus_res`, so this returns that type (the implicit C narrowing included).
@@ -327,17 +337,19 @@ pub fn mult16_res_q15(a: impl Into<i32>, b: OpusRes) -> OpusRes {
         mult16_16_q15(a, b) as OpusRes
     }
 }
+const_unless_fixed_debug! {
 /// `RES2VAL16` (`RES2INT16`).
 #[inline(always)]
 #[must_use]
 pub const fn res2val16(a: OpusRes) -> OpusVal16 {
     res2int16(a)
 }
+}
 /// `INT16TOSIG` (`SHL32(EXTEND32(a), SIG_SHIFT)`).
 #[inline(always)]
 #[must_use]
 pub fn int16tosig(a: i16) -> CeltSig {
-    shl32(a, SIG_SHIFT)
+    shl32(extend32(a), SIG_SHIFT)
 }
 /// `INT24TOSIG` (`SHL32(a, SIG_SHIFT-8)`).
 #[inline(always)]
@@ -346,6 +358,7 @@ pub fn int24tosig(a: i32) -> CeltSig {
     shl32(a, SIG_SHIFT - 8)
 }
 /// `FLOAT2SIG` (`celt/float_cast.h`, fixed-point build; float API).
+#[cfg(not(feature = "disable-float-api"))]
 #[inline(always)]
 #[must_use]
 pub fn float2sig(mut x: f32) -> CeltSig {
@@ -416,7 +429,7 @@ pub fn mult_coef_taps(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     mult16_16_p15(a, b)
 }
 /// `COEF2VAL16` (`EXTRACT16(SHR32(x, 16))`).
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point-debug")))]
 #[inline(always)]
 #[must_use]
 pub const fn coef2val16(x: CeltCoef) -> OpusVal16 {
@@ -509,7 +522,41 @@ pub mod int64 {
 /// partial products. `MULT32_32_Q31`, `MULT32_32_P31(_ovflw)` and `MULT32_32_Q32` are *not*
 /// bit-identical to the [`int64`] forms.
 pub mod int32 {
-    use super::{add32, add32_ovflw, mult16_16, mult16_16su, mult16_16u, pshr, shl, shr, shr32};
+    #[cfg(feature = "fixed-point-debug")]
+    use self::generic::{add32, add32_ovflw, mult16_16, pshr, shl, shl32, shr, shr32};
+    #[cfg(not(feature = "fixed-point-debug"))]
+    use super::{add32, add32_ovflw, mult16_16, pshr, shl, shl32, shr, shr32};
+    use super::{mult16_16su, mult16_16u};
+
+    /// The `fixed_generic.h` helpers of these forms (with `fixed-point-debug` the crate's own
+    /// are the checking `fixed_debug.h` versions, which do not truncate `MULT16_16`'s operands).
+    #[cfg(feature = "fixed-point-debug")]
+    mod generic {
+        pub(super) fn add32(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
+            a.into() + b.into()
+        }
+        pub(super) fn add32_ovflw(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
+            a.into().wrapping_add(b.into())
+        }
+        pub(super) fn mult16_16(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
+            i32::from(a.into() as i16) * i32::from(b.into() as i16)
+        }
+        pub(super) fn shr(a: impl Into<i32>, shift: i32) -> i32 {
+            a.into() >> shift
+        }
+        pub(super) fn shr32(a: impl Into<i32>, shift: i32) -> i32 {
+            a.into() >> shift
+        }
+        pub(super) fn shl(a: impl Into<i32>, shift: i32) -> i32 {
+            ((a.into() as u32) << shift) as i32
+        }
+        pub(super) fn pshr(a: impl Into<i32>, shift: i32) -> i32 {
+            (a.into() + ((1i32 << shift) >> 1)) >> shift
+        }
+        pub(super) fn shl32(a: impl Into<i32>, shift: i32) -> i32 {
+            shl(a, shift)
+        }
+    }
 
     /// `MULT16_32_Q16`: `ADD32(MULT16_16((a),SHR((b),16)), SHR(MULT16_16SU((a),((b)&0x0000ffff)),
     /// 16))`.
@@ -559,7 +606,7 @@ pub mod int32 {
                 add32(lo as i32, mult16_16su(shr32(a, 16), b & 0x0000ffff)),
                 mult16_16su(shr32(b, 16), a & 0x0000ffff),
             ),
-            super::shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
+            shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
         )
     }
     /// [`mult32_32_q16`] for products that do not fit 32 bits after the shift: the partial
@@ -575,7 +622,7 @@ pub mod int32 {
                 add32_ovflw(lo as i32, mult16_16su(shr32(a, 16), b & 0x0000ffff)),
                 mult16_16su(shr32(b, 16), a & 0x0000ffff),
             ),
-            super::shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
+            shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
         )
     }
     /// `MULT32_32_Q31`: `ADD32(ADD32(SHL(MULT16_16(SHR((a),16),SHR((b),16)),1),
@@ -636,6 +683,7 @@ pub mod int32 {
     }
 }
 
+#[cfg(not(feature = "fixed-point-debug"))]
 macro_rules! fast_or_generic {
     ($($(#[$m:meta])* $name:ident),+ $(,)?) => {$(
         $(#[$m])*
@@ -646,6 +694,7 @@ macro_rules! fast_or_generic {
         }
     )+};
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 fast_or_generic!(
     /// `MULT16_32_Q16`: 16×32 multiplication, followed by a 16-bit shift right.
     mult16_32_q16,
@@ -694,54 +743,63 @@ pub const fn gconst(x: f64) -> CeltGlog {
     gconst2(x, DB_SHIFT)
 }
 
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `NEG16` (`-(x)`, an `int`).
 #[inline(always)]
 #[must_use]
 pub fn neg16(x: impl Into<i32>) -> i32 {
     -x.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `NEG32`.
 #[inline(always)]
 #[must_use]
 pub fn neg32(x: impl Into<i32>) -> i32 {
     -x.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `EXTRACT16`: `(opus_val16)(x)` (truncating, like C).
 #[inline(always)]
 #[must_use]
 pub fn extract16(x: impl Into<i32>) -> OpusVal16 {
     x.into() as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `EXTEND32`: `(opus_val32)(x)`.
 #[inline(always)]
 #[must_use]
 pub fn extend32(x: impl Into<i32>) -> OpusVal32 {
     x.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHR16`: `(a) >> (shift)` (an `int`).
 #[inline(always)]
 #[must_use]
 pub fn shr16(a: impl Into<i32>, shift: i32) -> i32 {
     a.into() >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHL16`: `(opus_int16)((opus_uint16)(a)<<(shift))`.
 #[inline(always)]
 #[must_use]
 pub fn shl16(a: impl Into<i32>, shift: i32) -> OpusVal16 {
     ((a.into() as u16 as i32) << shift) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHR32`: `(a) >> (shift)`.
 #[inline(always)]
 #[must_use]
 pub fn shr32(a: impl Into<i32>, shift: i32) -> i32 {
     a.into() >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHL32`: `(opus_int32)((opus_uint32)(a)<<(shift))`.
 #[inline(always)]
 #[must_use]
 pub fn shl32(a: impl Into<i32>, shift: i32) -> i32 {
     ((a.into() as u32) << shift) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `PSHR32`: 32-bit arithmetic shift right with rounding to nearest
 /// (`SHR32((a)+((EXTEND32(1)<<((shift))>>1)),shift)`).
 #[inline(always)]
@@ -749,6 +807,7 @@ pub fn shl32(a: impl Into<i32>, shift: i32) -> i32 {
 pub fn pshr32(a: impl Into<i32>, shift: i32) -> i32 {
     (a.into() + ((1i32 << shift) >> 1)) >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `VSHR32`: shift right by `shift`, or left by `-shift` when it is not positive.
 #[inline(always)]
 #[must_use]
@@ -759,12 +818,14 @@ pub fn vshr32(a: impl Into<i32>, shift: i32) -> i32 {
         shl32(a, -shift)
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHR64`: `(a) >> (shift)` on a 64-bit value.
 #[inline(always)]
 #[must_use]
 pub const fn shr64(a: i64, shift: i32) -> i64 {
     a >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHR` ("raw" macro; `(a) >> (shift)`).
 #[inline(always)]
 #[must_use]
@@ -783,6 +844,7 @@ pub fn shl(a: impl Into<i32>, shift: i32) -> i32 {
 pub fn pshr(a: impl Into<i32>, shift: i32) -> i32 {
     pshr32(a, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SATURATE(x,a)`: clamps `x` to `[-a, a]`.
 #[inline(always)]
 #[must_use]
@@ -796,114 +858,133 @@ pub fn saturate(x: impl Into<i32>, a: impl Into<i32>) -> i32 {
         x
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SATURATE16`: `EXTRACT16` of `x` clamped to `[-32768, 32767]`.
 #[inline(always)]
 #[must_use]
 pub fn saturate16(x: impl Into<i32>) -> OpusVal16 {
     sat16(x.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `ROUND16`: `EXTRACT16(PSHR32((x),(a)))`.
 #[inline(always)]
 #[must_use]
 pub fn round16(x: impl Into<i32>, a: i32) -> OpusVal16 {
     pshr32(x, a) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SROUND16`: `EXTRACT16(SATURATE(PSHR32(x,a), 32767))`.
 #[inline(always)]
 #[must_use]
 pub fn sround16(x: impl Into<i32>, a: i32) -> OpusVal16 {
     saturate(pshr32(x, a), 32767) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `HALF16`: `SHR16(x,1)`.
 #[inline(always)]
 #[must_use]
 pub fn half16(x: impl Into<i32>) -> i32 {
     shr16(x, 1)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `HALF32`: `SHR32(x,1)`.
 #[inline(always)]
 #[must_use]
 pub fn half32(x: impl Into<i32>) -> i32 {
     shr32(x, 1)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `ADD16`: `(opus_val16)((opus_val16)(a)+(opus_val16)(b))`.
 #[inline(always)]
 #[must_use]
 pub fn add16(a: impl Into<i32>, b: impl Into<i32>) -> OpusVal16 {
     (w16(a.into()) + w16(b.into())) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SUB16`: `(opus_val16)(a)-(opus_val16)(b)` (an `int`).
 #[inline(always)]
 #[must_use]
 pub fn sub16(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     w16(a.into()) - w16(b.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `ADD32`: `(opus_val32)(a)+(opus_val32)(b)`.
 #[inline(always)]
 #[must_use]
 pub fn add32(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     a.into() + b.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SUB32`: `(opus_val32)(a)-(opus_val32)(b)`.
 #[inline(always)]
 #[must_use]
 pub fn sub32(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     a.into() - b.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `ADD32_ovflw`: add ignoring overflow.
 #[inline(always)]
 #[must_use]
 pub fn add32_ovflw(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     a.into().wrapping_add(b.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SUB32_ovflw`: subtract ignoring overflow.
 #[inline(always)]
 #[must_use]
 pub fn sub32_ovflw(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     a.into().wrapping_sub(b.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `NEG32_ovflw`: negate ignoring overflow.
 #[inline(always)]
 #[must_use]
 pub fn neg32_ovflw(a: impl Into<i32>) -> i32 {
     a.into().wrapping_neg()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `SHL32_ovflw` (`SHL32`).
 #[inline(always)]
 #[must_use]
 pub fn shl32_ovflw(a: impl Into<i32>, shift: i32) -> i32 {
     shl32(a, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `PSHR32_ovflw`: `SHR32(ADD32_ovflw(a, (EXTEND32(1)<<(shift)>>1)),shift)`.
 #[inline(always)]
 #[must_use]
 pub fn pshr32_ovflw(a: impl Into<i32>, shift: i32) -> i32 {
     add32_ovflw(a, (1i32 << shift) >> 1) >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_16`: `((opus_val16)(a))*((opus_val16)(b))` (an `int`).
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_16(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     w16(a.into()) * w16(b.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT32_32_32`: `((opus_val32)(a))*((opus_val32)(b))`.
 #[inline(always)]
 #[must_use]
 pub fn mult32_32_32(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     a.into() * b.into()
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16`: `((opus_val32)(opus_val16)(a))*((opus_val32)(opus_val16)(b))`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     w16(a.into()) * w16(b.into())
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MAC16_16`: `ADD32((c),MULT16_16((a),(b)))`.
 #[inline(always)]
 #[must_use]
 pub fn mac16_16(c: impl Into<i32>, a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     add32(c, mult16_16(a, b))
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MAC16_32_Q15`: `ADD32((c),ADD32(MULT16_16((a),SHR((b),15)), SHR(MULT16_16((a),((b)&
 /// 0x00007fff)),15)))` (`b` must fit in 31 bits).
 #[inline(always)]
@@ -918,6 +999,7 @@ pub fn mac16_32_q15(c: impl Into<i32>, a: impl Into<i32>, b: impl Into<i32>) -> 
         ),
     )
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MAC16_32_Q16`: `ADD32((c),ADD32(MULT16_16((a),SHR((b),16)), SHR(MULT16_16SU((a),((b)&
 /// 0x0000ffff)),16)))`.
 #[inline(always)]
@@ -932,6 +1014,7 @@ pub fn mac16_32_q16(c: impl Into<i32>, a: impl Into<i32>, b: impl Into<i32>) -> 
         ),
     )
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_Q11_32`: `SHR(MULT16_16((a),(b)),11)`.
 #[inline(always)]
 #[must_use]
@@ -944,48 +1027,56 @@ pub fn mult16_16_q11_32(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
 pub fn mult16_16_q11(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(mult16_16(a, b), 11)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_Q13`: `SHR(MULT16_16((a),(b)),13)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_q13(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(mult16_16(a, b), 13)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_Q14`: `SHR(MULT16_16((a),(b)),14)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_q14(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(mult16_16(a, b), 14)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_Q15`: `SHR(MULT16_16((a),(b)),15)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_q15(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(mult16_16(a, b), 15)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_P13`: `SHR(ADD32(4096,MULT16_16((a),(b))),13)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_p13(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(add32(4096, mult16_16(a, b)), 13)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_P14`: `SHR(ADD32(8192,MULT16_16((a),(b))),14)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_p14(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(add32(8192, mult16_16(a, b)), 14)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `MULT16_16_P15`: `SHR(ADD32(16384,MULT16_16((a),(b))),15)`.
 #[inline(always)]
 #[must_use]
 pub fn mult16_16_p15(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
     shr(add32(16384, mult16_16(a, b)), 15)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `DIV32_16`: `(opus_val16)(((opus_val32)(a))/((opus_val16)(b)))`.
 #[inline(always)]
 #[must_use]
 pub fn div32_16(a: impl Into<i32>, b: impl Into<i32>) -> OpusVal16 {
     (a.into() / w16(b.into())) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `DIV32`: `((opus_val32)(a))/((opus_val32)(b))`.
 #[inline(always)]
 #[must_use]
@@ -999,5 +1090,5 @@ pub fn sig2word16(x: CeltSig) -> OpusVal16 {
     let mut x = pshr32(x, SIG_SHIFT);
     x = max32(x, -32768);
     x = min32(x, 32767);
-    x as i16
+    extract16(x)
 }

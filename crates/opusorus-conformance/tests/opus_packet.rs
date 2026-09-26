@@ -9,11 +9,14 @@
 
 use opusorus::extensions::{self, Extension, ExtensionIterator};
 use opusorus::mapping_matrix as mm;
+#[cfg(not(feature = "disable-float-api"))]
 use opusorus::mlp;
 use opusorus::multistream::{self, ChannelLayout};
 use opusorus::packet;
 use opusorus::repacketizer::{self, Repacketizer};
-use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq};
+#[cfg(not(feature = "disable-float-api"))]
+use opusorus_conformance::assert_bits_eq_f32;
+use opusorus_conformance::{Rng, assert_slice_eq};
 use opusorus_oracle::api;
 use opusorus_oracle::opus_packet::{self as c, Ext, IterOp, OpusRes};
 
@@ -414,6 +417,7 @@ fn encode_size_and_align() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn soft_clip() {
     let mut rng = Rng::new(0xc11f);
     for iter in 0..3000 {
@@ -998,6 +1002,13 @@ fn mapping_matrix_static_and_size() {
 
 /// Amplitude classes of the random mapping-matrix inputs (float build: the scale of a
 /// `[-1, 1)` value).
+#[cfg_attr(
+    all(feature = "fixed-point", feature = "disable-float-api"),
+    expect(
+        dead_code,
+        reason = "only scales the float-API inputs in fixed-point builds"
+    )
+)]
 const AMPS: [f32; 4] = [0.1, 1.0, 1.9, 200.0];
 
 /// Random `opus_res` sample of amplitude class `amp_idx` (index into [`AMPS`]).
@@ -1063,6 +1074,7 @@ fn mapping_matrix_multiply() {
         };
         let frame_size = rng.range_i32(0, 120) as usize;
         let amp_idx = rng.range_i32(0, 3) as usize;
+        #[cfg(not(feature = "disable-float-api"))]
         let amp = AMPS[amp_idx];
 
         // channel_in: input_rows <= cols, output_row < rows, output stride output_rows.
@@ -1070,30 +1082,33 @@ fn mapping_matrix_multiply() {
         let output_rows = rng.range_i32(1, rows as i32) as usize;
         let output_row = rng.range_i32(0, rows as i32 - 1) as usize;
         let olen = output_rows * frame_size.max(1);
-        let fin: Vec<f32> = (0..input_rows * frame_size)
-            .map(|_| amp * rng.f32_sym())
-            .collect();
-        let mut or = vec![OpusRes::default(); olen];
-        let mut oc = vec![OpusRes::default(); olen];
-        mm::mapping_matrix_multiply_channel_in_float(
-            &m,
-            &fin,
-            input_rows,
-            &mut or,
-            output_row,
-            output_rows,
-            frame_size,
-        );
-        c::mm_in_float(
-            cm,
-            &fin,
-            input_rows,
-            &mut oc,
-            output_row,
-            output_rows,
-            frame_size,
-        );
-        assert_res_eq("in_float", &or, &oc);
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            let fin: Vec<f32> = (0..input_rows * frame_size)
+                .map(|_| amp * rng.f32_sym())
+                .collect();
+            let mut or = vec![OpusRes::default(); olen];
+            let mut oc = vec![OpusRes::default(); olen];
+            mm::mapping_matrix_multiply_channel_in_float(
+                &m,
+                &fin,
+                input_rows,
+                &mut or,
+                output_row,
+                output_rows,
+                frame_size,
+            );
+            c::mm_in_float(
+                cm,
+                &fin,
+                input_rows,
+                &mut oc,
+                output_row,
+                output_rows,
+                frame_size,
+            );
+            assert_res_eq("in_float", &or, &oc);
+        }
 
         let sin: Vec<i16> = (0..input_rows * frame_size).map(|_| rng.i16()).collect();
         let mut or = vec![OpusRes::default(); olen];
@@ -1150,30 +1165,33 @@ fn mapping_matrix_multiply() {
         let output_rows = rng.range_i32(1, rows as i32) as usize;
         let ilen = input_rows * frame_size.max(1);
         let rin: Vec<OpusRes> = (0..ilen).map(|_| rand_res(&mut rng, amp_idx)).collect();
-        let init: Vec<f32> = (0..output_rows * frame_size)
-            .map(|_| rng.f32_sym())
-            .collect();
-        let mut or = init.clone();
-        let mut oc = init;
-        mm::mapping_matrix_multiply_channel_out_float(
-            &m,
-            &rin,
-            input_row,
-            input_rows,
-            &mut or,
-            output_rows,
-            frame_size,
-        );
-        c::mm_out_float(
-            cm,
-            &rin,
-            input_row,
-            input_rows,
-            &mut oc,
-            output_rows,
-            frame_size,
-        );
-        assert_bits_eq_f32("out_float", &or, &oc);
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            let init: Vec<f32> = (0..output_rows * frame_size)
+                .map(|_| rng.f32_sym())
+                .collect();
+            let mut or = init.clone();
+            let mut oc = init;
+            mm::mapping_matrix_multiply_channel_out_float(
+                &m,
+                &rin,
+                input_row,
+                input_rows,
+                &mut or,
+                output_rows,
+                frame_size,
+            );
+            c::mm_out_float(
+                cm,
+                &rin,
+                input_row,
+                input_rows,
+                &mut oc,
+                output_rows,
+                frame_size,
+            );
+            assert_bits_eq_f32("out_float", &or, &oc);
+        }
 
         let init: Vec<i16> = (0..output_rows * frame_size)
             .map(|_| {
@@ -1256,6 +1274,7 @@ fn mapping_matrix_static_multiply() {
         let (rows, cols) = (rows as usize, cols as usize);
         let frame_size = [120, 480, 960][rng.range_i32(0, 2) as usize];
         let amp_idx = rng.range_i32(0, 3) as usize;
+        #[cfg(not(feature = "disable-float-api"))]
         let fin: Vec<f32> = (0..cols * frame_size)
             .map(|_| AMPS[amp_idx] * rng.f32_sym())
             .collect();
@@ -1271,11 +1290,14 @@ fn mapping_matrix_static_multiply() {
         for row in 0..rows {
             let mut or = vec![OpusRes::default(); rows * frame_size];
             let mut oc = or.clone();
-            mm::mapping_matrix_multiply_channel_in_float(
-                &m, &fin, cols, &mut or, row, rows, frame_size,
-            );
-            c::mm_in_float(cm, &fin, cols, &mut oc, row, rows, frame_size);
-            assert_res_eq("static in_float", &or, &oc);
+            #[cfg(not(feature = "disable-float-api"))]
+            {
+                mm::mapping_matrix_multiply_channel_in_float(
+                    &m, &fin, cols, &mut or, row, rows, frame_size,
+                );
+                c::mm_in_float(cm, &fin, cols, &mut oc, row, rows, frame_size);
+                assert_res_eq("static in_float", &or, &oc);
+            }
             mm::mapping_matrix_multiply_channel_in_short(
                 &m, &sin, cols, &mut or, row, rows, frame_size,
             );
@@ -1290,17 +1312,22 @@ fn mapping_matrix_static_multiply() {
         let rin: Vec<OpusRes> = (0..cols * frame_size)
             .map(|_| rand_res(&mut rng, amp_idx))
             .collect();
+        #[cfg(not(feature = "disable-float-api"))]
         let mut ofr = vec![0.0f32; rows * frame_size];
+        #[cfg(not(feature = "disable-float-api"))]
         let mut ofc = ofr.clone();
         let mut osr = vec![0i16; rows * frame_size];
         let mut osc = osr.clone();
         let mut oir = vec![0i32; rows * frame_size];
         let mut oic = oir.clone();
         for col in 0..cols {
-            mm::mapping_matrix_multiply_channel_out_float(
-                &m, &rin, col, cols, &mut ofr, rows, frame_size,
-            );
-            c::mm_out_float(cm, &rin, col, cols, &mut ofc, rows, frame_size);
+            #[cfg(not(feature = "disable-float-api"))]
+            {
+                mm::mapping_matrix_multiply_channel_out_float(
+                    &m, &rin, col, cols, &mut ofr, rows, frame_size,
+                );
+                c::mm_out_float(cm, &rin, col, cols, &mut ofc, rows, frame_size);
+            }
             mm::mapping_matrix_multiply_channel_out_short(
                 &m, &rin, col, cols, &mut osr, rows, frame_size,
             );
@@ -1310,6 +1337,7 @@ fn mapping_matrix_static_multiply() {
             );
             c::mm_out_int24(cm, &rin, col, cols, &mut oic, rows, frame_size);
         }
+        #[cfg(not(feature = "disable-float-api"))]
         assert_bits_eq_f32("static out_float", &ofr, &ofc);
         assert_slice_eq("static out_short", &osr, &osc);
         assert_slice_eq("static out_int24", &oir, &oic);
@@ -1319,6 +1347,7 @@ fn mapping_matrix_static_multiply() {
 // ------------------------------------------------------------------------------- mlp.c
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn mlp_activations() {
     let mut rng = Rng::new(0x71a5);
     let mut xs: Vec<f32> = vec![
@@ -1359,11 +1388,13 @@ fn mlp_activations() {
     }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 fn rand_i8s(rng: &mut Rng, n: usize) -> Vec<i8> {
     (0..n).map(|_| rng.next_u32() as i8).collect()
 }
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn mlp_layers() {
     let mut rng = Rng::new(0x6e0);
     for _ in 0..3000 {
@@ -1413,6 +1444,7 @@ fn mlp_layers() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn mlp_builtin_layers() {
     let mut rng = Rng::new(0xb1);
     let mut state_r = [0.0f32; 24];

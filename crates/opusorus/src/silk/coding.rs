@@ -38,16 +38,20 @@ const MNSB: usize = MAX_NB_SHELL_BLOCKS as usize;
 // code_signs.c
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// `silk_enc_map` (silk/code_signs.c): shifting avoids if-statement.
 #[inline(always)]
 const fn silk_enc_map(a: i32) -> i32 {
     silk_rshift(a, 15) + 1
 }
+}
 
+const_unless_fixed_debug! {
 /// `silk_dec_map` (silk/code_signs.c).
 #[inline(always)]
 const fn silk_dec_map(a: i32) -> i32 {
     silk_lshift(a, 1) - 1
+}
 }
 
 /// Port of silk/code_signs.c:silk_encode_signs — encodes signs of excitation.

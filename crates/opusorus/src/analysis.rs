@@ -14,7 +14,9 @@
 //! * the downmix callbacks [`downmix_float`], [`downmix_int`], [`downmix_int24`] and
 //!   [`is_digital_silence`] from `src/opus_encoder.c`, which the Opus encoder reuses.
 //!
-//! The whole file is `#ifndef DISABLE_FLOAT_API` in C; the float build always has it.
+//! The whole file is `#ifndef DISABLE_FLOAT_API` in C (and `mlp.c` / `mlp_data.c` are not
+//! built): with the `disable-float-api` feature only [`AnalysisInfo`], [`DownmixFunc`],
+//! `downmix_int`, `downmix_int24` and [`is_digital_silence`] (from `src/opus_encoder.c`) remain.
 //!
 //! The C `downmix_func` callback takes an untyped `const void *` PCM buffer. In Rust it is
 //! [`DownmixFunc<T>`], generic over the PCM sample type, and [`run_analysis`] is generic over
@@ -25,48 +27,66 @@
     reason = "index arithmetic mirrors C across several arrays"
 )]
 
-use crate::celt::arch::{
-    OpusRes, OpusVal32, float2sig, half32, imax, imin, int16tosig, int24tosig, max16, max32, min16,
-    min32, mult16_32_q15, qconst16,
-};
-#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{OpusRes, OpusVal32, int16tosig, int24tosig};
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
 use crate::celt::arch::{OpusVal16, SIG_SHIFT, shr64};
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::arch::{abs16, celt_isnan};
+#[cfg(not(feature = "disable-float-api"))]
+use crate::celt::arch::{
+    float2sig, half32, imax, imin, max16, max32, min16, min32, mult16_32_q15, qconst16,
+};
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::kiss_fft::opus_fft;
-#[cfg(feature = "fixed-point")]
+use crate::celt::mathops::celt_maxabs_res;
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
 use crate::celt::mathops::celt_maxabs32;
-use crate::celt::mathops::{PI, celt_maxabs_res, fast_atan2f, float2int};
+#[cfg(not(feature = "disable-float-api"))]
+use crate::celt::mathops::{PI, fast_atan2f, float2int};
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::static_modes::{CeltMode, KissFftCpx, KissFftScalar};
+#[cfg(not(feature = "disable-float-api"))]
 use crate::math;
+#[cfg(not(feature = "disable-float-api"))]
 use crate::mlp::{
     LAYER0, LAYER1, LAYER2, MAX_NEURONS, analysis_compute_dense, analysis_compute_gru,
 };
 
+#[cfg(not(feature = "disable-float-api"))]
 pub use crate::celt::celt::LEAK_BANDS;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `NB_FRAMES`.
 pub const NB_FRAMES: usize = 8;
+#[cfg(not(feature = "disable-float-api"))]
 /// `NB_TBANDS`.
 pub const NB_TBANDS: usize = 18;
+#[cfg(not(feature = "disable-float-api"))]
 /// `ANALYSIS_BUF_SIZE`: 30 ms at 24 kHz.
 pub const ANALYSIS_BUF_SIZE: usize = 720;
+#[cfg(not(feature = "disable-float-api"))]
 /// `ANALYSIS_COUNT_MAX`: at that point we can stop counting frames because it no longer matters.
 pub const ANALYSIS_COUNT_MAX: i32 = 10000;
+#[cfg(not(feature = "disable-float-api"))]
 /// `DETECT_SIZE`.
 pub const DETECT_SIZE: usize = 100;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `TRANSITION_PENALTY`.
 const TRANSITION_PENALTY: i32 = 10;
+#[cfg(not(feature = "disable-float-api"))]
 /// `NB_TONAL_SKIP_BANDS`.
 const NB_TONAL_SKIP_BANDS: usize = 9;
+#[cfg(not(feature = "disable-float-api"))]
 /// `LEAKAGE_OFFSET`.
 const LEAKAGE_OFFSET: f32 = 2.5;
+#[cfg(not(feature = "disable-float-api"))]
 /// `LEAKAGE_SLOPE`.
 const LEAKAGE_SLOPE: f32 = 2.0;
 
 pub use crate::celt::celt::AnalysisInfo;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `ABS16` on a float in a fixed-point build: the `fixed_generic.h` ternary
 /// `((x) < 0 ? (-(x)) : (x))` (keeps the sign of `-0.0`, unlike `fabsf`).
 #[cfg(feature = "fixed-point")]
@@ -75,6 +95,7 @@ const fn abs16(x: f32) -> f32 {
     if x < 0.0 { -x } else { x }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `(float)x` of an `opus_val32` / `kiss_fft_scalar` (identity in the float build).
 #[cfg(not(feature = "fixed-point"))]
 #[inline(always)]
@@ -82,6 +103,7 @@ const fn to_float(x: f32) -> f32 {
     x
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `(float)x` of an `opus_val32` / `kiss_fft_scalar` (`i32` in fixed-point builds).
 #[cfg(feature = "fixed-point")]
 #[inline(always)]
@@ -89,6 +111,7 @@ const fn to_float(x: i32) -> f32 {
     x as f32
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `(kiss_fft_scalar)(w*x)`: windowed FFT input sample.
 #[cfg(not(feature = "fixed-point"))]
 #[inline(always)]
@@ -96,6 +119,7 @@ const fn windowed(w: f32, x: OpusVal32) -> KissFftScalar {
     w * x
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `(kiss_fft_scalar)(w*x)`: windowed FFT input sample (float product truncated to `i32`).
 #[cfg(feature = "fixed-point")]
 #[inline(always)]
@@ -108,6 +132,7 @@ const fn windowed(w: f32, x: OpusVal32) -> KissFftScalar {
 /// into `y` (see [`downmix_float`]).
 pub type DownmixFunc<T> = fn(&[T], &mut [OpusVal32], i32, i32, i32, i32, i32);
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `TonalityAnalysisState` (src/analysis.h).
 ///
 /// Field names follow C in snake case (`E` → `e`, `logE` → `log_e`, `Etracker` → `e_tracker`,
@@ -149,6 +174,7 @@ pub struct TonalityAnalysisState {
     pub info: [AnalysisInfo; DETECT_SIZE],
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 impl TonalityAnalysisState {
     /// Creates a state initialized with [`tonality_analysis_init`].
     #[must_use]
@@ -191,6 +217,7 @@ impl TonalityAnalysisState {
     }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 #[rustfmt::skip]
 static DCT_TABLE: [f32; 128] = [
     0.250000, 0.250000, 0.250000, 0.250000, 0.250000, 0.250000, 0.250000, 0.250000,
@@ -211,6 +238,7 @@ static DCT_TABLE: [f32; 128] = [
     0.224292, 0.311806,-0.102631,-0.351851,-0.034654, 0.338330, 0.166664,-0.273300,
 ];
 
+#[cfg(not(feature = "disable-float-api"))]
 #[rustfmt::skip]
 static ANALYSIS_WINDOW: [f32; 240] = [
     0.000043, 0.000171, 0.000385, 0.000685, 0.001071, 0.001541, 0.002098, 0.002739,
@@ -245,17 +273,21 @@ static ANALYSIS_WINDOW: [f32; 240] = [
     0.997902, 0.998459, 0.998929, 0.999315, 0.999615, 0.999829, 0.999957, 1.000000,
 ];
 
+#[cfg(not(feature = "disable-float-api"))]
 static TBANDS: [i32; NB_TBANDS + 1] = [
     4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 136, 160, 192, 240,
 ];
 
+#[cfg(not(feature = "disable-float-api"))]
 static STD_FEATURE_BIAS: [f32; 9] = [
     5.684947, 3.475288, 1.770634, 1.599784, 3.773215, 2.163313, 1.260756, 1.116868, 1.918795,
 ];
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Maximum `subframe` handled by [`downmix_and_resample`] (20 ms at 48 kHz).
 const MAX_DOWNMIX: usize = 960;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `SCALE_ENER` (float build): `(1.f/32768/32768)*e`.
 #[cfg(not(feature = "fixed-point"))]
 #[inline(always)]
@@ -263,11 +295,13 @@ const fn scale_ener(e: f32) -> f32 {
     (1.0f32 / 32768.0 / 32768.0) * e
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `SCALE_COMPENS` (fixed-point build): the input is ±2^15 shifted up by `SIG_SHIFT`, so the
 /// energy is compensated for that.
 #[cfg(feature = "fixed-point")]
 const SCALE_COMPENS: f32 = 1.0f32 / (1i32 << (15 + SIG_SHIFT)) as f32;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `SCALE_ENER` (fixed-point build): `(SCALE_COMPENS*SCALE_COMPENS)*(e)`.
 #[cfg(feature = "fixed-point")]
 #[inline(always)]
@@ -275,6 +309,7 @@ const fn scale_ener(e: f32) -> f32 {
     (SCALE_COMPENS * SCALE_COMPENS) * e
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/opus_encoder.c:downmix_float. `x` is interleaved float PCM (±1.0 full scale).
 ///
 /// In fixed-point builds `FLOAT2SIG` converts (and clamps) each sample to `celt_sig`, and the
@@ -391,7 +426,7 @@ pub fn is_digital_silence(pcm: &[OpusRes], frame_size: i32, channels: i32, lsb_d
 
 /// Port of src/analysis.c:is_digital_silence32 (fixed-point build): true when every sample of
 /// the `opus_val32` buffer is zero.
-#[cfg(feature = "fixed-point")]
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
 #[must_use]
 fn is_digital_silence32(pcm: &[OpusVal32], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
     // MLP_TRAINING: not ported (training-only instrumentation).
@@ -407,19 +442,24 @@ fn is_digital_silence32(pcm: &[OpusVal32], frame_size: i32, channels: i32, lsb_d
     is_digital_silence(pcm, frame_size, channels, lsb_depth)
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `QCONST16(0.6074371f, 15)`: first all-pass coefficient of [`silk_resampler_down2_hp`].
 #[cfg(feature = "fixed-point")]
 const DOWN2_COEF0: OpusVal16 = qconst16(0.6074371f32 as f64, 15);
+#[cfg(not(feature = "disable-float-api"))]
 /// `QCONST16(0.15063f, 15)`: second all-pass coefficient of [`silk_resampler_down2_hp`].
 #[cfg(feature = "fixed-point")]
 const DOWN2_COEF1: OpusVal16 = qconst16(0.15063f32 as f64, 15);
+#[cfg(not(feature = "disable-float-api"))]
 /// `QCONST16(0.6074371f, 15)` (float build: the value itself).
 #[cfg(not(feature = "fixed-point"))]
 const DOWN2_COEF0: f32 = qconst16(0.6074371, 15);
+#[cfg(not(feature = "disable-float-api"))]
 /// `QCONST16(0.15063f, 15)` (float build: the value itself).
 #[cfg(not(feature = "fixed-point"))]
 const DOWN2_COEF1: f32 = qconst16(0.15063, 15);
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:silk_resampler_down2_hp: 2x downsampler that also returns the energy
 /// of the high-pass (upper half-band) signal. `s` is the 3-value state, `out` receives
 /// `in_len/2` samples. In fixed-point builds the energy is accumulated in 64 bits (each term
@@ -488,6 +528,7 @@ pub fn silk_resampler_down2_hp(
     hp_ener
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:downmix_and_resample: downmixes `subframe` samples (at the 24 kHz
 /// analysis rate) starting at `offset` of `x` with `downmix`, resamples to 24 kHz into `y`,
 /// and returns the (scaled) high-band energy at 48 kHz (0 otherwise).
@@ -553,6 +594,7 @@ pub fn downmix_and_resample<T>(
     ret
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:tonality_analysis_init.
 pub fn tonality_analysis_init(tonal: &mut TonalityAnalysisState, fs: i32) {
     // Initialize reusable fields.
@@ -561,6 +603,7 @@ pub fn tonality_analysis_init(tonal: &mut TonalityAnalysisState, fs: i32) {
     tonality_analysis_reset(tonal);
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:tonality_analysis_reset: clears every field from `angle` onward.
 pub fn tonality_analysis_reset(tonal: &mut TonalityAnalysisState) {
     // Clear non-reusable fields.
@@ -595,6 +638,7 @@ pub fn tonality_analysis_reset(tonal: &mut TonalityAnalysisState) {
     tonal.info = [AnalysisInfo::default(); DETECT_SIZE];
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:tonality_get_info: fills `info_out` with the analysis for the next
 /// `len` samples and advances the read position.
 pub fn tonality_get_info(tonal: &mut TonalityAnalysisState, info_out: &mut AnalysisInfo, len: i32) {
@@ -748,6 +792,7 @@ pub fn tonality_get_info(tonal: &mut TonalityAnalysisState, info_out: &mut Analy
     info_out.music_prob_max = prob_max;
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:tonality_analysis: consumes `len` samples (at `tonal.fs`) of `x`
 /// starting at sample `offset`, and runs one analysis step each time 20 ms (at 24 kHz) have
 /// been buffered.
@@ -770,12 +815,14 @@ pub fn tonality_analysis<T>(
     tonality_analysis_impl(tonal, celt_mode, len, offset, lsb_depth, &mut resample);
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `downmix_and_resample(downmix, x, y, s, subframe, offset, c1, c2, C, Fs)` with the
 /// input-type dependent arguments (`downmix`, `x`, `c1`, `c2`, `C`) bound:
 /// `(y, s, subframe, offset, Fs)`.
 type DownmixResampleFn<'a> =
     &'a mut dyn FnMut(&mut [OpusVal32], &mut [OpusVal32; 3], i32, i32, i32) -> OpusVal32;
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Body of [`tonality_analysis`]. Size: only the input downmix depends on the sample type, so
 /// it is passed as a type-erased closure instead of monomorphizing the analysis per type.
 #[expect(clippy::too_many_lines, reason = "mirrors the C function")]
@@ -1286,6 +1333,7 @@ fn tonality_analysis_impl(
     info.valid = 1;
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Port of src/analysis.c:run_analysis: analyses the new samples of `analysis_pcm` (if any)
 /// and returns in `analysis_info` the analysis for the `frame_size` samples being encoded.
 ///

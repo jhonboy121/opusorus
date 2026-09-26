@@ -12,7 +12,9 @@
 
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::arch::abs16;
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::arch::{max16, min16};
+#[cfg(not(feature = "disable-float-api"))]
 use crate::celt::mathops::opus_limit2_checkwithin1;
 use crate::{Bandwidth, Error, Result};
 
@@ -495,6 +497,9 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket<'_>>
 ///
 /// `pcm` holds `frame_size * channels` interleaved samples. Like libopus with NULL pointers,
 /// the call does nothing if `frame_size` or `channels` is zero or a buffer is too short.
+///
+/// Not available with the `disable-float-api` feature (libopus `DISABLE_FLOAT_API`).
+#[cfg(not(feature = "disable-float-api"))]
 pub fn pcm_soft_clip(pcm: &mut [f32], frame_size: usize, channels: usize, declip_mem: &mut [f32]) {
     let n = frame_size.min(i32::MAX as usize) as i32;
     let c = channels.min(i32::MAX as usize) as i32;
@@ -503,7 +508,7 @@ pub fn pcm_soft_clip(pcm: &mut [f32], frame_size: usize, channels: usize, declip
 
 /// `ABS16` on a float in the fixed-point build (the float API is kept there): the
 /// `arch.h` ternary `((x) < 0 ? (-(x)) : (x))` instead of the float build's `fabs`.
-#[cfg(feature = "fixed-point")]
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
 #[inline(always)]
 const fn abs16(x: f32) -> f32 {
     if x < 0.0 { -x } else { x }
@@ -513,6 +518,8 @@ const fn abs16(x: f32) -> f32 {
 ///
 /// `x` holds `n * c` interleaved samples; `declip_mem` at least `c` values. Returns without
 /// doing anything when `c < 1`, `n < 1` or a buffer is too short (C: NULL pointer).
+/// Not with `DISABLE_FLOAT_API`.
+#[cfg(not(feature = "disable-float-api"))]
 #[expect(
     clippy::many_single_char_names,
     reason = "names mirror the C implementation"

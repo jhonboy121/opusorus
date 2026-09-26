@@ -3592,6 +3592,7 @@ impl CeltEncoder {
         };
         bits -= anti_collapse_rsv;
         let mut signal_bandwidth = end - 1;
+        #[cfg(not(feature = "disable-float-api"))]
         if st.analysis.valid != 0 {
             let min_bandwidth = if equiv_rate < 32000 * c {
                 13
@@ -4010,7 +4011,8 @@ impl CeltEncoder {
 
     /// Port of celt/celt_encoder.c:opus_custom_encode_float: encodes float PCM (converted with
     /// `FLOAT2RES` in the fixed-point build). Returns the packet size or a negative error code.
-    #[cfg(feature = "fixed-point")]
+    /// Not with `DISABLE_FLOAT_API`.
+    #[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
     pub fn opus_custom_encode_float(
         &mut self,
         pcm: &[f32],

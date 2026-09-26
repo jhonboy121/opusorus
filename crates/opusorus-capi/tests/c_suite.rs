@@ -70,6 +70,14 @@ fn config() -> (Vec<&'static str>, String) {
         features.push("custom-modes");
         name.push_str("-custom");
     }
+    if cfg!(feature = "disable-float-api") {
+        features.push("disable-float-api");
+        name.push_str("-nofloatapi");
+    }
+    if cfg!(feature = "fixed-point-debug") {
+        features.push("fixed-point-debug");
+        name.push_str("-debug");
+    }
     for (on, feature) in [
         (cfg!(feature = "deep-plc"), "deep-plc"),
         (cfg!(feature = "dred"), "dred"),
@@ -196,6 +204,9 @@ fn config_defines() -> Vec<&'static str> {
     }
     if cfg!(feature = "custom-modes") {
         d.push("-DCUSTOM_MODES");
+    }
+    if cfg!(feature = "disable-float-api") {
+        d.push("-DDISABLE_FLOAT_API");
     }
     // As upstream's config.h: dred and osce also enable the deep PLC.
     if dnn() {

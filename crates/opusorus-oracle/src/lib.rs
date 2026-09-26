@@ -17,8 +17,13 @@ pub mod foundation;
 pub mod fixed_foundation;
 #[cfg(feature = "fixed-point")]
 pub mod silk_encoder_fix;
+// `FIXED_DEBUG` oracle only (`csrc/fixed_debug.c`).
+#[cfg(feature = "fixed-point-debug")]
+pub mod fixed_debug;
 
 // Units whose shims compile in both oracles (`// oracle-build: any`).
+// (`// oracle-requires: float-api`: not in a `DISABLE_FLOAT_API` oracle.)
+#[cfg(not(feature = "disable-float-api"))]
 pub mod analysis;
 pub mod celt_bands;
 pub mod celt_decoder;

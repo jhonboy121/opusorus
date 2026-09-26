@@ -107,6 +107,7 @@ impl Encoder {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_encode_float`.
     pub fn encode_float(
         &mut self,
@@ -207,6 +208,7 @@ impl Decoder {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_decode_float`.
     pub fn decode_float(
         &mut self,
@@ -322,6 +324,7 @@ pub fn packet_has_lbrr(data: &[u8]) -> OResult<usize> {
     // SAFETY: buffer valid for len.
     check(unsafe { sys::opus_packet_has_lbrr(data.as_ptr(), data.len() as i32) })
 }
+#[cfg(not(feature = "disable-float-api"))]
 /// `opus_pcm_soft_clip`.
 pub fn pcm_soft_clip(pcm: &mut [f32], frame_size: usize, channels: usize, mem: &mut [f32]) {
     assert!(pcm.len() >= frame_size * channels && mem.len() >= channels);
@@ -526,6 +529,7 @@ impl MsEncoder {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_multistream_encode_float`.
     pub fn encode_float(
         &mut self,
@@ -649,6 +653,7 @@ impl MsDecoder {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_multistream_decode_float`.
     pub fn decode_float(
         &mut self,
@@ -725,6 +730,21 @@ impl ProjectionEncoder {
             )
         })
     }
+    /// `opus_projection_encode24`.
+    pub fn encode24(&mut self, pcm: &[i32], frame_size: usize, out: &mut [u8]) -> OResult<usize> {
+        assert!(pcm.len() >= frame_size * self.channels);
+        // SAFETY: buffers valid.
+        check(unsafe {
+            sys::opus_projection_encode24(
+                self.ptr.as_ptr(),
+                pcm.as_ptr(),
+                frame_size as c_int,
+                out.as_mut_ptr(),
+                out.len() as i32,
+            )
+        })
+    }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_projection_encode_float`.
     pub fn encode_float(
         &mut self,
@@ -822,6 +842,7 @@ impl ProjectionDecoder {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_projection_decode_float`.
     pub fn decode_float(
         &mut self,

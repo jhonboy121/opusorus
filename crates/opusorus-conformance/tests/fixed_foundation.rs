@@ -328,17 +328,23 @@ fn res_and_sig_conversions_match_oracle() {
             "RES2FLOAT({x}) case {i}"
         );
         let f = rng.f32_sym() * 1.5;
-        assert_eq!(
-            w(a::float2res(f)),
-            i64::from(c::float2res(f)),
-            "FLOAT2RES({f})"
-        );
         let g = rng.f32_sym() * 3.0;
-        assert_eq!(
-            w(a::float2sig(g)),
-            i64::from(c::float2sig(g)),
-            "FLOAT2SIG({g})"
-        );
+        // DISABLE_FLOAT_API: FLOAT2RES / FLOAT2SIG are compiled out.
+        #[cfg(feature = "disable-float-api")]
+        let _ = (f, g);
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            assert_eq!(
+                w(a::float2res(f)),
+                i64::from(c::float2res(f)),
+                "FLOAT2RES({f})"
+            );
+            assert_eq!(
+                w(a::float2sig(g)),
+                i64::from(c::float2sig(g)),
+                "FLOAT2SIG({g})"
+            );
+        }
     }
 }
 
@@ -729,7 +735,9 @@ fn multiply_forms_match_oracle() {
     // the 64-bit forms.
     assert_eq!(c::constants()[14] != 0, a::OPUS_FAST_INT64);
     for (k, &(name, op, f)) in int64.iter().enumerate() {
-        if !a::OPUS_FAST_INT64 {
+        // FIXED_DEBUG: the oracle's macros are the `celt/fixed_debug.h` forms (compared with
+        // the port's in `two_argument_macros_match_oracle`), not the 64-bit release forms.
+        if !a::OPUS_FAST_INT64 || cfg!(feature = "fixed-point-debug") {
             break;
         }
         check2(
@@ -776,12 +784,15 @@ fn multiply_forms_match_oracle() {
         }
     }
     // The 16x32 forms and MULT32_32_Q16 are exact rewrites; the other 32x32 ones drop partial
-    // products.
+    // products. (FIXED_DEBUG: `c::op2` are the `fixed_debug.h` macros, which do not truncate
+    // operands to 16 bits, so the comparison does not apply.)
+    #[cfg(not(feature = "fixed-point-debug"))]
     assert_eq!(
         &differs[..4],
         &[0, 0, 0, 0],
         "16x32 and MULT32_32_Q16 forms must be identical"
     );
+    #[cfg(not(feature = "fixed-point-debug"))]
     assert!(
         differs[4] > 0,
         "MULT32_32_Q31 forms are expected to differ sometimes"
@@ -1123,12 +1134,18 @@ fn float_api_matches_oracle() {
         let big = rng.f32_sym() * 70000.0;
         assert_eq!(m::float2int(big), c::float2int(big), "float2int({big})");
         let s = rng.f32_sym() * 1.2;
-        assert_eq!(
-            i32::from(m::float2int16(s)),
-            c::float2int16(s),
-            "FLOAT2INT16({s})"
-        );
-        assert_eq!(m::float2int24(s), c::float2int24(s), "FLOAT2INT24({s})");
+        // DISABLE_FLOAT_API: FLOAT2INT16 / FLOAT2INT24 are compiled out.
+        #[cfg(feature = "disable-float-api")]
+        let _ = s;
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            assert_eq!(
+                i32::from(m::float2int16(s)),
+                c::float2int16(s),
+                "FLOAT2INT16({s})"
+            );
+            assert_eq!(m::float2int24(s), c::float2int24(s), "FLOAT2INT24({s})");
+        }
         let (y, x) = (rng.f32_sym(), rng.f32_sym());
         assert_eq!(
             m::fast_atan2f(y, x).to_bits(),
@@ -1148,6 +1165,8 @@ fn float_api_matches_oracle() {
         let h = k as f32 + 0.5;
         assert_eq!(m::float2int(h), c::float2int(h), "float2int tie {h}");
     }
+    // DISABLE_FLOAT_API: celt_float2int16 / opus_limit2_checkwithin1 are compiled out.
+    #[cfg(not(feature = "disable-float-api"))]
     for _ in 0..200 {
         let n = rng.range_i32(0, 300) as usize;
         let x: Vec<f32> = (0..n).map(|_| rng.f32_sym() * 2.5).collect();

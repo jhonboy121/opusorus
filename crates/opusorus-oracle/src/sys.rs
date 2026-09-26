@@ -87,6 +87,7 @@ unsafe extern "C" {
         data: *mut c_uchar,
         max_data_bytes: opus_int32,
     ) -> opus_int32;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_encode_float(
         st: *mut OpusEncoder,
         pcm: *const f32,
@@ -121,6 +122,7 @@ unsafe extern "C" {
         frame_size: c_int,
         decode_fec: c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_decode_float(
         st: *mut OpusDecoder,
         data: *const c_uchar,
@@ -156,6 +158,7 @@ unsafe extern "C" {
         fs: opus_int32,
     ) -> c_int;
     pub fn opus_packet_has_lbrr(packet: *const c_uchar, len: opus_int32) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_pcm_soft_clip(
         pcm: *mut f32,
         frame_size: c_int,
@@ -239,6 +242,7 @@ unsafe extern "C" {
         data: *mut c_uchar,
         max_data_bytes: opus_int32,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_multistream_encode_float(
         st: *mut OpusMSEncoder,
         pcm: *const f32,
@@ -273,6 +277,7 @@ unsafe extern "C" {
         frame_size: c_int,
         decode_fec: c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_multistream_decode_float(
         st: *mut OpusMSDecoder,
         data: *const c_uchar,
@@ -312,6 +317,7 @@ unsafe extern "C" {
         data: *mut c_uchar,
         max_data_bytes: opus_int32,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_projection_encode_float(
         st: *mut OpusProjectionEncoder,
         pcm: *const f32,
@@ -355,6 +361,7 @@ unsafe extern "C" {
         frame_size: c_int,
         decode_fec: c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_projection_decode_float(
         st: *mut OpusProjectionDecoder,
         data: *const c_uchar,

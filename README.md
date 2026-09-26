@@ -27,6 +27,8 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
 | OSCE training data dump (`clean_hp.s16`, `features_*`, `noisy_16k.s16` in the working directory) | `osce-training-data` | upstream `--enable-osce-training-data` (implies `osce`); `opus_demo -silk_random_switching` |
 | Generative packet loss model (`opusorus::lossgen`, `opus_demo -sim_loss`, `lossgen_demo`) | `lossgen` | upstream `--enable-lossgen`; model compiled in; float or fixed-point |
 | Fixed-point build (16- or 24-bit resolution) | `fixed-point`, `fixed-res24` | upstream `--enable-fixed-point` (+ `ENABLE_RES24`), see [docs/FIXED_POINT.md](docs/FIXED_POINT.md) |
+| No float API (no `*_float` entry points, no soft clip, no float tonality analysis in the encoder) | `disable-float-api` | upstream `--disable-float-api` (`DISABLE_FLOAT_API`); requires `fixed-point`, as upstream's float build does not compile with it |
+| Checking fixed-point arithmetic: every macro checks its operand ranges, reports libopus' diagnostic (stderr or a handler) and counts operations | `fixed-point-debug` | upstream `--enable-fixed-point-debug` (`FIXED_DEBUG`); implies `fixed-point`; debugging only (slow) |
 | `std` platform libm (bit-exact with C on the same platform) | `std` (default) | without it: pure-Rust `libm`, `no_std` |
 
 > **`fixed-point` / `fixed-res24` are NOT additive.** They *replace* the float implementation

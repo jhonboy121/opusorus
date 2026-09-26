@@ -62,6 +62,7 @@ const LTPO: usize = LTP_ORDER as usize;
 const MLPC: usize = MAX_LPC_ORDER as usize;
 const MFL: usize = MAX_FRAME_LENGTH as usize;
 
+const_unless_fixed_debug! {
 /// Port of silk/PLC.c:silk_PLC_Reset.
 pub const fn silk_plc_reset(ps_dec: &mut SilkDecoderState) {
     ps_dec.s_plc.pitch_l_q8 = silk_lshift(ps_dec.frame_length, 8 - 1);
@@ -69,6 +70,7 @@ pub const fn silk_plc_reset(ps_dec: &mut SilkDecoderState) {
     ps_dec.s_plc.prev_gain_q16[1] = silk_fix_const(1.0, 16);
     ps_dec.s_plc.subfr_length = 20;
     ps_dec.s_plc.nb_subfr = 2;
+}
 }
 
 /// Port of silk/PLC.c:silk_PLC: PLC control function. With `lost != 0`, generates a

@@ -286,8 +286,9 @@ fn silk_gain_assert() {
     assert!(enc.encode(&pcm2, 960, &mut data).unwrap() > 0);
 }
 
-/// Port of `analysis_overflow`.
+/// Port of `analysis_overflow` (`#ifndef DISABLE_FLOAT_API` upstream).
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn analysis_overflow() {
     let mut data = [0u8; 200];
     let pcm = arr(ANALYSIS_OVERFLOW_PCM);
@@ -297,8 +298,9 @@ fn analysis_overflow() {
     assert!(len > 0 && len <= 200);
 }
 
-/// Port of `projection_overflow2`.
+/// Port of `projection_overflow2` (`#ifndef DISABLE_FLOAT_API` upstream).
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn projection_overflow2() {
     let mut data = [0u8; 480];
     let pcm = arr(PROJECTION_OVERFLOW2_PCM);
@@ -308,8 +310,9 @@ fn projection_overflow2() {
     assert!(len > 0 && len <= 480);
 }
 
-/// Port of `projection_overflow3`.
+/// Port of `projection_overflow3` (`#ifndef DISABLE_FLOAT_API` upstream).
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn projection_overflow3() {
     let mut data = [0u8; 500];
     let mut enc = ProjectionEncoder::new_ambisonics(24000, 4, 3, Application::Audio).unwrap();

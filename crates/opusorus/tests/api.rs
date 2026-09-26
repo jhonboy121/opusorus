@@ -110,6 +110,7 @@ fn strerror() {
 #[test]
 fn dec_api() {
     let mut sbuf = [0i16; 960 * 2];
+    #[cfg(not(feature = "disable-float-api"))]
     let mut fbuf = [0f32; 960 * 2];
     let mut packet = [0u8; 1276];
 
@@ -294,6 +295,7 @@ fn dec_api() {
         dec.decode(Some(&packet[..3]), &mut sbuf, 960, false),
         Ok(960)
     );
+    #[cfg(not(feature = "disable-float-api"))]
     assert_eq!(
         dec.decode_float(Some(&packet[..3]), &mut fbuf, 960, false),
         Ok(960)
@@ -309,6 +311,7 @@ fn dec_api() {
 #[test]
 fn msdec_api() {
     let mut sbuf = [0i16; 960 * 2];
+    #[cfg(not(feature = "disable-float-api"))]
     let mut fbuf = [0f32; 960 * 2];
     let mut packet = [0u8; 1276];
     let mut mapping = [0u8; 256];
@@ -462,6 +465,7 @@ fn msdec_api() {
         dec.decode(Some(&packet[..3]), &mut sbuf, 960, false),
         Ok(960)
     );
+    #[cfg(not(feature = "disable-float-api"))]
     assert_eq!(
         dec.decode_float(Some(&packet[..3]), &mut fbuf, 960, false),
         Ok(960)
@@ -780,6 +784,7 @@ fn check_setget(enc: &mut Encoder, set: i32, get: i32, bad: [i32; 2], good: [i32
 fn enc_api() {
     let mut packet = [0u8; 1276];
     let sbuf = [0i16; 960 * 2];
+    #[cfg(not(feature = "disable-float-api"))]
     let fbuf = [0f32; 960 * 2];
 
     for c in 0..4 {
@@ -1042,8 +1047,11 @@ fn enc_api() {
     let len = packet.len();
     let i = enc.encode(&sbuf, 960, &mut packet).unwrap();
     assert!((1..=len).contains(&i));
-    let i = enc.encode_float(&fbuf, 960, &mut packet).unwrap();
-    assert!((1..=len).contains(&i));
+    #[cfg(not(feature = "disable-float-api"))]
+    {
+        let i = enc.encode_float(&fbuf, 960, &mut packet).unwrap();
+        assert!((1..=len).contains(&i));
+    }
     let ibuf = [0i32; 960 * 2];
     let i = enc.encode24(&ibuf, 960, &mut packet).unwrap();
     assert!((1..=len).contains(&i));

@@ -317,9 +317,17 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn oracle_ce_opus_destroy(st: *mut c_void);
     fn oracle_ce_opus_ctl(st: *mut c_void, request: c_int, value: c_int) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_ce_opus_encode_float(
         st: *mut c_void,
         pcm: *const f32,
+        frame_size: c_int,
+        out: *mut u8,
+        max_bytes: c_int,
+    ) -> c_int;
+    fn oracle_ce_opus_encode(
+        st: *mut c_void,
+        pcm: *const i16,
         frame_size: c_int,
         out: *mut u8,
         max_bytes: c_int,
@@ -377,6 +385,7 @@ unsafe extern "C" {
         out: *mut u8,
         nb: c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_ce_custom_encode_float(
         h: *mut CeHandle,
         pcm: *const f32,
@@ -754,6 +763,7 @@ impl CeltEnc {
         unsafe { oracle_ce_custom_encode24(self.h, pcm.as_ptr(), frame_size, out.as_mut_ptr(), nb) }
     }
 
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_custom_encode_float` (custom-modes oracle).
     pub fn custom_encode_float(
         &mut self,
@@ -811,6 +821,7 @@ impl OpusRec {
         unsafe { oracle_ce_opus_ctl(self.st, request, value) }
     }
 
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_encode_float`, returning the packet length (or error) and the recorded CELT calls.
     pub fn encode_float(
         &mut self,
@@ -829,7 +840,29 @@ impl OpusRec {
                 out.len() as c_int,
             )
         };
-        // SAFETY: reads the thread-local record list filled by the call above.
+        (ret, Self::take_calls())
+    }
+
+    /// `opus_encode` (16-bit input), returning the packet length (or error) and the recorded
+    /// CELT calls.
+    pub fn encode(&mut self, pcm: &[i16], frame_size: i32, out: &mut [u8]) -> (i32, Vec<CeltCall>) {
+        assert!(pcm.len() >= self.channels * frame_size.max(0) as usize);
+        // SAFETY: lengths checked above; st is live.
+        let ret = unsafe {
+            oracle_ce_opus_encode(
+                self.st,
+                pcm.as_ptr(),
+                frame_size,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        (ret, Self::take_calls())
+    }
+
+    /// The CELT calls recorded by the last encode (the records are freed).
+    fn take_calls() -> Vec<CeltCall> {
+        // SAFETY: reads the thread-local record list filled by the encode call.
         let n = unsafe { oracle_ce_rec_count() };
         let mut calls = Vec::with_capacity(n as usize);
         for i in 0..n {
@@ -872,7 +905,7 @@ impl OpusRec {
         }
         // SAFETY: frees the records copied above.
         unsafe { oracle_ce_rec_clear() };
-        (ret, calls)
+        calls
     }
 }
 

@@ -34,12 +34,16 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::analysis::{DownmixFunc, downmix_float, downmix_int, downmix_int24};
+#[cfg(not(feature = "disable-float-api"))]
+use crate::analysis::downmix_float;
+use crate::analysis::{DownmixFunc, downmix_int, downmix_int24};
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::arch::celt_isnan;
+#[cfg(not(feature = "disable-float-api"))]
+use crate::celt::arch::float2res;
 use crate::celt::arch::{
-    CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, extend32, float2res, half16, imax,
-    imin, int16tores, int24tores, max32, maxg, min32,
+    CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, half16, imax, imin, int16tores,
+    int24tores, max32, maxg, min32,
 };
 #[cfg(feature = "fixed-point")]
 use crate::celt::arch::{DB_SHIFT, gconst, mult16_32_q15, qconst32, shl32, shr32, vshr32};
@@ -515,16 +519,16 @@ fn surround_analysis(
         }
         if pos[c] == 1 {
             for i in 0..21 {
-                mask_log_e[0][i] = extend32(log_sum(mask_log_e[0][i], ble[i]));
+                mask_log_e[0][i] = CeltGlog::from(log_sum(mask_log_e[0][i], ble[i]));
             }
         } else if pos[c] == 3 {
             for i in 0..21 {
-                mask_log_e[2][i] = extend32(log_sum(mask_log_e[2][i], ble[i]));
+                mask_log_e[2][i] = CeltGlog::from(log_sum(mask_log_e[2][i], ble[i]));
             }
         } else if pos[c] == 2 {
             for i in 0..21 {
-                mask_log_e[0][i] = extend32(log_sum(mask_log_e[0][i], ble[i] - glog(0.5)));
-                mask_log_e[2][i] = extend32(log_sum(mask_log_e[2][i], ble[i] - glog(0.5)));
+                mask_log_e[0][i] = CeltGlog::from(log_sum(mask_log_e[0][i], ble[i] - glog(0.5)));
+                mask_log_e[2][i] = CeltGlog::from(log_sum(mask_log_e[2][i], ble[i] - glog(0.5)));
             }
         }
         mem[c * ov..(c + 1) * ov].copy_from_slice(&input[fsz..fsz + ov]);
@@ -539,7 +543,8 @@ fn surround_analysis(
     let channel_offset: OpusVal16 = half16(celt_log2(2.0f32 / (channels - 1) as f32));
     for m in &mut mask_log_e {
         for v in m.iter_mut() {
-            *v += extend32(channel_offset);
+            // C: implicit `opus_val16` to `celt_glog` conversion (no `EXTEND32`).
+            *v += CeltGlog::from(channel_offset);
         }
     }
     for c in 0..channels as usize {
@@ -575,6 +580,7 @@ const fn glog(x: f32) -> CeltGlog {
 /// # Errors
 /// [`Error::BadArg`] if the mode cannot be created or a buffer is too short.
 #[doc(hidden)]
+#[cfg(not(feature = "disable-float-api"))]
 pub fn surround_analysis_float(
     pcm: &[f32],
     band_log_e: &mut [CeltGlog],
@@ -721,6 +727,7 @@ fn usize_to_i32(v: usize) -> Result<i32> {
 }
 
 /// Port of src/opus_multistream_encoder.c:opus_copy_channel_in_float.
+#[cfg(not(feature = "disable-float-api"))]
 fn opus_copy_channel_in_float(
     dst: &mut [OpusRes],
     dst_stride: usize,
@@ -1498,10 +1505,12 @@ impl MsEncoder {
     }
 
     /// Port of src/opus_multistream_encoder.c:opus_multistream_encode_float: encodes a frame
-    /// of float PCM. Otherwise as [`MsEncoder::encode`].
+    /// of float PCM. Otherwise as [`MsEncoder::encode`]. Not available with the
+    /// `disable-float-api` feature (libopus `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`MsEncoder::encode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn encode_float(
         &mut self,
         pcm: &[f32],

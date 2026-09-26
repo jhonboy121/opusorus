@@ -25,6 +25,7 @@ unsafe extern "C" {
         padding_off: *mut c_int,
         padding_len: *mut c_int,
     ) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_pk_soft_clip_impl(x: *mut f32, n: c_int, c: c_int, mem: *mut f32);
 
     fn oracle_ext_generate(
@@ -132,6 +133,7 @@ unsafe extern "C" {
         cap: c_int,
     ) -> c_int;
 
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_mlp_dense(
         bias: *const i8,
         weights: *const i8,
@@ -141,6 +143,7 @@ unsafe extern "C" {
         output: *mut f32,
         input: *const f32,
     );
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_mlp_gru(
         bias: *const i8,
         weights: *const i8,
@@ -150,8 +153,11 @@ unsafe extern "C" {
         state: *mut f32,
         input: *const f32,
     );
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_mlp_builtin(which: c_int, out_or_state: *mut f32, input: *const f32);
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_mlp_tansig(x: f32) -> f32;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_mlp_sigmoid(x: f32) -> f32;
 
     fn oracle_ms_validate_layout(
@@ -237,6 +243,7 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<Parsed, i32> {
     })
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `opus_pcm_soft_clip_impl` (arch 0).
 pub fn soft_clip_impl(x: &mut [f32], n: i32, c: i32, mem: &mut [f32]) {
     assert!(n < 1 || c < 1 || (x.len() >= (n * c) as usize && mem.len() >= c as usize));
@@ -615,6 +622,7 @@ fn mm_call<I, O>(
     }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `mapping_matrix_multiply_channel_in_float`.
 pub fn mm_in_float(
     m: Mm<'_>,
@@ -639,6 +647,7 @@ pub fn mm_in_float(
     );
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `mapping_matrix_multiply_channel_out_float`.
 pub fn mm_out_float(
     m: Mm<'_>,
@@ -761,6 +770,7 @@ pub fn mm_out_int24(
 
 // ------------------------------------------------------------------------------- mlp.c
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `analysis_compute_dense` on a custom layer.
 pub fn mlp_dense(
     bias: &[i8],
@@ -787,6 +797,7 @@ pub fn mlp_dense(
     }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `analysis_compute_gru` on a custom layer (`nb_neurons <= 32`).
 pub fn mlp_gru(
     bias: &[i8],
@@ -815,6 +826,7 @@ pub fn mlp_gru(
     }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// Built-in analysis layers: 0 = `layer0` (25 -> 32), 1 = `layer1` GRU (32 in, 24 state),
 /// 2 = `layer2` (24 -> 2).
 pub fn mlp_builtin(which: i32, out_or_state: &mut [f32], input: &[f32]) {
@@ -828,12 +840,14 @@ pub fn mlp_builtin(which: i32, out_or_state: &mut [f32], input: &[f32]) {
     unsafe { oracle_mlp_builtin(which, out_or_state.as_mut_ptr(), input.as_ptr()) }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `tansig_approx` (static in mlp.c).
 pub fn mlp_tansig(x: f32) -> f32 {
     // SAFETY: pure function.
     unsafe { oracle_mlp_tansig(x) }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `sigmoid_approx` (static in mlp.c).
 pub fn mlp_sigmoid(x: f32) -> f32 {
     // SAFETY: pure function.

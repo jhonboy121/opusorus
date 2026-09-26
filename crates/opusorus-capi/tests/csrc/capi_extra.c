@@ -447,11 +447,15 @@ static void test_bad_frame_size_range(void)
          passthrough = 0;
 #endif
       } else {
+#ifndef DISABLE_FLOAT_API
          ret = opus_encode_float(enc, pcmf, 17, packet, MAXP);
 #ifdef FIXED_POINT
          passthrough = 0;
 #else
          passthrough = 1;
+#endif
+#else
+         break; /* no opus_encode_float without the float API */
 #endif
       }
       CHECK(ret == OPUS_BAD_ARG);

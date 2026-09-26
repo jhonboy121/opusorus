@@ -138,6 +138,7 @@ pub unsafe extern "C" fn opus_decode24(
 ///
 /// # Safety
 /// As [`opus_decode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_decode_float(
     st: *mut OpusDecoder,

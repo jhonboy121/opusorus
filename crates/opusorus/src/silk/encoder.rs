@@ -820,12 +820,14 @@ impl Default for SilkEncoder {
 fn res2int16_sum(a: OpusRes, b: OpusRes) -> i32 {
     res2int16(a + b) as i32
 }
+const_unless_fixed_debug! {
 /// `RES2INT16( a + b )` of the stereo-to-mono downmix in `silk_Encode`: `opus_res` is
 /// `opus_int32` (24-bit resolution), the sum is an `int`.
 #[cfg(feature = "fixed-res24")]
 #[inline(always)]
 const fn res2int16_sum(a: OpusRes, b: OpusRes) -> i32 {
     res2int16(a + b) as i32
+}
 }
 /// `RES2INT16( a + b )` of the stereo-to-mono downmix in `silk_Encode`: `opus_res` is
 /// `opus_int16`, so the sum is an `int` and `RES2INT16` is the identity.
@@ -1230,6 +1232,7 @@ pub fn silk_setup_complexity(
     ret
 }
 
+const_unless_fixed_debug! {
 /// Port of the static inline `silk/control_codec.c:silk_setup_LBRR` — set LBRR usage.
 pub const fn silk_setup_lbrr(
     ps_enc_c: &mut crate::silk::structs::SilkEncoderState,
@@ -1253,4 +1256,5 @@ pub const fn silk_setup_lbrr(
     }
 
     ret
+}
 }

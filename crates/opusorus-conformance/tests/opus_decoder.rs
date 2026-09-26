@@ -91,6 +91,15 @@ enum Fmt {
     F32,
 }
 
+/// The output format actually decoded: with `disable-float-api` (no float API in libopus nor
+/// the port) the float cases decode 24-bit output instead.
+const fn fmt_used(f: Fmt) -> Fmt {
+    match f {
+        Fmt::F32 if cfg!(feature = "disable-float-api") => Fmt::I24,
+        f => f,
+    }
+}
+
 const fn rand_fmt(rng: &mut Rng) -> Fmt {
     pick(rng, &[Fmt::I16, Fmt::I16, Fmt::I24, Fmt::F32, Fmt::F32])
 }
@@ -227,7 +236,7 @@ impl Pair {
     fn step(&mut self, data: Option<&[u8]>, frame_size: i32, fec: i32, fmt: Fmt, what: &str) {
         let before = self.r.snapshot();
         let n = frame_size.max(1) as usize * self.ch + 3;
-        let ret = match fmt {
+        let ret = match fmt_used(fmt) {
             Fmt::I16 => {
                 let mut a = vec![0x5A5Au16 as i16; n];
                 let mut b = a.clone();
@@ -252,6 +261,7 @@ impl Pair {
                 }
                 cr
             }
+            #[cfg(not(feature = "disable-float-api"))]
             Fmt::F32 => {
                 let mut a = vec![1234.5f32; n];
                 let mut b = a.clone();
@@ -270,6 +280,8 @@ impl Pair {
                 }
                 cr
             }
+            #[cfg(feature = "disable-float-api")]
+            Fmt::F32 => unreachable!("float output is decoded as 24-bit (fmt_used)"),
         };
         self.check(what);
         let after = self.r.snapshot();
@@ -1168,14 +1180,25 @@ fn ctl_requests() {
     let mut d = Decoder::new(48000, 2).unwrap();
     let mut cd = c::Dec::new(48000, 2).unwrap();
     for pkt in &packets {
-        let mut a = vec![0f32; 1920];
-        let mut b = vec![0f32; 1920];
-        assert_eq!(d.decode_float(Some(pkt), &mut a, 960, false), Ok(960));
-        assert_eq!(cd.decode_float(Some(pkt), &mut b, 960, 0), Ok(960));
-        assert_eq!(
-            a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-        );
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            let mut a = vec![0f32; 1920];
+            let mut b = vec![0f32; 1920];
+            assert_eq!(d.decode_float(Some(pkt), &mut a, 960, false), Ok(960));
+            assert_eq!(cd.decode_float(Some(pkt), &mut b, 960, 0), Ok(960));
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+        #[cfg(feature = "disable-float-api")]
+        {
+            let mut a = vec![0i32; 1920];
+            let mut b = vec![0i32; 1920];
+            assert_eq!(d.decode24(Some(pkt), &mut a, 960, false), Ok(960));
+            assert_eq!(cd.decode24(Some(pkt), &mut b, 960, 0), Ok(960));
+            assert_eq!(a, b);
+        }
         assert_eq!(d.nb_samples(pkt), Ok(960));
         assert_eq!(d.last_packet_duration(), 960);
         assert!(d.bandwidth().is_some());
@@ -1251,7 +1274,7 @@ impl MsPair {
     #[track_caller]
     fn step(&mut self, data: Option<&[u8]>, frame_size: i32, fec: i32, fmt: Fmt, what: &str) {
         let n = frame_size.clamp(1, 11520) as usize * self.ch + 5;
-        match fmt {
+        match fmt_used(fmt) {
             Fmt::I16 => {
                 let mut a = vec![0x5A5Au16 as i16; n];
                 let mut b = a.clone();
@@ -1272,6 +1295,7 @@ impl MsPair {
                 assert_eq!(rr, cr, "{what}: ms decode24 return");
                 assert!(a == b, "{what}: ms decode24 pcm");
             }
+            #[cfg(not(feature = "disable-float-api"))]
             Fmt::F32 => {
                 let mut a = vec![1234.5f32; n];
                 let mut b = a.clone();
@@ -1285,6 +1309,8 @@ impl MsPair {
                     "{what}: ms decode_float pcm"
                 );
             }
+            #[cfg(feature = "disable-float-api")]
+            Fmt::F32 => unreachable!("float output is decoded as 24-bit (fmt_used)"),
         }
         self.check(what);
     }
@@ -1515,11 +1541,8 @@ fn multistream_api_errors() {
         MsDecoder::new(48000, 3, 2, 1, &[0, 1]).map(drop),
         Err(Error::BadArg)
     );
-    let mut small = vec![0f32; 10];
-    assert_eq!(
-        r.decode_float(None, &mut small, 960, false),
-        Err(Error::BadArg)
-    );
+    let mut small = vec![0i32; 10];
+    assert_eq!(r.decode24(None, &mut small, 960, false), Err(Error::BadArg));
     assert_eq!(r.channels(), 3);
     assert_eq!(r.streams(), 2);
     assert_eq!(r.coupled_streams(), 1);
@@ -1581,7 +1604,7 @@ fn projection_decode() {
                     _ => (Some(pkt), max_fs, 0),
                 };
                 let n = fsz as usize * ch + 3;
-                match fmt {
+                match fmt_used(fmt) {
                     Fmt::I16 => {
                         let (mut a, mut b) = (vec![7i16; n], vec![7i16; n]);
                         assert_eq!(
@@ -1600,6 +1623,7 @@ fn projection_decode() {
                         );
                         assert!(a == b, "{what}: pcm24");
                     }
+                    #[cfg(not(feature = "disable-float-api"))]
                     Fmt::F32 => {
                         let (mut a, mut b) = (vec![7f32; n], vec![7f32; n]);
                         assert_eq!(
@@ -1612,6 +1636,8 @@ fn projection_decode() {
                             "{what}: pcm float"
                         );
                     }
+                    #[cfg(feature = "disable-float-api")]
+                    Fmt::F32 => unreachable!("float output is decoded as 24-bit (fmt_used)"),
                 }
                 for st in 0..streams {
                     assert_state(

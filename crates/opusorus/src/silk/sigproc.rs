@@ -31,6 +31,7 @@ use crate::silk::tables::{SILK_TRANSITION_LP_A_Q28, SILK_TRANSITION_LP_B_Q28};
 // lin2log.c / log2lin.c / sigm_Q15.c
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// Port of silk/lin2log.c:silk_lin2log — approximation of `128 * log2()` (very close inverse
 /// of [`silk_log2lin`]).
 #[must_use]
@@ -43,7 +44,9 @@ pub const fn silk_lin2log(in_lin: i32) -> i32 {
         7,
     )
 }
+}
 
+const_unless_fixed_debug! {
 /// Port of silk/log2lin.c:silk_log2lin — approximation of `2^()` (very close inverse of
 /// [`silk_lin2log`]).
 #[must_use]
@@ -75,6 +78,7 @@ pub const fn silk_log2lin(in_log_q7: i32) -> i32 {
     }
     out
 }
+}
 
 /// `sigm_LUT_slope_Q10` (silk/sigm_Q15.c).
 const SIGM_LUT_SLOPE_Q10: [i32; 6] = [237, 153, 73, 30, 12, 7];
@@ -83,6 +87,7 @@ const SIGM_LUT_POS_Q15: [i32; 6] = [16384, 23955, 28861, 31213, 32178, 32548];
 /// `sigm_LUT_neg_Q15` (silk/sigm_Q15.c).
 const SIGM_LUT_NEG_Q15: [i32; 6] = [16384, 8812, 3906, 1554, 589, 219];
 
+const_unless_fixed_debug! {
 /// Port of silk/sigm_Q15.c:silk_sigm_Q15 — approximate sigmoid function.
 #[must_use]
 pub const fn silk_sigm_q15(mut in_q5: i32) -> i32 {
@@ -104,6 +109,7 @@ pub const fn silk_sigm_q15(mut in_q5: i32) -> i32 {
         let ind = silk_rshift(in_q5, 5) as usize;
         SIGM_LUT_POS_Q15[ind] + silk_smulbb(SIGM_LUT_SLOPE_Q10[ind], in_q5 & 0x1F)
     }
+}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -362,6 +368,7 @@ pub fn silk_interpolate(xi: &mut [i16], x0: &[i16], x1: &[i16], ifact_q2: i32, d
 // biquad_alt.c
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// Negated and split AR coefficients `(A0_L, A0_U, A1_L, A1_U)` shared by the biquads.
 #[inline(always)]
 const fn biquad_split_a(a_q28: &[i32]) -> (i32, i32, i32, i32) {
@@ -372,7 +379,9 @@ const fn biquad_split_a(a_q28: &[i32]) -> (i32, i32, i32, i32) {
         silk_rshift(-a_q28[1], 14), // upper part
     )
 }
+}
 
+const_unless_fixed_debug! {
 /// One sample of `silk_biquad_alt_stride1` (DIRECT FORM II TRANSPOSED); returns the output.
 #[inline(always)]
 const fn biquad_alt_step(
@@ -394,6 +403,7 @@ const fn biquad_alt_step(
 
     // Scale back to Q0 and saturate
     silk_sat16(silk_rshift(out32_q14 + (1 << 14) - 1, 14)) as i16
+}
 }
 
 /// Port of silk/biquad_alt.c:silk_biquad_alt_stride1 — second order ARMA filter, alternative
@@ -623,10 +633,12 @@ const A_LIMIT: i32 = silk_fix_const(0.99975, QA);
 const INV_MAX_PRED_GAIN_Q30: i32 =
     (((1.0f32 / MAX_PREDICTION_POWER_GAIN) * (1i64 << 30) as f32) as f64 + 0.5) as i32;
 
+const_unless_fixed_debug! {
 /// `MUL32_FRAC_Q` (silk/LPC_inv_pred_gain.c).
 #[inline(always)]
 const fn mul32_frac_q(a32: i32, b32: i32, q: i32) -> i32 {
     silk_rshift_round64(silk_smull(a32, b32), q) as i32
+}
 }
 
 /// Port of silk/LPC_inv_pred_gain.c:LPC_inverse_pred_gain_QA_c (static helper).

@@ -12,6 +12,8 @@
 
 #[cfg(feature = "fixed-point")]
 mod fixed;
+#[cfg(feature = "fixed-point-debug")]
+mod fixed_debug;
 #[cfg(not(feature = "fixed-point"))]
 mod float;
 
@@ -59,13 +61,17 @@ pub const fn imax(a: i32, b: i32) -> i32 {
 pub const fn imul32(a: i32, b: i32) -> i32 {
     a * b
 }
-/// `UADD32` (`(a)+(b)` on unsigned operands: wraps).
+/// `UADD32` (`(a)+(b)` on unsigned operands: wraps). The checking `celt/fixed_debug.h`
+/// version replaces it with `fixed-point-debug`.
+#[cfg(not(feature = "fixed-point-debug"))]
 #[inline(always)]
 #[must_use]
 pub const fn uadd32(a: u32, b: u32) -> u32 {
     a.wrapping_add(b)
 }
-/// `USUB32` (`(a)-(b)` on unsigned operands: wraps).
+/// `USUB32` (`(a)-(b)` on unsigned operands: wraps). The checking `celt/fixed_debug.h`
+/// version replaces it with `fixed-point-debug`.
+#[cfg(not(feature = "fixed-point-debug"))]
 #[inline(always)]
 #[must_use]
 pub const fn usub32(a: u32, b: u32) -> u32 {

@@ -138,6 +138,7 @@ opus_val16 oracle_oe_log_sum(celt_glog a, celt_glog b) { return logSum(a, b); }
 
 void oracle_oe_channel_pos(int channels, int *pos) { channel_pos(channels, pos); }
 
+#ifndef DISABLE_FLOAT_API
 static void oe_copy_in_float(opus_res *dst, int dst_stride, const void *src, int src_stride,
                              int src_channel, int frame_size, void *user_data) {
   const float *s = (const float *)src;
@@ -155,6 +156,7 @@ void oracle_oe_surround_analysis(const float *pcm, celt_glog *band_log_e, opus_v
   oracle_oe_dup_surround_analysis(m, pcm, band_log_e, mem, preemph_mem, len, m->overlap,
                                   channels, rate, oe_copy_in_float, 0);
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------ */
 /* Private Opus encoder with state dumps                                                        */
@@ -167,10 +169,12 @@ void oracle_oe_destroy(OpusEncoder *st) { oracle_oe_dup_opus_encoder_destroy(st)
 int oracle_oe_ctl_set(OpusEncoder *st, int request, int value) {
   return oracle_oe_dup_opus_encoder_ctl(st, request, (opus_int32)value);
 }
+#ifndef DISABLE_FLOAT_API
 int oracle_oe_encode_float(OpusEncoder *st, const float *pcm, int frame_size, unsigned char *out,
                            int max_bytes) {
   return oracle_oe_dup_opus_encode_float(st, pcm, frame_size, out, max_bytes);
 }
+#endif
 int oracle_oe_encode(OpusEncoder *st, const opus_int16 *pcm, int frame_size, unsigned char *out,
                      int max_bytes) {
   return oracle_oe_dup_opus_encode(st, pcm, frame_size, out, max_bytes);
@@ -236,7 +240,11 @@ int oracle_oe_dump(const OpusEncoder *st, opus_uint32 *v, opus_res *delay) {
   F(st->width_mem.YY);
   F(st->width_mem.smoothed_width);
   F(st->width_mem.max_follower);
+#ifndef DISABLE_FLOAT_API
   I(st->detected_bandwidth);
+#else
+  I(0); /* no detected_bandwidth without the float API */
+#endif
   I(st->nb_no_activity_ms_Q1);
   F(st->peak_signal_energy);
   I(st->nonfinal_frame);

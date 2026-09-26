@@ -14,8 +14,10 @@ use crate::celt::arch::{
     mult16_16, mult16_16_q14, mult16_16_q15, mult16_32_q15, mult32_32_q31, pshr32, qconst16,
     qconst32, res2sig, shl16, shl32, shr16, shr32, sround16, sub32,
 };
+#[cfg(not(feature = "disable-float-api"))]
+use crate::celt::celt::LEAK_BANDS;
 use crate::celt::celt::comb_filter;
-use crate::celt::celt::{AnalysisInfo, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD, LEAK_BANDS};
+use crate::celt::celt::{AnalysisInfo, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::entcode::BITRES;
 use crate::celt::mathops::{
     celt_exp2_db, celt_ilog2, celt_log2, celt_maxabs16, celt_maxabs32, celt_sqrt, frac_div32_q29,
@@ -430,6 +432,9 @@ pub fn alloc_trim_analysis(
         )) as i16;
     trim = (i32::from(trim) - shr16(surround_trim, DB_SHIFT - 8)) as i16;
     trim = (i32::from(trim) - 2 * shr16(tf_estimate, 14 - 8)) as i16;
+    #[cfg(feature = "disable-float-api")]
+    let _ = analysis;
+    #[cfg(not(feature = "disable-float-api"))]
     if analysis.valid != 0 {
         // C: (opus_val16)(QCONST16(2.f, 8)*(analysis->tonality_slope+.05f)) is a float
         // product truncated to 16 bits.
@@ -666,6 +671,9 @@ pub fn dynalloc_analysis(
                 follower[endu - 2] += gconst(1.0);
             }
         }
+        #[cfg(feature = "disable-float-api")]
+        let _ = analysis;
+        #[cfg(not(feature = "disable-float-api"))]
         if analysis.valid != 0 {
             for i in startu..LEAK_BANDS.min(endu) {
                 follower[i] += gconst(1.0 / 64.0) * i32::from(analysis.leak_boost[i]);
@@ -977,6 +985,9 @@ pub fn run_prefilter(
         gain1 = 0;
         pitch_index = COMBFILTER_MINPERIOD;
     }
+    #[cfg(feature = "disable-float-api")]
+    let _ = analysis;
+    #[cfg(not(feature = "disable-float-api"))]
     if analysis.valid != 0 {
         // C: (opus_val16)(gain1 * analysis->max_pitch_ratio), a float product truncated.
         gain1 = (f32::from(gain1) * analysis.max_pitch_ratio) as i16;
@@ -1182,6 +1193,7 @@ pub fn compute_vbr(
 
     let mut target = base_target;
 
+    #[cfg(not(feature = "disable-float-api"))]
     if analysis.valid != 0 && f64::from(analysis.activity) < 0.4 {
         target -= ((coded_bins << BITRES) as f32 * (0.4f32 - analysis.activity)) as i32;
     }
@@ -1216,6 +1228,7 @@ pub fn compute_vbr(
     );
 
     // Apply tonality boost
+    #[cfg(not(feature = "disable-float-api"))]
     if analysis.valid != 0 && !lfe {
         // Tonality boost (compensating for the average).
         let tonal: f32 = max16(0.0f32, analysis.tonality - 0.15f32) - 0.12f32;
@@ -1225,6 +1238,8 @@ pub fn compute_vbr(
         }
         target = tonal_target;
     }
+    #[cfg(feature = "disable-float-api")]
+    let _ = (analysis, pitch_change);
 
     if has_surround_mask && !lfe {
         let surround_target = target

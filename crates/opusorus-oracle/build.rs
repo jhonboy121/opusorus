@@ -11,6 +11,11 @@
 //! does by default (so `src/analysis.c` + `src/mlp*.c` are still compiled, as in upstream's
 //! Makefile.am/meson/CMake). Shims in `csrc/` declare which builds they support with a marker
 //! line `// oracle-build: float|fixed|any` (no marker = float only, see docs/FIXED_POINT.md).
+//!
+//! `disable-float-api` defines `DISABLE_FLOAT_API` (fixed-point only, as upstream) and drops
+//! `OPUS_SOURCES_FLOAT` and the shims marked `// oracle-requires: float-api`;
+//! `fixed-point-debug` defines `FIXED_DEBUG` and captures its `fprintf` diagnostics
+//! (`csrc/fixed_debug_capture.h`, `csrc/fixed_debug.c`).
 
 use std::path::{Path, PathBuf};
 
@@ -58,6 +63,15 @@ fn shim_build(path: &Path) -> String {
     "float".to_string()
 }
 
+/// Whether a shim has the `// oracle-requires: float-api` marker line: it uses the float API
+/// (or `src/analysis.c` / `mlp.c`) and is left out of a `DISABLE_FLOAT_API` oracle.
+fn shim_requires_float_api(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        .lines()
+        .any(|l| l.trim() == "// oracle-requires: float-api")
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let root = manifest.join("../../vendor/libopus");
@@ -65,6 +79,15 @@ fn main() {
     let res24 = std::env::var_os("CARGO_FEATURE_FIXED_RES24").is_some();
     let qext = std::env::var_os("CARGO_FEATURE_QEXT").is_some();
     let custom = std::env::var_os("CARGO_FEATURE_CUSTOM_MODES").is_some();
+    // --disable-float-api (DISABLE_FLOAT_API; only compiles in a fixed-point build) and
+    // --enable-fixed-point-debug (FIXED_DEBUG, implies fixed-point via the Cargo feature).
+    let no_float_api = std::env::var_os("CARGO_FEATURE_DISABLE_FLOAT_API").is_some();
+    let fixed_debug = std::env::var_os("CARGO_FEATURE_FIXED_POINT_DEBUG").is_some();
+    assert!(
+        !no_float_api || fixed,
+        "feature disable-float-api needs fixed-point: libopus' float build does not compile \
+         with DISABLE_FLOAT_API"
+    );
     // DNN features mirror upstream configure: --enable-dred and --enable-osce both imply the
     // deep PLC sources and ENABLE_DEEP_PLC; --enable-osce also defines ENABLE_OSCE_BWE.
     let dred = std::env::var_os("CARGO_FEATURE_DRED").is_some();
@@ -92,7 +115,9 @@ fn main() {
     } else {
         srcs.extend(mk_sources(&root, "silk_sources.mk", "SILK_SOURCES_FLOAT"));
     }
-    srcs.extend(mk_sources(&root, "opus_sources.mk", "OPUS_SOURCES_FLOAT"));
+    if !no_float_api {
+        srcs.extend(mk_sources(&root, "opus_sources.mk", "OPUS_SOURCES_FLOAT"));
+    }
     if qext {
         srcs.push(root.join("celt/mini_kfft.c"));
     }
@@ -154,6 +179,20 @@ fn main() {
     if custom {
         b.define("CUSTOM_MODES", None);
     }
+    if no_float_api {
+        b.define("DISABLE_FLOAT_API", None);
+    }
+    if fixed_debug {
+        // The checking macros print with fprintf(stderr, ...): capture the messages instead
+        // (csrc/fixed_debug.c; the forced header renames fprintf after <stdio.h>), so tests can
+        // compare them with the Rust diagnostics.
+        b.define("FIXED_DEBUG", None).flag("-include").flag(
+            manifest
+                .join("csrc/fixed_debug_capture.h")
+                .to_str()
+                .expect("UTF-8 path"),
+        );
+    }
     if deep_plc {
         // Upstream also adds the source root (dnn/dred_*.c include "celt/entenc.h").
         b.include(&root)
@@ -204,7 +243,7 @@ fn main() {
         .filter(|p| p.extension().is_some_and(|e| e == "c"))
         .filter(|p| {
             let build = shim_build(p);
-            build == "any" || build == wanted
+            (build == "any" || build == wanted) && !(no_float_api && shim_requires_float_api(p))
         })
         .collect();
     shims.sort();

@@ -37,12 +37,13 @@
     reason = "test code: failures should panic"
 )]
 
-use opusorus::celt::arch::{CeltCoef, float2res};
+use opusorus::celt::arch::CeltCoef;
 use opusorus::encoder::request::*;
 use opusorus::encoder::{self as oe, Encoder};
 use opusorus::ms_encoder::{self as me, MsEncoder};
 use opusorus::projection_encoder::ProjectionEncoder;
 use opusorus::{Application, Bandwidth, Bitrate, Error, FrameSize, Signal};
+use opusorus_conformance::float2res;
 use opusorus_conformance::{Rng, assert_slice_eq, signals};
 use opusorus_oracle::opus_encoder::{self as oc, Glog, Res, Val16, Val32};
 
@@ -97,6 +98,18 @@ fn assert_v<T: Bits>(what: &str, rust: &[T], c: &[T]) {
             rust[i], c[i]
         );
     }
+}
+
+/// `$x.encode_float(pcm, n, out)`, or with `disable-float-api` (no float API in libopus nor
+/// the port) `$x.encode24` of the same signal in 24-bit.
+macro_rules! encode_f32 {
+    ($x:expr, $pcm:expr, $n:expr, $out:expr) => {{
+        #[cfg(not(feature = "disable-float-api"))]
+        let r = $x.encode_float($pcm, $n, $out);
+        #[cfg(feature = "disable-float-api")]
+        let r = $x.encode24(&to_i24($pcm), $n, $out);
+        r
+    }};
 }
 
 /// `opus_res` samples (`FLOAT2RES`) from float values.
@@ -547,10 +560,10 @@ impl CEnc {
         match (self, input) {
             (Self::Lib(e), Input::I16) => e.encode(&to_i16(x), n, out),
             (Self::Lib(e), Input::I24) => e.encode24(&to_i24(x), n, out),
-            (Self::Lib(e), Input::F32) => e.encode_float(x, n, out),
+            (Self::Lib(e), Input::F32) => encode_f32!(e, x, n, out),
             (Self::Dup(e), Input::I16) => e.encode(&to_i16(x), n, out),
             (Self::Dup(e), Input::I24) => e.encode24(&to_i24(x), n, out),
-            (Self::Dup(e), Input::F32) => e.encode_float(x, n, out),
+            (Self::Dup(e), Input::F32) => encode_f32!(e, x, n, out),
         }
     }
     fn dump(&self) -> Option<(Vec<u32>, Vec<Res>)> {
@@ -651,7 +664,7 @@ fn rust_encode(
     code(match input {
         Input::I16 => r.encode(&to_i16(x), n, out),
         Input::I24 => r.encode24(&to_i24(x), n, out),
-        Input::F32 => r.encode_float(x, n, out),
+        Input::F32 => encode_f32!(r, x, n, out),
     })
 }
 
@@ -1117,8 +1130,8 @@ fn streams_mode_transitions() {
                         assert_eq!(code(r.ctl_set(req, val)), c.ctl_set(req, val));
                     }
                     let x = &sig[f * fsz * ch as usize..(f + 1) * fsz * ch as usize];
-                    let rr = code(r.encode_float(x, fsz, &mut out_r));
-                    let cr = c.encode_float(x, fsz, &mut out_c);
+                    let rr = code(encode_f32!(r, x, fsz, &mut out_r));
+                    let cr = encode_f32!(c, x, fsz, &mut out_c);
                     assert_eq!(rr, cr, "fs {fs} ch {ch} fsz {fsz} frame {f}");
                     let n = rr.unwrap();
                     assert_slice_eq("packet", &out_r[..n], &out_c[..n]);
@@ -1180,8 +1193,8 @@ fn float_non_finite_input() {
         let mut out_c = vec![0u8; 1500];
         for f in 0..20 {
             let x = &sig[f * fsz * ch as usize..(f + 1) * fsz * ch as usize];
-            let rr = code(r.encode_float(x, fsz, &mut out_r));
-            let cr = c.encode_float(x, fsz, &mut out_c);
+            let rr = code(encode_f32!(r, x, fsz, &mut out_r));
+            let cr = encode_f32!(c, x, fsz, &mut out_c);
             assert_eq!(rr, cr, "frame {f}");
             let n = rr.unwrap();
             assert_slice_eq("packet", &out_r[..n], &out_c[..n]);
@@ -1222,8 +1235,8 @@ fn energy_mask_streams() {
                 c.set_energy_mask(Some(&mask)).unwrap();
             }
             let x = &sig[f * fsz * ch as usize..(f + 1) * fsz * ch as usize];
-            let rr = code(r.encode_float(x, fsz, &mut out_r));
-            let cr = c.encode_float(x, fsz, &mut out_c);
+            let rr = code(encode_f32!(r, x, fsz, &mut out_r));
+            let cr = encode_f32!(c, x, fsz, &mut out_c);
             assert_eq!(rr, cr, "cfg {i} frame {f}");
             let n = rr.unwrap();
             assert_slice_eq("packet", &out_r[..n], &out_c[..n]);
@@ -1250,7 +1263,7 @@ fn mixed_entry_points() {
             let cr = match input {
                 Input::I16 => c.encode(&to_i16(x), fsz, &mut out_c),
                 Input::I24 => c.encode24(&to_i24(x), fsz, &mut out_c),
-                Input::F32 => c.encode_float(x, fsz, &mut out_c),
+                Input::F32 => encode_f32!(c, x, fsz, &mut out_c),
             };
             assert_eq!(rr, cr);
             let n = rr.unwrap();
@@ -1311,8 +1324,8 @@ fn encode_errors() {
                     let mut o1 = vec![0u8; maxb];
                     let mut o2 = vec![0u8; maxb];
                     assert_eq!(
-                        code(r.encode_float(&big, n, &mut o1)),
-                        c.encode_float(&big, n, &mut o2),
+                        code(encode_f32!(r, &big, n, &mut o1)),
+                        encode_f32!(c, &big, n, &mut o2),
                         "float n {n} maxb {maxb}"
                     );
                     assert_eq!(r.final_range(), c.final_range().unwrap());
@@ -1329,13 +1342,13 @@ fn encode_errors() {
             let mut o1 = [0u8; 1];
             let mut o2 = [0u8; 1];
             assert_eq!(
-                code(r.encode_float(&big, n, &mut o1)),
-                c.encode_float(&big, n, &mut o2)
+                code(encode_f32!(r, &big, n, &mut o1)),
+                encode_f32!(c, &big, n, &mut o2)
             );
             assert_eq!(o1, o2);
             // Rust-only: short PCM.
             assert_eq!(
-                r.encode_float(&big[..10], 960, &mut [0u8; 100]),
+                encode_f32!(r, &big[..10], 960, &mut [0u8; 100]),
                 Err(Error::BadArg)
             );
             // Every CTL request number in a range, set and get.
@@ -1706,12 +1719,12 @@ fn run_ms(
         let rr = ms_code(match input {
             Input::I16 => r.encode(&to_i16(x), fsz, &mut out_r[..max]),
             Input::I24 => r.encode24(&to_i24(x), fsz, &mut out_r[..max]),
-            Input::F32 => r.encode_float(x, fsz, &mut out_r[..max]),
+            Input::F32 => encode_f32!(r, x, fsz, &mut out_r[..max]),
         });
         let cr = match input {
             Input::I16 => c.encode(&to_i16(x), fsz, &mut out_c[..max]),
             Input::I24 => c.encode24(&to_i24(x), fsz, &mut out_c[..max]),
-            Input::F32 => c.encode_float(x, fsz, &mut out_c[..max]),
+            Input::F32 => encode_f32!(c, x, fsz, &mut out_c[..max]),
         };
         assert_eq!(rr, cr, "{ctx}: frame {f} max {max}");
         if let Ok(n) = rr {
@@ -2007,6 +2020,7 @@ fn ms_ctls_and_errors() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn ms_surround_analysis_direct() {
     // surround_analysis through the public surround encoder is covered above; here compare the
     // static helper on its own over long streams (48 kHz mode).
@@ -2107,12 +2121,12 @@ fn projection_streams() {
                 let rr = code(match input {
                     Input::I16 => r.encode(&to_i16(x), fsz, &mut out_r),
                     Input::I24 => r.encode24(&to_i24(x), fsz, &mut out_r),
-                    Input::F32 => r.encode_float(x, fsz, &mut out_r),
+                    Input::F32 => encode_f32!(r, x, fsz, &mut out_r),
                 });
                 let cr = match input {
                     Input::I16 => c.encode(&to_i16(x), fsz, &mut out_c),
                     Input::I24 => c.encode24(&to_i24(x), fsz, &mut out_c),
-                    Input::F32 => c.encode_float(x, fsz, &mut out_c),
+                    Input::F32 => encode_f32!(c, x, fsz, &mut out_c),
                 };
                 assert_eq!(rr, cr, "family {family} ch {ch} frame {f} {input:?}");
                 let n = rr.unwrap();

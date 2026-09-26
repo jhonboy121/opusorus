@@ -420,6 +420,17 @@ void oracle_ce_opus_destroy(OpusEncoder *st) { oracle_ce_dup_opus_encoder_destro
 int oracle_ce_opus_ctl(OpusEncoder *st, int request, int value) {
   return oracle_ce_dup_opus_encoder_ctl(st, request, (opus_int32)value);
 }
+/* Encodes one frame of 16-bit PCM, recording every CELT call (records are cleared first). */
+int oracle_ce_opus_encode(OpusEncoder *st, const opus_int16 *pcm, int frame_size,
+                          unsigned char *out, int max_bytes) {
+  int ret;
+  oracle_ce_rec_clear();
+  ce_recording = 1;
+  ret = oracle_ce_dup_opus_encode(st, pcm, frame_size, out, max_bytes);
+  ce_recording = 0;
+  return ret;
+}
+#ifndef DISABLE_FLOAT_API
 /* Encodes one frame, recording every CELT call (records are cleared first). */
 int oracle_ce_opus_encode_float(OpusEncoder *st, const float *pcm, int frame_size,
                                 unsigned char *out, int max_bytes) {
@@ -430,6 +441,7 @@ int oracle_ce_opus_encode_float(OpusEncoder *st, const float *pcm, int frame_siz
   ce_recording = 0;
   return ret;
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------ */
 /* Part C: direct API over a library CELT encoder                                               */
@@ -579,10 +591,12 @@ int oracle_ce_custom_encode24(CeHandle *h, const opus_int32 *pcm, int frame_size
                               unsigned char *out, int nb) {
   return opus_custom_encode24(h->st, pcm, frame_size, out, nb);
 }
+#ifndef DISABLE_FLOAT_API
 int oracle_ce_custom_encode_float(CeHandle *h, const float *pcm, int frame_size,
                                   unsigned char *out, int nb) {
   return opus_custom_encode_float(h->st, pcm, frame_size, out, nb);
 }
+#endif
 #else
 int oracle_ce_custom_encode(CeHandle *h, const opus_int16 *pcm, int frame_size,
                             unsigned char *out, int nb) {

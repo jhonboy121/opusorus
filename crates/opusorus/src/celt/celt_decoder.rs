@@ -2957,8 +2957,8 @@ impl<'m> CustomDecoder<'m> {
     }
 
     /// Port of celt/celt_decoder.c:opus_custom_decode_float (fixed-point build: decodes to
-    /// `opus_res` and converts with `RES2FLOAT`).
-    #[cfg(feature = "fixed-point")]
+    /// `opus_res` and converts with `RES2FLOAT`). Not with `DISABLE_FLOAT_API`.
+    #[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
     pub fn opus_custom_decode_float(
         &mut self,
         data: Option<&[u8]>,

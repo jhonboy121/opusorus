@@ -28,7 +28,7 @@ use opusorus::celt::celt_decoder::*;
 use opusorus::celt::entdec::EcDec;
 use opusorus::celt::modes::opus_custom_mode_create;
 use opusorus::celt::static_modes::CeltMode;
-#[cfg(feature = "custom-modes")]
+#[cfg(all(feature = "custom-modes", not(feature = "disable-float-api")))]
 use opusorus_conformance::assert_bits_eq_f32;
 use opusorus_conformance::{Rng, assert_slice_eq, signals};
 use opusorus_oracle::celt_decoder::{self as c, CeltDecState, CeltEnc, Res, StateVal};
@@ -1594,6 +1594,7 @@ fn custom_mode_streams() {
                 let len = pkt.len() as i32;
                 let ctx = format!("{ctx} frame {f} lm={lm}");
                 match f % 3 {
+                    #[cfg(not(feature = "disable-float-api"))]
                     0 => {
                         let mut pc = vec![0f32; frame as usize * cu];
                         let mut pr = pc.clone();
@@ -1629,13 +1630,27 @@ fn custom_mode_streams() {
                 vec![0xE3],
             ] {
                 for &fsz in &[frame, mode.short_mdct_size] {
-                    let mut pc = vec![0f32; frame as usize * cu];
-                    let mut pr = pc.clone();
-                    let rc = cd.custom_decode_float(Some(&pkt), pkt.len() as i32, &mut pc, fsz);
-                    let rr =
-                        rd.opus_custom_decode_float(Some(&pkt), pkt.len() as i32, &mut pr, fsz);
-                    assert_eq!(code(rr), rc, "{ctx}: signalling error {pkt:?}");
-                    assert_bits_eq_f32(&ctx, &pr, &pc);
+                    #[cfg(not(feature = "disable-float-api"))]
+                    {
+                        let mut pc = vec![0f32; frame as usize * cu];
+                        let mut pr = pc.clone();
+                        let rc = cd.custom_decode_float(Some(&pkt), pkt.len() as i32, &mut pc, fsz);
+                        let rr =
+                            rd.opus_custom_decode_float(Some(&pkt), pkt.len() as i32, &mut pr, fsz);
+                        assert_eq!(code(rr), rc, "{ctx}: signalling error {pkt:?}");
+                        assert_bits_eq_f32(&ctx, &pr, &pc);
+                    }
+                    // DISABLE_FLOAT_API: 24-bit output.
+                    #[cfg(feature = "disable-float-api")]
+                    {
+                        let mut pc = vec![0i32; frame as usize * cu];
+                        let mut pr = pc.clone();
+                        let rc = cd.custom_decode24(Some(&pkt), pkt.len() as i32, &mut pc, fsz);
+                        let rr =
+                            rd.opus_custom_decode24(Some(&pkt), pkt.len() as i32, &mut pr, fsz);
+                        assert_eq!(code(rr), rc, "{ctx}: signalling error {pkt:?}");
+                        assert_slice_eq(&ctx, &pr, &pc);
+                    }
                     assert_state_eq(&ctx, &rust_state(&rd), &cd.state());
                 }
             }
@@ -1670,17 +1685,33 @@ fn custom_mode_qext_signalling() {
                 );
                 assert!(ret > 0);
                 let pkt = &out[1..1 + ret as usize];
+                #[cfg(not(feature = "disable-float-api"))]
                 let mut pc = vec![0f32; frame as usize * cu];
-                let mut pr = pc.clone();
+                #[cfg(not(feature = "disable-float-api"))]
                 let rc = cd.custom_decode_float(Some(pkt), ret, &mut pc, frame);
+                #[cfg(not(feature = "disable-float-api"))]
+                let mut pr = pc.clone();
+                #[cfg(not(feature = "disable-float-api"))]
                 let rr = rd.opus_custom_decode_float(Some(pkt), ret, &mut pr, frame);
+                // DISABLE_FLOAT_API: 24-bit output.
+                #[cfg(feature = "disable-float-api")]
+                let mut pc = vec![0i32; frame as usize * cu];
+                #[cfg(feature = "disable-float-api")]
+                let rc = cd.custom_decode24(Some(pkt), ret, &mut pc, frame);
+                #[cfg(feature = "disable-float-api")]
+                let mut pr = pc.clone();
+                #[cfg(feature = "disable-float-api")]
+                let rr = rd.opus_custom_decode24(Some(pkt), ret, &mut pr, frame);
                 code3 += usize::from(pkt[0] & 3 == 3);
                 let ctx = format!(
                     "custom qext fs={fs} ch={ch} frame {f} (code3={})",
                     pkt[0] & 3 == 3
                 );
                 assert_eq!(code(rr), rc, "{ctx}");
+                #[cfg(not(feature = "disable-float-api"))]
                 assert_bits_eq_f32(&ctx, &pr, &pc);
+                #[cfg(feature = "disable-float-api")]
+                assert_slice_eq(&ctx, &pr, &pc);
                 assert_state_eq(&ctx, &rust_state(&rd), &cd.state());
             }
         }

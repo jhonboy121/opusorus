@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 #[cfg(any(feature = "qext", feature = "fixed-point"))]
 use crate::celt::arch::imax;
-#[cfg(not(feature = "fixed-point"))]
+#[cfg(any(not(feature = "fixed-point"), feature = "fixed-point-debug"))]
 use crate::celt::arch::sub32;
 use crate::celt::arch::{
     CeltNorm, EPSILON, OpusVal16, OpusVal32, Q15_ONE, Q15ONE, abs16, add16, add32, extend32,
@@ -23,9 +23,11 @@ use crate::celt::arch::{
     mult32_32_q31, neg16, pshr32, shr32, sub16, vshr32,
 };
 #[cfg(feature = "fixed-point")]
-use crate::celt::arch::{NORM_SHIFT, add32_ovflw, pshr32_ovflw, shl32, sub32_ovflw};
+use crate::celt::arch::{NORM_SHIFT, shl32};
 #[cfg(feature = "qext")]
 use crate::celt::arch::{OpusVal64, abs32, imin};
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-point-debug")))]
+use crate::celt::arch::{add32_ovflw, pshr32_ovflw, sub32_ovflw};
 use crate::celt::bands::SPREAD_NONE;
 use crate::celt::cwrs::{decode_pulses, encode_pulses};
 use crate::celt::entcode::celt_udiv;
@@ -999,7 +1001,8 @@ pub fn stereo_itheta(x: &[CeltNorm], y: &[CeltNorm], stereo: bool, n: i32) -> i3
     let mut eside: OpusVal32 = OpusVal32::default();
     if stereo {
         for i in 0..nu {
-            #[cfg(not(feature = "fixed-point"))]
+            // FIXED_DEBUG: the checking macros wrap (and report) by themselves.
+            #[cfg(any(not(feature = "fixed-point"), feature = "fixed-point-debug"))]
             {
                 let m: CeltNorm = pshr32(add32(x[i], y[i]), NORM_SHIFT - 13);
                 let s: CeltNorm = pshr32(sub32(x[i], y[i]), NORM_SHIFT - 13);
@@ -1011,7 +1014,7 @@ pub fn stereo_itheta(x: &[CeltNorm], y: &[CeltNorm], stereo: bool, n: i32) -> i3
             // unit energy, so `ADD32`/`SUB32` of `X[i]`, `Y[i]`, the rounding add of `PSHR32`
             // and the `MAC16_16` sums overflow `opus_val32`. They wrap here as they do in C in
             // practice (bit-exact with the oracle), instead of panicking in debug builds.
-            #[cfg(feature = "fixed-point")]
+            #[cfg(all(feature = "fixed-point", not(feature = "fixed-point-debug")))]
             {
                 let m: CeltNorm = pshr32_ovflw(add32_ovflw(x[i], y[i]), NORM_SHIFT - 13);
                 let s: CeltNorm = pshr32_ovflw(sub32_ovflw(x[i], y[i]), NORM_SHIFT - 13);

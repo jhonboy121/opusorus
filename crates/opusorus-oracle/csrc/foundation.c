@@ -81,4 +81,6 @@ float oracle_celt_rsqrt(float x) { return celt_rsqrt(x); }
 #endif
 unsigned oracle_isqrt32(unsigned x) { return isqrt32(x); }
 int oracle_float2int(float x) { return float2int(x); }
+#ifndef DISABLE_FLOAT_API
 short oracle_float2int16(float x) { return FLOAT2INT16(x); }
+#endif

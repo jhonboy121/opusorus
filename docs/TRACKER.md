@@ -15,6 +15,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | silk/define.rs, tuning_parameters.rs, errors.rs | silk/define.h, tuning_parameters.h, errors.h | ✅ | generated |
 | math.rs, error.rs, constants.rs | — | ✅ | unit tests |
 | celt/arch/fixed.rs, celt/mathops/fixed.rs, celt/static_modes_fixed.rs (+ shared types in static_modes.rs, arch.rs, mathops.rs) | celt/arch.h + fixed_generic.h (fixed), mathops.h/.c (fixed), float_cast.h (fixed), static_modes_fixed.h | ✅ | fixed_foundation.rs (unit `fixed_foundation`, features fixed-point / fixed-res24 × qext): 95 macros/conversions (+ both `OPUS_FAST_INT64` forms of the 8 32-bit multiplies), 27 fixed mathops fns, float API, constants, static modes field-by-field, range coder/CWRS/Laplace — bit-exact |
+| celt/arch/fixed_debug.rs, silk/macro_debug.rs, fixed_debug.rs (feature `fixed-point-debug`) | celt/fixed_debug.h, silk/MacroDebug.h (`FIXED_DEBUG`) | ✅ | fixed_debug.rs: every CELT and SILK checking macro (+ the `arch.h` conversions built on them) on 20k random/edge operands each vs the `-DFIXED_DEBUG` oracle (value, diagnostic text, `celt_mips`), streams incl. overflowing ones (same diagnostics); all fixed suites bit-exact in that build |
 
 ## Units
 

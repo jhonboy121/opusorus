@@ -56,11 +56,14 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::analysis::{AnalysisInfo, DownmixFunc, downmix_int, downmix_int24, is_digital_silence};
+#[cfg(not(feature = "disable-float-api"))]
 use crate::analysis::{
-    AnalysisInfo, DownmixFunc, TonalityAnalysisState, downmix_float, downmix_int, downmix_int24,
-    is_digital_silence, run_analysis, tonality_analysis_init, tonality_analysis_reset,
-    tonality_get_info,
+    TonalityAnalysisState, downmix_float, run_analysis, tonality_analysis_init,
+    tonality_analysis_reset, tonality_get_info,
 };
+#[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
+use crate::celt::arch::float2res;
 #[cfg(not(feature = "fixed-res24"))]
 use crate::celt::arch::int24tores;
 use crate::celt::arch::{
@@ -69,9 +72,9 @@ use crate::celt::arch::{
 };
 #[cfg(feature = "fixed-point")]
 use crate::celt::arch::{
-    DB_SHIFT, EPSILON, RES_SHIFT, coef2val16, extend32, extract16, float2res, gconst, mac16_16,
-    mult16_16, mult16_16_q15, mult16_32_q15, mult16_res_q15, pshr32, qconst16, qconst32, res2int16,
-    res2val16, saturate, shl16, shl32, shr32,
+    DB_SHIFT, EPSILON, RES_SHIFT, coef2val16, extract16, gconst, mac16_16, mult16_16,
+    mult16_16_q15, mult16_32_q15, mult16_res_q15, pshr32, qconst16, qconst32, res2int16, res2val16,
+    saturate, shl16, shl32, shr32,
 };
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::arch::{VERY_SMALL, celt_isnan};
@@ -200,6 +203,7 @@ const PSEUDO_SNR_THRESHOLD: f32 = 316.23;
 /// The `run_analysis` call of `opus_encode_native` with the input-type dependent arguments
 /// (`analysis_pcm`, `analysis_size`, `c1`, `c2`, `analysis_channels`, `downmix`) bound:
 /// `(analysis, celt_mode, frame_size, Fs, lsb_depth, analysis_info)`.
+#[cfg(not(feature = "disable-float-api"))]
 type AnalyzeFn<'a> =
     &'a mut dyn FnMut(&mut TonalityAnalysisState, &CeltMode, i32, i32, i32, &mut AnalysisInfo);
 
@@ -324,6 +328,8 @@ pub struct Encoder {
     /// General DTX for both SILK and CELT.
     use_dtx: i32,
     fec_config: i32,
+    /// `analysis` (not with `DISABLE_FLOAT_API`, like the tonality analysis itself).
+    #[cfg(not(feature = "disable-float-api"))]
     analysis: Box<TonalityAnalysisState>,
     #[cfg(feature = "qext")]
     enable_qext: i32,
@@ -348,6 +354,7 @@ pub struct Encoder {
     /// Copy of the `energy_masking` values (`21*channels`).
     energy_masking: [CeltGlog; 42],
     width_mem: StereoWidthState,
+    #[cfg(not(feature = "disable-float-api"))]
     detected_bandwidth: i32,
     nb_no_activity_ms_q1: i32,
     peak_signal_energy: OpusVal32,
@@ -400,10 +407,11 @@ pub fn encoder_get_size(channels: i32) -> usize {
     // The DRED encoder state (without the heap-allocated model weights of a loaded blob).
     #[cfg(feature = "dred")]
     let celt = celt + size_of::<DredEnc>();
+    #[cfg(not(feature = "disable-float-api"))]
+    let celt = celt + size_of::<TonalityAnalysisState>();
     size_of::<Encoder>()
         + size_of::<SilkEncoder>()
         + celt
-        + size_of::<TonalityAnalysisState>()
         + MAX_ENCODER_BUFFER * 2 * size_of::<OpusRes>()
         + ch * (MAX_ENCODER_BUFFER / 10 * 76) * size_of::<OpusRes>()
 }
@@ -730,6 +738,10 @@ fn fade_gain(window: CeltCoef, g1: OpusVal16, g2: OpusVal16) -> OpusVal16 {
 /// calls it with `in == out`): crossfades the stereo width from `g1` to `g2` (Q15).
 #[cfg(feature = "fixed-point")]
 #[doc(hidden)]
+#[allow(
+    clippy::useless_conversion,
+    reason = "`opus_res` is already 32-bit with fixed-res24"
+)]
 pub fn stereo_fade(
     buf: &mut [OpusRes],
     g1: OpusVal16,
@@ -748,12 +760,13 @@ pub fn stereo_fade(
     let g2 = (i32::from(Q15ONE) - i32::from(g2)) as OpusVal16;
     // `out[k] = out[k] -/+ diff` with the implicit C narrowing to `opus_res`.
     let apply = |buf: &mut [OpusRes], i: usize, g: OpusVal16| {
-        let mut diff: OpusVal32 = half32(extend32(buf[i * ch]) - extend32(buf[i * ch + 1]));
+        // C: `(opus_val32)` casts and implicit conversions (no `EXTEND32`).
+        let mut diff: OpusVal32 = half32(i32::from(buf[i * ch]) - i32::from(buf[i * ch + 1]));
         // MULT16_RES_Q15 takes the difference as an `opus_res` (MULT16_16_Q15 truncates it to
         // 16 bits in 16-bit builds; it fits).
-        diff = extend32(mult16_res_q15(g, diff as OpusRes));
-        buf[i * ch] = (extend32(buf[i * ch]) - diff) as OpusRes;
-        buf[i * ch + 1] = (extend32(buf[i * ch + 1]) + diff) as OpusRes;
+        diff = i32::from(mult16_res_q15(g, diff as OpusRes));
+        buf[i * ch] = (i32::from(buf[i * ch]) - diff) as OpusRes;
+        buf[i * ch + 1] = (i32::from(buf[i * ch + 1]) + diff) as OpusRes;
     };
     let mut i = 0usize;
     while i < overlap {
@@ -1599,9 +1612,13 @@ impl Encoder {
             0
         };
         let ch = channels as usize;
+        #[cfg(not(feature = "disable-float-api"))]
         let mut analysis = Box::new(TonalityAnalysisState::new(fs));
-        tonality_analysis_init(&mut analysis, fs);
-        analysis.application = application;
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            tonality_analysis_init(&mut analysis, fs);
+            analysis.application = application;
+        }
 
         #[allow(unused_mut, reason = "only mutated with compiled-in DNN weights")]
         let mut enc = Self {
@@ -1631,6 +1648,7 @@ impl Encoder {
             lfe: 0,
             use_dtx: 0,
             fec_config: 0,
+            #[cfg(not(feature = "disable-float-api"))]
             analysis,
             #[cfg(feature = "qext")]
             enable_qext: 0,
@@ -1650,6 +1668,7 @@ impl Encoder {
             has_energy_mask: false,
             energy_masking: [CeltGlog::default(); 42],
             width_mem: StereoWidthState::default(),
+            #[cfg(not(feature = "disable-float-api"))]
             detected_bandwidth: 0,
             nb_no_activity_ms_q1: 0,
             peak_signal_energy: OpusVal32::default(),
@@ -1779,10 +1798,12 @@ impl Encoder {
     }
 
     /// Port of src/opus_encoder.c:opus_encode_float: encodes a frame of float PCM (nominal
-    /// range ±1.0). Otherwise as [`Encoder::encode`].
+    /// range ±1.0). Otherwise as [`Encoder::encode`]. Not available with the
+    /// `disable-float-api` feature (libopus `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`Encoder::encode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn encode_float(
         &mut self,
         pcm: &[f32],
@@ -1956,9 +1977,21 @@ impl Encoder {
         float_api: i32,
     ) -> i32 {
         let out_data_bytes = imin(out_data_bytes, len_i32(data.len()));
+        // DISABLE_FLOAT_API: no tonality analysis; C: `(void)analysis_pcm; (void)analysis_size;
+        // (void)c1; (void)c2; (void)analysis_channels; (void)downmix;`.
+        #[cfg(feature = "disable-float-api")]
+        let _ = (
+            analysis_pcm,
+            analysis_size,
+            c1,
+            c2,
+            analysis_channels,
+            downmix,
+        );
         // Size: only the tonality analysis depends on the input sample type, so it is passed
         // to the (large, non-generic) body as a type-erased closure instead of monomorphizing
         // the whole encoder per sample type.
+        #[cfg(not(feature = "disable-float-api"))]
         let mut analyze = |analysis: &mut TonalityAnalysisState,
                            celt_mode: &CeltMode,
                            frame_size: i32,
@@ -1986,6 +2019,7 @@ impl Encoder {
             data,
             out_data_bytes,
             lsb_depth,
+            #[cfg(not(feature = "disable-float-api"))]
             &mut analyze,
             float_api,
         ) {
@@ -2006,7 +2040,7 @@ impl Encoder {
         data: &mut [u8],
         out_data_bytes: i32,
         lsb_depth: i32,
-        analyze: AnalyzeFn<'_>,
+        #[cfg(not(feature = "disable-float-api"))] analyze: AnalyzeFn<'_>,
         float_api: i32,
     ) -> Result<i32> {
         let mut redundancy = 0;
@@ -2042,14 +2076,22 @@ impl Encoder {
         let lsb_depth = imin(lsb_depth, self.lsb_depth);
 
         let is_silence = is_digital_silence(pcm, frame_size, ch, lsb_depth) as i32;
+        // With DISABLE_FLOAT_API C has no `analysis_info`; here it stays invalid (never read:
+        // every C use is compiled out below and in `opus_encode_frame_native`).
         let mut analysis_info = AnalysisInfo::default();
+        #[cfg_attr(
+            feature = "disable-float-api",
+            allow(unused_mut, reason = "only set by the tonality analysis")
+        )]
         let mut analysis_read_pos_bak = -1;
+        #[cfg(not(feature = "disable-float-api"))]
         let mut analysis_read_subframe_bak = -1;
         // The fixed-point build only runs the (float) analysis at complexity 10.
-        #[cfg(feature = "fixed-point")]
+        #[cfg(all(feature = "fixed-point", not(feature = "disable-float-api")))]
         let analysis_complexity = 10;
         #[cfg(not(feature = "fixed-point"))]
         let analysis_complexity = 7;
+        #[cfg(not(feature = "disable-float-api"))]
         if self.silk_mode.complexity >= analysis_complexity
             && self.fs >= 16000
             && self.fs <= 48000
@@ -2078,7 +2120,15 @@ impl Encoder {
         if is_silence == 0 {
             self.voice_ratio = -1;
         }
-        self.detected_bandwidth = 0;
+        #[cfg(feature = "disable-float-api")]
+        {
+            self.voice_ratio = -1;
+        }
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            self.detected_bandwidth = 0;
+        }
+        #[cfg(not(feature = "disable-float-api"))]
         if analysis_info.valid != 0 {
             if self.signal_type == OPUS_AUTO {
                 let prob: f32 = if self.prev_mode == 0 {
@@ -2106,8 +2156,10 @@ impl Encoder {
             };
         }
 
-        // Track the peak signal energy
-        if (analysis_info.valid == 0 || analysis_info.activity_probability > DTX_ACTIVITY_THRESHOLD)
+        // Track the peak signal energy (DISABLE_FLOAT_API: without the analysis condition)
+        if (cfg!(feature = "disable-float-api")
+            || analysis_info.valid == 0
+            || analysis_info.activity_probability > DTX_ACTIVITY_THRESHOLD)
             && is_silence == 0
         {
             #[cfg(feature = "fixed-point")]
@@ -2270,8 +2322,15 @@ impl Encoder {
 
         // Allow SILK DTX if DTX is enabled but the generalized DTX cannot be used,
         // e.g. because of the complexity setting or sample rate.
-        self.silk_mode.use_dtx =
-            (self.use_dtx != 0 && !(analysis_info.valid != 0 || is_silence != 0)) as i32;
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            self.silk_mode.use_dtx =
+                (self.use_dtx != 0 && !(analysis_info.valid != 0 || is_silence != 0)) as i32;
+        }
+        #[cfg(feature = "disable-float-api")]
+        {
+            self.silk_mode.use_dtx = (self.use_dtx != 0 && is_silence == 0) as i32;
+        }
 
         // Mode selection depending on application and signal type
         if self.application == OPUS_APPLICATION_RESTRICTED_SILK {
@@ -2502,6 +2561,7 @@ impl Encoder {
             self.bandwidth = OPUS_BANDWIDTH_NARROWBAND;
         }
         // Use detected bandwidth to reduce the encoded bandwidth.
+        #[cfg(not(feature = "disable-float-api"))]
         if self.detected_bandwidth != 0 && self.user_bandwidth == OPUS_AUTO {
             // Makes bandwidth detection more conservative just in case the detector gets it
             // wrong when we could have coded a high bandwidth transparently. When operating in
@@ -2582,6 +2642,7 @@ impl Encoder {
 
             let nb_frames = frame_size / enc_frame_size;
 
+            #[cfg(not(feature = "disable-float-api"))]
             if analysis_read_pos_bak != -1 {
                 // Reset analysis position to the beginning of the first frame so we can use it
                 // one frame at a time.
@@ -2679,7 +2740,18 @@ impl Encoder {
         max_len_sum: i32,
         repacketize_len: i32,
         float_api: i32,
+        #[cfg_attr(
+            feature = "disable-float-api",
+            allow(unused_variables, reason = "only used by the tonality analysis")
+        )]
         analysis_read_pos_bak: i32,
+        #[cfg_attr(
+            feature = "disable-float-api",
+            allow(
+                clippy::needless_pass_by_ref_mut,
+                reason = "only written by the tonality analysis"
+            )
+        )]
         analysis_info: &mut AnalysisInfo,
         lsb_depth: i32,
         redundancy: i32,
@@ -2731,6 +2803,7 @@ impl Encoder {
                 curr_max -= curr_max / 254;
             }
             curr_max = imin(max_len_sum - tot_size, curr_max);
+            #[cfg(not(feature = "disable-float-api"))]
             if analysis_read_pos_bak != -1 {
                 // Get analysis for current frame.
                 tonality_get_info(&mut self.analysis, analysis_info, enc_frame_size);
@@ -2884,7 +2957,7 @@ impl Encoder {
 
         if is_silence != 0 {
             activity = (is_silence == 0) as i32;
-        } else if analysis_info.valid != 0 {
+        } else if cfg!(not(feature = "disable-float-api")) && analysis_info.valid != 0 {
             activity = (analysis_info.activity_probability >= DTX_ACTIVITY_THRESHOLD) as i32;
             if activity == 0 {
                 // Mark as active if this noise frame is sufficiently loud
@@ -3558,6 +3631,7 @@ impl Encoder {
             enc.shrink(nb_compr_bytes as u32);
         }
 
+        #[cfg(not(feature = "disable-float-api"))]
         if redundancy != 0 || self.mode != MODE_SILK_ONLY {
             celt_of(&mut self.celt_enc)?.set_analysis(Some(analysis_info));
         }
@@ -3871,6 +3945,13 @@ impl Encoder {
         self.set_application_raw(application.to_raw())
     }
 
+    #[cfg_attr(
+        feature = "disable-float-api",
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "could only be const without the tonality analysis"
+        )
+    )]
     fn set_application_raw(&mut self, value: i32) -> Result<()> {
         if self.application == OPUS_APPLICATION_RESTRICTED_SILK
             || self.application == OPUS_APPLICATION_RESTRICTED_CELT
@@ -3885,7 +3966,10 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         self.application = value;
-        self.analysis.application = value;
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            self.analysis.application = value;
+        }
         Ok(())
     }
 
@@ -4394,6 +4478,7 @@ impl Encoder {
     /// `OPUS_RESET_STATE`: resets the codec state to that of a freshly initialised encoder,
     /// keeping all settings.
     pub fn reset(&mut self) {
+        #[cfg(not(feature = "disable-float-api"))]
         tonality_analysis_reset(&mut self.analysis);
 
         // OPUS_CLEAR from OPUS_ENCODER_RESET_START (stream_channels) to the codec states.
@@ -4413,7 +4498,10 @@ impl Encoder {
         self.has_energy_mask = false;
         self.energy_masking = [CeltGlog::default(); 42];
         self.width_mem = StereoWidthState::default();
-        self.detected_bandwidth = 0;
+        #[cfg(not(feature = "disable-float-api"))]
+        {
+            self.detected_bandwidth = 0;
+        }
         self.nb_no_activity_ms_q1 = 0;
         self.peak_signal_energy = OpusVal32::default();
         #[cfg(feature = "dred")]
@@ -4499,7 +4587,13 @@ impl Encoder {
             dump_bits(self.width_mem.yy),
             dump_bits(self.width_mem.smoothed_width),
             dump_bits(self.width_mem.max_follower),
-            self.detected_bandwidth as u32,
+            // DISABLE_FLOAT_API: no `detected_bandwidth` (the C dump writes 0).
+            #[cfg(not(feature = "disable-float-api"))]
+            {
+                self.detected_bandwidth as u32
+            },
+            #[cfg(feature = "disable-float-api")]
+            0,
             self.nb_no_activity_ms_q1 as u32,
             dump_bits(self.peak_signal_energy),
             self.nonfinal_frame as u32,

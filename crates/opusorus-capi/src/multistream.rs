@@ -407,6 +407,7 @@ pub unsafe extern "C" fn opus_multistream_encode24(
 ///
 /// # Safety
 /// See [`ms_encode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_multistream_encode_float(
     st: *mut OpusMSEncoder,
@@ -591,6 +592,7 @@ pub unsafe extern "C" fn opus_multistream_decode24(
 ///
 /// # Safety
 /// See [`ms_decode`].
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_multistream_decode_float(
     st: *mut OpusMSDecoder,

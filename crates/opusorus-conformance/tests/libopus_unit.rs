@@ -50,6 +50,7 @@ use opusorus::celt::entdec::EcDec;
 use opusorus::celt::entenc::EcEnc;
 use opusorus::celt::kiss_fft::{opus_fft, opus_ifft};
 use opusorus::celt::laplace::{ec_laplace_decode, ec_laplace_encode};
+#[cfg(not(feature = "disable-float-api"))]
 use opusorus::celt::mathops::{celt_float2int16, float2int16, opus_limit2_checkwithin1};
 use opusorus::celt::mdct::{clt_mdct_backward, clt_mdct_forward};
 #[cfg(not(feature = "custom-modes"))]
@@ -1286,7 +1287,8 @@ mod mathops_fixed {
     }
 }
 
-/// `testcelt_float2int16`.
+/// `testcelt_float2int16` (`#ifndef DISABLE_FLOAT_API` upstream).
+#[cfg(not(feature = "disable-float-api"))]
 fn testcelt_float2int16(buffer_size: usize) {
     const MAX_BUFFER_SIZE: usize = 2080;
     let mut floats = [0f32; MAX_BUFFER_SIZE];
@@ -1339,7 +1341,8 @@ fn testcelt_float2int16(buffer_size: usize) {
     );
 }
 
-/// `testopus_limit2_checkwithin1`.
+/// `testopus_limit2_checkwithin1` (`#ifndef DISABLE_FLOAT_API` upstream).
+#[cfg(not(feature = "disable-float-api"))]
 fn testopus_limit2_checkwithin1() {
     // strange float count to trigger residue loop of SIMD implementation
     const BUFFER_SIZE: usize = 37;
@@ -1393,6 +1396,7 @@ fn testopus_limit2_checkwithin1() {
 }
 
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn unit_mathops_float2int16_limit2() {
     // use_ref_impl = 0 and 1 (opusorus has one implementation).
     for _use_ref_impl in [0, 1] {
@@ -1626,6 +1630,10 @@ mod custom {
     }
 
     /// The input of one test: interleaved samples in one of the three formats.
+    #[cfg_attr(
+        feature = "disable-float-api",
+        expect(dead_code, reason = "no float input without the float API")
+    )]
     enum Pcm {
         I16(Vec<i16>),
         I24(Vec<i32>),
@@ -1768,6 +1776,7 @@ mod custom {
 
         // Allocate memory for output data
         let n = input_samples * ch;
+        #[cfg(not(feature = "disable-float-api"))]
         let mut out_f = vec![0f32; if params.float_decode { n } else { 0 }];
         let mut out_24 = vec![
             0i32;
@@ -1793,6 +1802,7 @@ mod custom {
         loop {
             let off = samp_count * ch;
             let len: usize = match (&mut *enc, &inbuf) {
+                #[cfg(not(feature = "disable-float-api"))]
                 (Enc::Custom(e), Pcm::F32(x)) => {
                     let r = e.opus_custom_encode_float(
                         &x[off..],
@@ -1823,9 +1833,13 @@ mod custom {
                     assert!(r > 0, "opus_custom_encode() failed: {r}");
                     r as usize
                 }
+                #[cfg(not(feature = "disable-float-api"))]
                 (Enc::Opus(e), Pcm::F32(x)) => e
                     .encode_float(&x[off..], frame_size, &mut packet[..MAX_PACKET])
                     .unwrap(),
+                // DISABLE_FLOAT_API: `params.float_encode` is always 0.
+                #[cfg(feature = "disable-float-api")]
+                (_, Pcm::F32(_)) => unreachable!("no float input without the float API"),
                 (Enc::Opus(e), Pcm::I24(x)) => e
                     .encode24(&x[off..], frame_size, &mut packet[..MAX_PACKET])
                     .unwrap(),
@@ -1885,14 +1899,21 @@ mod custom {
             }
 
             let data = Some(&packet[..len]);
-            let samples_decoded = if params.float_decode {
+            // DISABLE_FLOAT_API: `params.float_decode` is always 0.
+            #[cfg(not(feature = "disable-float-api"))]
+            let float_decoded = params.float_decode.then(|| {
                 let out = &mut out_f[off..];
-                match dec {
+                match &mut *dec {
                     Dec::Custom(d) => d
                         .opus_custom_decode_float(data, len as i32, out, frame_size as i32)
                         .map(|n| n as usize),
                     Dec::Opus(d) => d.decode_float(data, out, frame_size, false),
                 }
+            });
+            #[cfg(feature = "disable-float-api")]
+            let float_decoded = None;
+            let samples_decoded = if let Some(r) = float_decoded {
+                r
             } else if params.decoder_bit_depth == 24 {
                 let out = &mut out_24[off..];
                 match dec {
@@ -1954,7 +1975,9 @@ mod custom {
         let packet_loss_perc = [0, 1, 2, 5];
         let lsb_depths = [8, 24];
         let frame_sizes_ms_x2 = [5, 10, 20, 40]; // x2 to avoid 2.5 ms
+        #[cfg(not(feature = "disable-float-api"))]
         let use_float_encode = [false, true];
+        #[cfg(not(feature = "disable-float-api"))]
         let use_float_decode = [false, true];
         let use_custom_encode = [false, true];
         let use_custom_decode = [false, true];
@@ -2024,8 +2047,12 @@ mod custom {
                 let complexity = rng.sample(&complexities);
                 let pkt_loss = rng.sample(&packet_loss_perc);
                 let lsb_depth = rng.sample(&lsb_depths);
+                #[cfg(not(feature = "disable-float-api"))]
                 let float_encode = rng.sample(&use_float_encode);
+                #[cfg(not(feature = "disable-float-api"))]
                 let float_decode = rng.sample(&use_float_decode);
+                #[cfg(feature = "disable-float-api")]
+                let (float_encode, float_decode) = (false, false);
                 let encoder_bit_depth = rng.sample(&encoder_bit_depths);
                 let decoder_bit_depth = rng.sample(&decoder_bit_depths);
                 #[cfg(feature = "qext")]

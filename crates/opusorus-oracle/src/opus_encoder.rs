@@ -147,6 +147,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn oracle_oe_log_sum(a: Glog, b: Glog) -> Val16;
     fn oracle_oe_channel_pos(channels: c_int, pos: *mut c_int);
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_oe_surround_analysis(
         pcm: *const f32,
         band_log_e: *mut Glog,
@@ -165,6 +166,7 @@ unsafe extern "C" {
     ) -> *mut sys::OpusEncoder;
     fn oracle_oe_destroy(st: *mut sys::OpusEncoder);
     fn oracle_oe_ctl_set(st: *mut sys::OpusEncoder, request: c_int, value: c_int) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn oracle_oe_encode_float(
         st: *mut sys::OpusEncoder,
         pcm: *const f32,
@@ -406,6 +408,7 @@ pub fn channel_pos(channels: i32) -> [i32; 8] {
     pos
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// `surround_analysis` on float input (`len*channels` samples) with the mode for `rate`.
 /// `mem`: `channels*overlap`, `preemph_mem`: `channels`, `band_log_e`: `21*channels`.
 pub fn surround_analysis(
@@ -464,6 +467,7 @@ impl DupEnc {
         // SAFETY: valid state; request takes one opus_int32.
         check(unsafe { oracle_oe_ctl_set(self.ptr.as_ptr(), request, value) }).map(drop)
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_encode_float`.
     pub fn encode_float(
         &mut self,
@@ -588,6 +592,7 @@ macro_rules! encode_fns {
                 )
             })
         }
+        #[cfg(not(feature = "disable-float-api"))]
         /// Float encode.
         pub fn encode_float(
             &mut self,

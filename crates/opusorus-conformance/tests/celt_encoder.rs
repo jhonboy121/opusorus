@@ -141,7 +141,7 @@ conv!(
 /// `opus_res` samples from float PCM (`FLOAT2RES`).
 fn to_res(x: &[f32]) -> Vec<Res> {
     x.iter()
-        .map(|&v| opusorus::celt::arch::float2res(v))
+        .map(|&v| opusorus_conformance::float2res(v))
         .collect()
 }
 
@@ -1838,7 +1838,10 @@ fn custom_end_beyond_eff_bands_rust_only() {
         for f in 0..20 {
             let mut out = vec![0u8; 400];
             let fr = &pcm[f * 2 * fsz as usize..(f + 1) * 2 * fsz as usize];
+            #[cfg(not(feature = "disable-float-api"))]
             assert!(r.opus_custom_encode_float(fr, fsz, &mut out, 400) > 0);
+            #[cfg(feature = "disable-float-api")]
+            assert!(r.opus_custom_encode(&signals::to_i16(fr), fsz, &mut out, 400) > 0);
         }
     }
 }
@@ -2159,7 +2162,11 @@ fn run_opus(
         let off = f * frame_size as usize * cfg.channels as usize;
         let frame = &pcm[off..off + frame_size as usize * cfg.channels as usize];
         let max = if qext { 4000 } else { 1276 };
+        #[cfg(not(feature = "disable-float-api"))]
         let (ret, calls) = enc.encode_float(frame, frame_size, &mut out[..max]);
+        // DISABLE_FLOAT_API: 16-bit input (the Opus encoder then runs no tonality analysis).
+        #[cfg(feature = "disable-float-api")]
+        let (ret, calls) = enc.encode(&signals::to_i16(frame), frame_size, &mut out[..max]);
         assert!(ret > 0, "opus encode failed: {ret}");
         for (i, call) in calls.iter().enumerate() {
             replay(
@@ -2399,7 +2406,14 @@ fn custom_api() {
                 };
                 let mut oc_ = vec![0u8; nb as usize];
                 let mut or = vec![0u8; nb as usize];
-                let (rc, rr) = match f % 3 {
+                // DISABLE_FLOAT_API: no float input (the 16- and 24-bit cases only).
+                let k = if cfg!(feature = "disable-float-api") {
+                    1 + f % 2
+                } else {
+                    f % 3
+                };
+                let (rc, rr) = match k {
+                    #[cfg(not(feature = "disable-float-api"))]
                     0 => (
                         c.custom_encode_float(frame, ch as usize, fsz, &mut oc_, nb),
                         r.opus_custom_encode_float(frame, fsz, &mut or, nb),

@@ -23,7 +23,9 @@
 mod common;
 
 use common::{FastRand, GlibcRand, debruijn2};
-use opusorus::packet::{self, pcm_soft_clip};
+use opusorus::packet;
+#[cfg(not(feature = "disable-float-api"))]
+use opusorus::packet::pcm_soft_clip;
 use opusorus::{Decoder, Error};
 
 const MAX_PACKET: usize = 1500;
@@ -364,14 +366,16 @@ fn decoder_code0() {
 }
 
 /// The ramp of `test_soft_clip`: `(j&255)*(1/32.f)-4.f`.
+#[cfg(not(feature = "disable-float-api"))]
 fn fill_ramp(x: &mut [f32]) {
     for (j, v) in x.iter_mut().enumerate() {
         *v = (j & 255) as f32 * (1.0 / 32.0f32) - 4.0;
     }
 }
 
-/// Port of `test_soft_clip`.
+/// Port of `test_soft_clip` (`#ifndef DISABLE_FLOAT_API` upstream).
 #[test]
+#[cfg(not(feature = "disable-float-api"))]
 fn soft_clip() {
     let mut x = [0f32; 1024];
     let mut s = [0f32; 8];

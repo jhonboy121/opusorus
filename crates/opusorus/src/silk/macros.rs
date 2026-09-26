@@ -37,6 +37,11 @@ pub const RAND_MULTIPLIER: i32 = 196_314_165;
 /// `RAND_INCREMENT`.
 pub const RAND_INCREMENT: i32 = 907_633_515;
 
+// FIXED_DEBUG: `silk/MacroDebug.h` replaces the macros below that are
+// `#[cfg(not(feature = "fixed-point-debug"))]` with checking versions.
+#[cfg(feature = "fixed-point-debug")]
+pub use super::macro_debug::*;
+
 /// `SILK_MAX_ORDER_LPC`.
 pub const SILK_MAX_ORDER_LPC: usize = 24;
 
@@ -44,12 +49,14 @@ pub const SILK_MAX_ORDER_LPC: usize = 24;
 // macros.h
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMULWB`: `(a32 * (i16)b32) >> 16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_smulwb(a32: i32, b32: i32) -> i32 {
     ((a32 as i64 * (b32 as i16) as i64) >> 16) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLAWB`: `a32 + ((b32 * (i16)c32) >> 16)`.
 #[inline(always)]
 #[must_use]
@@ -74,17 +81,25 @@ pub fn silk_smlawb_chain(acc: i32, x: &[i32], c: &[i16]) -> i32 {
     let n = x.len();
     let c = &c[..n];
     let mut acc = acc;
+    // FIXED_DEBUG: the C chain of checking `silk_SMLAWB`s, newest sample first.
+    #[cfg(feature = "fixed-point-debug")]
+    for k in 0..n {
+        acc = silk_smlawb(acc, x[n - 1 - k], c[k] as i32);
+    }
+    #[cfg(not(feature = "fixed-point-debug"))]
     for k in (0..n).rev() {
         acc = acc.wrapping_add(silk_smulwb(x[n - 1 - k], c[k] as i32));
     }
     acc
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMULWT`: `(a32 * (b32 >> 16)) >> 16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_smulwt(a32: i32, b32: i32) -> i32 {
     ((a32 as i64 * (b32 >> 16) as i64) >> 16) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLAWT`: `a32 + ((b32 * (c32 >> 16)) >> 16)`.
 #[inline(always)]
 #[must_use]
@@ -97,6 +112,7 @@ pub const fn silk_smlawt(a32: i32, b32: i32, c32: i32) -> i32 {
 pub const fn silk_smulbb(a32: i32, b32: i32) -> i32 {
     (a32 as i16) as i32 * (b32 as i16) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLABB`: `a32 + (i16)b32 * (i16)c32`.
 #[inline(always)]
 #[must_use]
@@ -109,6 +125,7 @@ pub const fn silk_smlabb(a32: i32, b32: i32, c32: i32) -> i32 {
 pub const fn silk_smulbt(a32: i32, b32: i32) -> i32 {
     (a32 as i16) as i32 * (b32 >> 16)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLABT`: `a32 + (i16)b32 * (c32 >> 16)`.
 #[inline(always)]
 #[must_use]
@@ -121,24 +138,28 @@ pub const fn silk_smlabt(a32: i32, b32: i32, c32: i32) -> i32 {
 pub const fn silk_smlal(a64: i64, b32: i32, c32: i32) -> i64 {
     a64 + b32 as i64 * c32 as i64
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMULWW`: `((i64)a32 * b32) >> 16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_smulww(a32: i32, b32: i32) -> i32 {
     ((a32 as i64 * b32 as i64) >> 16) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLAWW`: `a32 + (((i64)b32 * c32) >> 16)`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_smlaww(a32: i32, b32: i32, c32: i32) -> i32 {
     (a32 as i64 + ((b32 as i64 * c32 as i64) >> 16)) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_SAT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_sat32(a: i32, b: i32) -> i32 {
     a.saturating_add(b)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB_SAT32`.
 #[inline(always)]
 #[must_use]
@@ -176,24 +197,28 @@ pub const fn silk_ror32(a32: i32, rot: i32) -> i32 {
         x.rotate_right(rot as u32) as i32
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_MUL`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_mul(a32: i32, b32: i32) -> i32 {
     a32 * b32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_MUL_uint`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_mul_uint(a32: u32, b32: u32) -> u32 {
     a32 * b32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_MLA`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_mla(a32: i32, b32: i32, c32: i32) -> i32 {
     a32 + b32 * c32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_MLA_uint`.
 #[inline(always)]
 #[must_use]
@@ -206,6 +231,7 @@ pub const fn silk_mla_uint(a32: u32, b32: u32, c32: u32) -> u32 {
 pub const fn silk_smultt(a32: i32, b32: i32) -> i32 {
     (a32 >> 16) * (b32 >> 16)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMLATT`.
 #[inline(always)]
 #[must_use]
@@ -218,6 +244,7 @@ pub const fn silk_smlatt(a32: i32, b32: i32, c32: i32) -> i32 {
 pub const fn silk_smlalbb(a64: i64, b16: i16, c16: i16) -> i64 {
     a64 + (b16 as i32 * c16 as i32) as i64
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SMULL`.
 #[inline(always)]
 #[must_use]
@@ -248,48 +275,56 @@ pub const fn silk_mla_ovflw(a32: i32, b32: i32, c32: i32) -> i32 {
 pub const fn silk_smlabb_ovflw(a32: i32, b32: i32, c32: i32) -> i32 {
     a32.wrapping_add((b32 as i16) as i32 * (c32 as i16) as i32)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_DIV32_16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_div32_16(a32: i32, b16: i32) -> i32 {
     a32 / b16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_DIV32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_div32(a32: i32, b32: i32) -> i32 {
     a32 / b32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add16(a: i16, b: i16) -> i16 {
     a + b
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add32(a: i32, b: i32) -> i32 {
     a + b
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD64`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add64(a: i64, b: i64) -> i64 {
     a + b
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_sub16(a: i16, b: i16) -> i16 {
     a - b
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_sub32(a: i32, b: i32) -> i32 {
     a - b
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB64`.
 #[inline(always)]
 #[must_use]
@@ -332,24 +367,28 @@ pub const fn silk_sat32(a: i64) -> i32 {
         a as i32
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_SAT16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_sat16(a: i16, b: i32) -> i16 {
     silk_sat16(a as i32 + b) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB_SAT16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_sub_sat16(a: i16, b: i32) -> i16 {
     silk_sat16(a as i32 - b) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_SAT64`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_sat64(a: i64, b: i64) -> i64 {
     a.saturating_add(b)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB_SAT64`.
 #[inline(always)]
 #[must_use]
@@ -376,18 +415,21 @@ pub const fn silk_add_pos_sat32(a: i32, b: i32) -> i32 {
         a + b
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT8`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_lshift8(a: i8, shift: u32) -> i8 {
     ((a as u8) << shift) as i8
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT16`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_lshift16(a: i16, shift: u32) -> i16 {
     ((a as u16) << shift) as i16
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT32` / `silk_LSHIFT` (defined via unsigned shift: wraps).
 #[inline(always)]
 #[must_use]
@@ -395,12 +437,14 @@ pub const fn silk_lshift(a: i32, shift: i32) -> i32 {
     debug_assert!(shift >= 0 && shift < 32);
     ((a as u32) << shift) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_lshift32(a: i32, shift: i32) -> i32 {
     silk_lshift(a, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT64`.
 #[inline(always)]
 #[must_use]
@@ -408,6 +452,7 @@ pub const fn silk_lshift64(a: i64, shift: i32) -> i64 {
     debug_assert!(shift >= 0 && shift < 64);
     ((a as u64) << shift) as i64
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT32` / `silk_RSHIFT`.
 #[inline(always)]
 #[must_use]
@@ -415,12 +460,14 @@ pub const fn silk_rshift(a: i32, shift: i32) -> i32 {
     debug_assert!(shift >= 0 && shift < 32);
     a >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_rshift32(a: i32, shift: i32) -> i32 {
     silk_rshift(a, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT64`.
 #[inline(always)]
 #[must_use]
@@ -428,6 +475,7 @@ pub const fn silk_rshift64(a: i64, shift: i32) -> i64 {
     debug_assert!(shift >= 0 && shift < 64);
     a >> shift
 }
+const_unless_fixed_debug! {
 /// `silk_LSHIFT_SAT32`.
 #[inline(always)]
 #[must_use]
@@ -441,72 +489,85 @@ pub const fn silk_lshift_sat32(a: i32, shift: i32) -> i32 {
         shift,
     )
 }
+}
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT_ovflw`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_lshift_ovflw(a: i32, shift: i32) -> i32 {
     ((a as u32) << shift) as i32
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_LSHIFT_uint`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_lshift_uint(a: u32, shift: i32) -> u32 {
     a << shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT_uint`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_rshift_uint(a: u32, shift: i32) -> u32 {
     a >> shift
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_LSHIFT` / `silk_ADD_LSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_lshift(a: i32, b: i32, shift: i32) -> i32 {
     a + silk_lshift(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_LSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_lshift32(a: i32, b: i32, shift: i32) -> i32 {
     a + silk_lshift32(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_LSHIFT_uint`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_lshift_uint(a: u32, b: u32, shift: i32) -> u32 {
     a + (b << shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_RSHIFT` / `silk_ADD_RSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_rshift(a: i32, b: i32, shift: i32) -> i32 {
     a + silk_rshift(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_RSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_rshift32(a: i32, b: i32, shift: i32) -> i32 {
     a + silk_rshift32(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_ADD_RSHIFT_uint`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_add_rshift_uint(a: u32, b: u32, shift: i32) -> u32 {
     a + (b >> shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB_LSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_sub_lshift32(a: i32, b: i32, shift: i32) -> i32 {
     a - silk_lshift32(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_SUB_RSHIFT32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_sub_rshift32(a: i32, b: i32, shift: i32) -> i32 {
     a - silk_rshift32(b, shift)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT_ROUND`.
 #[inline(always)]
 #[must_use]
@@ -517,6 +578,7 @@ pub const fn silk_rshift_round(a: i32, shift: i32) -> i32 {
         ((a >> (shift - 1)) + 1) >> 1
     }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_RSHIFT_ROUND64`.
 #[inline(always)]
 #[must_use]
@@ -675,17 +737,40 @@ pub const fn silk_abs(a: i32) -> i32 {
 pub const fn silk_abs16(a: i16) -> i16 {
     if a > 0 { a } else { a.wrapping_neg() }
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_abs_int32`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_abs_int32(a: i32) -> i32 {
     (a ^ (a >> 31)).wrapping_sub(a >> 31)
 }
+#[cfg(not(feature = "fixed-point-debug"))]
 /// `silk_abs_int64`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_abs_int64(a: i64) -> i64 {
     if a > 0 { a } else { a.wrapping_neg() }
+}
+/// `silk_CHECK_FIT8`: narrowing (checked with `fixed-point-debug`).
+#[cfg(not(feature = "fixed-point-debug"))]
+#[inline(always)]
+#[must_use]
+pub const fn silk_check_fit8(a: i64) -> i8 {
+    a as i8
+}
+/// `silk_CHECK_FIT16`: narrowing (checked with `fixed-point-debug`).
+#[cfg(not(feature = "fixed-point-debug"))]
+#[inline(always)]
+#[must_use]
+pub const fn silk_check_fit16(a: i64) -> i16 {
+    a as i16
+}
+/// `silk_CHECK_FIT32`: narrowing (checked with `fixed-point-debug`).
+#[cfg(not(feature = "fixed-point-debug"))]
+#[inline(always)]
+#[must_use]
+pub const fn silk_check_fit32(a: i64) -> i32 {
+    a as i32
 }
 /// `silk_sign`.
 #[inline(always)]
@@ -705,17 +790,20 @@ pub const fn silk_sign(a: i32) -> i32 {
 pub const fn silk_rand(seed: i32) -> i32 {
     silk_mla_ovflw(RAND_INCREMENT, seed, RAND_MULTIPLIER)
 }
+const_unless_fixed_debug! {
 /// `silk_SMMUL`: `(i32)(((i64)a32 * b32) >> 32)`.
 #[inline(always)]
 #[must_use]
 pub const fn silk_smmul(a32: i32, b32: i32) -> i32 {
     silk_rshift64(silk_smull(a32, b32), 32) as i32
 }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Inlines.h
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// `silk_CLZ64`.
 #[inline(always)]
 #[must_use]
@@ -729,6 +817,7 @@ pub const fn silk_clz64(input: i64) -> i32 {
         silk_clz32(in_upper)
     }
 }
+}
 
 /// `silk_CLZ_FRAC`: returns `(leading zeros, 7 bits right after the leading one)`.
 #[inline(always)]
@@ -738,6 +827,7 @@ pub const fn silk_clz_frac(input: i32) -> (i32, i32) {
     (lzeros, silk_ror32(input, 24 - lzeros) & 0x7f)
 }
 
+const_unless_fixed_debug! {
 /// `silk_SQRT_APPROX`: approximation of square root.
 #[inline]
 #[must_use]
@@ -752,7 +842,9 @@ pub const fn silk_sqrt_approx(x: i32) -> i32 {
     // Increment using fractional part of input.
     silk_smlawb(y, y, silk_smulbb(213, frac_q7))
 }
+}
 
+const_unless_fixed_debug! {
 /// `silk_DIV32_varQ`: a good approximation of `(a32 << Qres) / b32`.
 #[inline]
 #[must_use]
@@ -784,7 +876,9 @@ pub const fn silk_div32_varq(a32: i32, b32: i32, qres: i32) -> i32 {
         0
     }
 }
+}
 
+const_unless_fixed_debug! {
 /// `silk_INVERSE32_varQ`: a good approximation of `(1 << Qres) / b32`.
 #[inline]
 #[must_use]
@@ -812,6 +906,7 @@ pub const fn silk_inverse32_varq(b32: i32, qres: i32) -> i32 {
         // Avoid undefined result.
         0
     }
+}
 }
 
 #[cfg(test)]

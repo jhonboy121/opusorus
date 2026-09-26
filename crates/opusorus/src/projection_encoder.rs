@@ -19,7 +19,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::analysis::{downmix_float, downmix_int};
+#[cfg(not(feature = "disable-float-api"))]
+use crate::analysis::downmix_float;
+use crate::analysis::downmix_int;
 use crate::celt::arch::{MAX_ENCODING_DEPTH, OpusRes, OpusVal32, int16tosig};
 use crate::celt::mathops::isqrt32;
 use crate::encoder::code_to_result;
@@ -27,6 +29,8 @@ use crate::encoder::request::{
     OPUS_PROJECTION_GET_DEMIXING_MATRIX_GAIN_REQUEST,
     OPUS_PROJECTION_GET_DEMIXING_MATRIX_SIZE_REQUEST,
 };
+#[cfg(not(feature = "disable-float-api"))]
+use crate::mapping_matrix::mapping_matrix_multiply_channel_in_float;
 use crate::mapping_matrix::{
     MAPPING_MATRIX_FIFTHOA_DEMIXING, MAPPING_MATRIX_FIFTHOA_DEMIXING_DATA,
     MAPPING_MATRIX_FIFTHOA_MIXING, MAPPING_MATRIX_FIFTHOA_MIXING_DATA, MAPPING_MATRIX_FOA_DEMIXING,
@@ -36,13 +40,14 @@ use crate::mapping_matrix::{
     MAPPING_MATRIX_SOA_DEMIXING, MAPPING_MATRIX_SOA_DEMIXING_DATA, MAPPING_MATRIX_SOA_MIXING,
     MAPPING_MATRIX_SOA_MIXING_DATA, MAPPING_MATRIX_TOA_DEMIXING, MAPPING_MATRIX_TOA_DEMIXING_DATA,
     MAPPING_MATRIX_TOA_MIXING, MAPPING_MATRIX_TOA_MIXING_DATA, MappingMatrix, MappingMatrixHeader,
-    mapping_matrix_get_size, mapping_matrix_multiply_channel_in_float,
-    mapping_matrix_multiply_channel_in_int24, mapping_matrix_multiply_channel_in_short,
+    mapping_matrix_get_size, mapping_matrix_multiply_channel_in_int24,
+    mapping_matrix_multiply_channel_in_short,
 };
 use crate::ms_encoder::{MsEncoder, ms_encoder_get_size};
 use crate::{Application, Error, Result};
 
 /// Port of src/opus_projection_encoder.c:opus_projection_copy_channel_in_float.
+#[cfg(not(feature = "disable-float-api"))]
 fn opus_projection_copy_channel_in_float(
     dst: &mut [OpusRes],
     dst_stride: usize,
@@ -280,9 +285,9 @@ pub fn projection_ambisonics_encoder_get_size(channels: i32, mapping_family: i32
 /// assert_eq!((enc.streams(), enc.coupled_streams()), (2, 2));
 /// let matrix = enc.demixing_matrix(); // for the decoder / Ogg header
 /// assert_eq!(matrix.len(), enc.demixing_matrix_size());
-/// let pcm = vec![0.0f32; 960 * 4];
+/// let pcm = vec![0i16; 960 * 4];
 /// let mut packet = vec![0u8; 4000];
-/// let len = enc.encode_float(&pcm, 960, &mut packet)?;
+/// let len = enc.encode(&pcm, 960, &mut packet)?;
 /// assert!(len >= 3);
 /// # Ok::<(), opusorus::Error>(())
 /// ```
@@ -457,10 +462,12 @@ impl ProjectionEncoder {
     }
 
     /// Port of src/opus_projection_encoder.c:opus_projection_encode_float: encodes a frame of
-    /// float PCM. Otherwise as [`ProjectionEncoder::encode`].
+    /// float PCM. Otherwise as [`ProjectionEncoder::encode`]. Not available with the
+    /// `disable-float-api` feature (libopus `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`MsEncoder::encode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn encode_float(
         &mut self,
         pcm: &[f32],

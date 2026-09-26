@@ -50,6 +50,7 @@
 #undef update_plc_state
 
 #include "entenc.h"
+#include "oracle_float_cast.h"
 
 /* Library prototypes (the header declarations above were renamed). */
 int celt_decoder_get_size(int channels);
@@ -74,8 +75,10 @@ int opus_custom_decode(CELTDecoder *st, const unsigned char *data, int len, opus
                        int frame_size);
 int opus_custom_decode24(CELTDecoder *st, const unsigned char *data, int len, opus_int32 *pcm,
                          int frame_size);
+#ifndef DISABLE_FLOAT_API
 int opus_custom_decode_float(CELTDecoder *st, const unsigned char *data, int len, float *pcm,
                              int frame_size);
+#endif
 #endif
 
 int oracle_cd_has_qext(void) {
@@ -218,10 +221,12 @@ int oracle_cd_custom_decode24(void *p, const unsigned char *data, int len, int *
                               int frame_size) {
   return opus_custom_decode24(((oracle_cd *)p)->st, data, len, pcm, frame_size);
 }
+#ifndef DISABLE_FLOAT_API
 int oracle_cd_custom_decode_float(void *p, const unsigned char *data, int len, float *pcm,
                                   int frame_size) {
   return opus_custom_decode_float(((oracle_cd *)p)->st, data, len, pcm, frame_size);
 }
+#endif
 #endif
 
 #define ORACLE_CD_NINTS 22

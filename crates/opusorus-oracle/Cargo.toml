@@ -17,6 +17,12 @@ custom-modes = []
 # and its 24-bit internal resolution variant (`ENABLE_RES24`). Replaces the float oracle.
 fixed-point = []
 fixed-res24 = ["fixed-point"]
+# `DISABLE_FLOAT_API` (fixed-point only, as upstream; `src/analysis.c` + `mlp*.c` are not built;
+# shims marked `// oracle-requires: float-api` are left out) and `FIXED_DEBUG` (the checking
+# `celt/fixed_debug.h` + `silk/MacroDebug.h` macros; their messages are captured by
+# `csrc/fixed_debug.c`).
+disable-float-api = []
+fixed-point-debug = ["fixed-point"]
 # DNN features: build libopus with the matching --enable-* defines and the model data from
 # scripts/fetch_dnn_models.sh.
 deep-plc = []

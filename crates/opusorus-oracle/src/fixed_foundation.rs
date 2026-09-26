@@ -23,15 +23,21 @@ unsafe extern "C" {
     fn ofx_gconst2(x: f64, bits: c_int) -> c_int;
     fn ofx_frac_mul16(a: c_int, b: c_int) -> c_int;
     fn ofx_res2float(a: c_int) -> f32;
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_float2res(a: f32) -> c_int;
     fn ofx_float2int(x: f32) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_float2int16(x: f32) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_float2int24(x: f32) -> c_int;
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_float2sig(x: f32) -> c_int;
     fn ofx_fast_atan2f(y: f32, x: f32) -> f32;
     #[cfg(feature = "qext")]
     fn ofx_celt_cos_norm2(x: f32) -> f32;
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_celt_float2int16(input: *const f32, out: *mut i16, cnt: c_int);
+    #[cfg(not(feature = "disable-float-api"))]
     fn ofx_opus_limit2_checkwithin1(samples: *mut f32, cnt: c_int) -> c_int;
     fn ofx_constants(out: *mut c_int);
     fn ofx_math1(op: c_int, x: c_int) -> c_int;
@@ -280,14 +286,18 @@ pure! {
     fn frac_mul16(a: i32, b: i32) -> i32 = ofx_frac_mul16;
     /// C `RES2FLOAT`.
     fn res2float(a: i32) -> f32 = ofx_res2float;
+    #[cfg(not(feature = "disable-float-api"))]
     /// C `FLOAT2RES`.
     fn float2res(a: f32) -> i32 = ofx_float2res;
     /// C `float2int`.
     fn float2int(x: f32) -> i32 = ofx_float2int;
+    #[cfg(not(feature = "disable-float-api"))]
     /// C `FLOAT2INT16`.
     fn float2int16(x: f32) -> i32 = ofx_float2int16;
+    #[cfg(not(feature = "disable-float-api"))]
     /// C `FLOAT2INT24`.
     fn float2int24(x: f32) -> i32 = ofx_float2int24;
+    #[cfg(not(feature = "disable-float-api"))]
     /// C `FLOAT2SIG` (fixed-point `float_cast.h`).
     fn float2sig(x: f32) -> i32 = ofx_float2sig;
     /// C `fast_atan2f` (compiled for `analysis.c` in fixed-point builds).
@@ -304,6 +314,7 @@ pub fn celt_cos_norm2(x: f32) -> f32 {
     unsafe { ofx_celt_cos_norm2(x) }
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `celt_float2int16_c`.
 #[must_use]
 pub fn celt_float2int16(input: &[f32]) -> Vec<i16> {
@@ -313,6 +324,7 @@ pub fn celt_float2int16(input: &[f32]) -> Vec<i16> {
     out
 }
 
+#[cfg(not(feature = "disable-float-api"))]
 /// C `opus_limit2_checkwithin1_c` (clamps in place).
 pub fn opus_limit2_checkwithin1(samples: &mut [f32]) -> i32 {
     // SAFETY: the buffer holds `samples.len()` elements.

@@ -61,6 +61,20 @@ fn signal(frames: usize) -> Vec<f32> {
         .collect()
 }
 
+/// `Encoder::encode_float`, or (`disable-float-api`) `Encoder::encode` of the rounded samples.
+fn encode_float(enc: &mut Encoder, pcm: &[f32], n: usize, out: &mut [u8]) -> usize {
+    #[cfg(not(feature = "disable-float-api"))]
+    return enc.encode_float(pcm, n, out).unwrap();
+    #[cfg(feature = "disable-float-api")]
+    {
+        let s: Vec<i16> = pcm
+            .iter()
+            .map(|&v| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
+            .collect();
+        enc.encode(&s, n, out).unwrap()
+    }
+}
+
 /// 20 ms packets of the Rust encoder: CELT (stereo, 128 kb/s), hybrid (SWB, 40 kb/s), SILK
 /// (WB, 24 kb/s, 16 kHz internal as needed by OSCE and the BWE) and, with QEXT, Opus HD.
 fn packets() -> Vec<Vec<u8>> {
@@ -77,7 +91,7 @@ fn packets() -> Vec<Vec<u8>> {
             .unwrap();
         for f in pcm.chunks(2 * 960) {
             let mut buf = [0u8; 1500];
-            let n = enc.encode_float(f, 960, &mut buf).unwrap();
+            let n = encode_float(&mut enc, f, 960, &mut buf);
             out.push(buf[..n].to_vec());
         }
     }
@@ -94,7 +108,7 @@ fn packets() -> Vec<Vec<u8>> {
             .collect();
         for f in pcm96.chunks(2 * 1920) {
             let mut buf = [0u8; 1500];
-            let n = enc.encode_float(f, 1920, &mut buf).unwrap();
+            let n = encode_float(&mut enc, f, 1920, &mut buf);
             out.push(buf[..n].to_vec());
         }
     }

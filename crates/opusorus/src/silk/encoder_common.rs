@@ -944,6 +944,7 @@ pub fn silk_stereo_quant_pred(pred_q13: &mut [i32; 2], ix: &mut [[i8; 3]; 2]) {
 // HP_variable_cutoff.c
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// Port of silk/HP_variable_cutoff.c:silk_HP_variable_cutoff — high-pass filter with cutoff
 /// frequency adaptation based on pitch lag statistics.
 ///
@@ -997,6 +998,7 @@ pub const fn silk_hp_variable_cutoff(ps_enc_c1: &mut SilkEncoderState) {
             silk_lshift(silk_lin2log(VARIABLE_HP_MAX_CUTOFF_HZ), 8),
         );
     }
+}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1074,6 +1076,7 @@ pub fn silk_control_snr(ps_enc_c: &mut SilkEncoderState, mut target_rate_bps: i3
 // control_audio_bandwidth.c
 // ---------------------------------------------------------------------------------------------
 
+const_unless_fixed_debug! {
 /// Port of silk/control_audio_bandwidth.c:silk_control_audio_bandwidth — control internal
 /// sampling rate. Returns the internal sampling rate in kHz.
 pub const fn silk_control_audio_bandwidth(
@@ -1165,6 +1168,7 @@ pub const fn silk_control_audio_bandwidth(
     }
 
     fs_khz
+}
 }
 
 // ---------------------------------------------------------------------------------------------

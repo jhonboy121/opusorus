@@ -160,6 +160,7 @@ impl Dec {
             sys::opus_decode24(self.ptr.as_ptr(), d, l, pcm.as_mut_ptr(), frame_size, fec)
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_decode_float`.
     pub fn decode_float(
         &mut self,
@@ -279,6 +280,7 @@ impl MsDec {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_multistream_decode_float`.
     pub fn decode_float(
         &mut self,
@@ -409,6 +411,7 @@ impl ProjDec {
             )
         })
     }
+    #[cfg(not(feature = "disable-float-api"))]
     /// `opus_projection_decode_float`.
     pub fn decode_float(
         &mut self,

@@ -10,9 +10,11 @@ use opus::repacketizer as rpk;
 
 use crate::handle::{self, Access, Kind, Object};
 use crate::types::OpusRepacketizer;
+#[cfg(not(feature = "disable-float-api"))]
+use crate::util::buf_len;
 use crate::util::{
-    CResult, OPUS_BAD_ARG, OPUS_INTERNAL_ERROR, OPUS_INVALID_STATE, OPUS_OK, buf_len, byte_len,
-    code, guard, guard_any, ret_code, size_to_int, slice, slice_mut,
+    CResult, OPUS_BAD_ARG, OPUS_INTERNAL_ERROR, OPUS_INVALID_STATE, OPUS_OK, byte_len, code, guard,
+    guard_any, ret_code, size_to_int, slice, slice_mut,
 };
 
 /// `OPUS_INVALID_PACKET`.
@@ -228,6 +230,7 @@ pub unsafe extern "C" fn opus_packet_has_lbrr(packet: *const u8, len: i32) -> c_
 /// # Safety
 /// `pcm` holds `frame_size * channels` samples and `softclip_mem` `channels` values (or they are
 /// NULL).
+#[cfg(not(feature = "disable-float-api"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opus_pcm_soft_clip(
     pcm: *mut f32,

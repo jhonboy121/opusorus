@@ -8,6 +8,10 @@
 //! without `qext`): the analysis is float in both, but in fixed-point builds its input signal
 //! (`opus_val32`: downmix output, `inmem`, the resampler state and energy) is `celt_sig` (`i32`)
 //! and `is_digital_silence` takes `opus_res` (`i16`, or `i32` with `fixed-res24`).
+//!
+//! Not with `disable-float-api`: `DISABLE_FLOAT_API` compiles `src/analysis.c` out.
+
+#![cfg(not(feature = "disable-float-api"))]
 
 use opusorus::analysis::{
     self as a, AnalysisInfo, DETECT_SIZE, DownmixFunc, TonalityAnalysisState,

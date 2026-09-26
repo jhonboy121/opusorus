@@ -43,6 +43,8 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | O7 | DNN debug float: float copies of the int8 layers, float compute (`DISABLE_DEBUG_FLOAT` undefined) | `--enable-dnn-debug-float` | `dnn-debug-float` | ✅ |
 | O8 | OSCE training data output (`ENABLE_OSCE_TRAINING_DATA`: encoder + OSCE feature files, `opus_demo -silk_random_switching`) | `--enable-osce-training-data` | `osce-training-data` | ✅ |
 | O9 | Generative packet loss model (`dnn/lossgen.c`, `opus_demo -sim_loss`, `lossgen_demo`) | `--enable-lossgen` | `lossgen` | ✅ |
+| O10 | No float API: float entry points, soft clip and the encoder's float analysis (analysis.c, mlp) compiled out; requires fixed point (the float build does not compile with it upstream) | `--disable-float-api` (`DISABLE_FLOAT_API`) | `disable-float-api` | ✅ |
+| O11 | Checking fixed-point arithmetic (`celt/fixed_debug.h`, `silk/MacroDebug.h`): range checks with libopus' diagnostics, `celt_mips` operation count; implies fixed point | `--enable-fixed-point-debug` (`FIXED_DEBUG`) | `fixed-point-debug` | ✅ |
 
 ## Tooling & quality
 | # | Item | Status |

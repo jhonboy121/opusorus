@@ -15,9 +15,9 @@
 //! # fn main() -> opusorus::Result<()> {
 //! // 5.1 surround (Vorbis order): 4 streams, 2 of them coupled.
 //! let mut dec = MsDecoder::new(48000, 6, 4, 2, &[0, 4, 1, 2, 3, 5])?;
-//! let mut pcm = vec![0f32; 960 * 6];
+//! let mut pcm = vec![0i16; 960 * 6];
 //! // A lost packet runs the concealment of every stream.
-//! assert_eq!(dec.decode_float(None, &mut pcm, 960, false)?, 960);
+//! assert_eq!(dec.decode(None, &mut pcm, 960, false)?, 960);
 //! # Ok(())
 //! # }
 //! ```
@@ -38,7 +38,9 @@
 
 use alloc::vec::Vec;
 
-use crate::celt::arch::{OpusRes, imin, res2float, res2int16, res2int24};
+#[cfg(not(feature = "disable-float-api"))]
+use crate::celt::arch::res2float;
+use crate::celt::arch::{OpusRes, imin, res2int16, res2int24};
 use crate::decoder::{
     Decoder, OPTIONAL_CLIP, OPUS_GET_BANDWIDTH_REQUEST, OPUS_GET_COMPLEXITY_REQUEST,
     OPUS_GET_FINAL_RANGE_REQUEST, OPUS_GET_GAIN_REQUEST, OPUS_GET_LAST_PACKET_DURATION_REQUEST,
@@ -64,6 +66,7 @@ pub type CopyChannelOut<'a, T> =
     dyn FnMut(&mut [T], usize, usize, Option<&[OpusRes]>, usize, usize) + 'a;
 
 /// Port of `src/opus_multistream_decoder.c:opus_copy_channel_out_float`.
+#[cfg(not(feature = "disable-float-api"))]
 fn opus_copy_channel_out_float(
     dst: &mut [f32],
     dst_stride: usize,
@@ -455,6 +458,7 @@ impl MsDecoder {
     /// # Errors
     /// As [`MsDecoder::decode_float`].
     #[doc(hidden)]
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn opus_multistream_decode_float(
         &mut self,
         data: Option<&[u8]>,
@@ -513,10 +517,12 @@ impl MsDecoder {
             .map(|n| n as usize)
     }
 
-    /// Decodes a multistream packet to interleaved float PCM. See [`MsDecoder::decode`].
+    /// Decodes a multistream packet to interleaved float PCM. See [`MsDecoder::decode`]. Not
+    /// available with the `disable-float-api` feature (libopus `DISABLE_FLOAT_API`).
     ///
     /// # Errors
     /// As [`MsDecoder::decode`].
+    #[cfg(not(feature = "disable-float-api"))]
     pub fn decode_float(
         &mut self,
         data: Option<&[u8]>,

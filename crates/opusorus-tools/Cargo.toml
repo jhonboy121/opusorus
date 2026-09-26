@@ -19,6 +19,9 @@ qext = ["opusorus/qext"]
 # like upstream's tools in a `--enable-fixed-point` build (the compare tools are float code).
 fixed-point = ["opusorus/fixed-point"]
 fixed-res24 = ["fixed-point", "opusorus/fixed-res24"]
+# libopus `--disable-float-api` (needs `fixed-point`) and `--enable-fixed-point-debug` builds.
+disable-float-api = ["opusorus/disable-float-api"]
+fixed-point-debug = ["fixed-point", "opusorus/fixed-point-debug"]
 # DNN features of `opus_demo` (libopus `--enable-deep-plc` / `--enable-dred` / `--enable-osce`):
 # deep PLC at `-dec_complexity` >= 5, DRED decoding (`opus_dred_parse` +
 # `opus_decoder_dred_decode24` after losses) and `-enable_osce_bwe`. The weights are read from

@@ -13,8 +13,8 @@ meson/CMake never define it). The port mirrors this with two cargo features on `
 
 **These features are not additive: they replace the float implementation**, exactly like the
 configure switch (output becomes bit-exact with a fixed-point libopus instead of the float one).
-The float API (`opus_encode_float`, ...) stays available, as in upstream's default
-(`DISABLE_FLOAT_API` is not ported). Like upstream configure, `fixed-point` cannot be combined
+The float API (`opus_encode_float`, ...) stays available, as in upstream's default; the
+`disable-float-api` feature removes it (`DISABLE_FLOAT_API`, below). Like upstream configure, `fixed-point` cannot be combined
 with `deep-plc`, `dred` or `osce` (`compile_error!` / oracle build-script panic) — hence
 `--all-features` is not a valid configuration any more; `just check|clippy|test` use the two
 "everything on" feature lists `float_all` / `fixed_all` of the `justfile`.
@@ -204,5 +204,56 @@ tests, and verifies bit-exactness with `fixed-point`, `fixed-res24` and `qext` c
 | FX4 | `fixed_opus_encoder` ✅ | `encoder.rs`, `ms_encoder.rs`, `projection_encoder.rs` | opus_encoder.c (16), opus_multistream_encoder.c (2), opus_projection_encoder.c | Done: modules un-gated, `opus_encoder` shim `any` (renames the non-static fixed `silk_biquad_res`), `opus_encoder.rs` runs in every fixed config (+ `qext`, `custom-modes`). `#[cfg]` pairs for `silk_biquad_res`/`dc_reject`/`stereo_fade`/`gain_fade`/`compute_stereo_width`/`compute_frame_energy`/`logSum`, `hp_cutoff` uses `silk_biquad_alt_stride1/2` with 16-bit `opus_res`, analysis from complexity 10, Q15 HB/stereo gains, Q24 surround masking; `opus_encode` (res16) / `opus_encode24` (res24) pass the input through. Stereo streams with `OPUS_SET_LFE(1)` overflow in `stereo_itheta` (C UB): wrapping since FX5 (the `opus_encoder.rs` suite still keeps LFE on mono encoders in fixed builds) |
 | FX5 | `fixed_integration` ✅ (`fx5_api` part) | `lib.rs` docs, `opusorus/tests`, examples, `opusorus-tools`, overflow hardening (`celt/vq.rs`, `celt/mathops/fixed.rs`, `celt/celt_encoder/fixed.rs`), `opusorus-capi`, `opusorus-bench` | — | `fx5_api`: public tests + examples un-gated (all fixed configs, wasmtime), `opus_demo`/`qext_compare` un-gated, C `opus_demo` comparison vs the fixed oracle, RFC 8251 + Opus HD procedure with the fixed decoder, public-API overflow sweep + fixes, docs. C ABI and benchmarks: separate FX5 parts |
 
-Not ported (upstream-specific): `celt/fixed_debug.h` (`FIXED_DEBUG`, a checking variant of the
-same macros), `celt/opus_custom_demo.c`, `celt/dump_modes/*`, the `arm`/`mips`/`x86` overrides.
+Not ported (upstream-specific): `celt/opus_custom_demo.c`, `celt/dump_modes/*`, the
+`arm`/`mips`/`x86` overrides.
+
+## No float API (`disable-float-api`, `DISABLE_FLOAT_API`)
+
+libopus' `--disable-float-api` (meson `-Dfloat-api=false`, CMake `OPUS_ENABLE_FLOAT_API=OFF`)
+compiles out, in all 56 `DISABLE_FLOAT_API` sites: the float entry points
+(`opus_encode_float`, `opus_decode_float`, their multistream / projection / Opus Custom
+versions, `opus_pcm_soft_clip`), `FLOAT2INT16` / `FLOAT2INT24` / `FLOAT2SIG` /
+`celt_float2int16` / `opus_limit2_checkwithin1`, the float mapping-matrix products, and
+`src/analysis.c` + `mlp.c` + `mlp_data.c` (`OPUS_SOURCES_FLOAT`): the Opus encoder then has no
+`TonalityAnalysisState` / `detected_bandwidth`, resets `voice_ratio` to -1 on every frame, never
+passes an `AnalysisInfo` to CELT (`CELT_SET_ANALYSIS`), and the CELT encoder ignores one set
+directly (trim, dynalloc leak boost, prefilter gain, VBR activity/tonality boost, signal
+bandwidth). The port mirrors each site (`#[cfg(not(feature = "disable-float-api"))]`).
+Upstream's float build does not compile with the option (the float decoder needs
+`FLOAT2INT16` and the soft clipper), so the feature requires `fixed-point` (`compile_error!`;
+the oracle build script refuses it too). Verified with the oracle built with
+`-DDISABLE_FLOAT_API` (without `OPUS_SOURCES_FLOAT`; shims marked
+`// oracle-requires: float-api` are left out): every fixed differential suite (the float-API
+cases use 24-bit PCM instead), the libopus test-suite port (`#ifndef DISABLE_FLOAT_API` parts
+compiled out as upstream) and upstream's C tests through the C ABI compiled with
+`-DDISABLE_FLOAT_API`, in 16-bit and in 24-bit + QEXT + custom modes.
+
+## Checking arithmetic (`fixed-point-debug`, `FIXED_DEBUG`)
+
+`--enable-fixed-point-debug` replaces `celt/fixed_generic.h` with `celt/fixed_debug.h` and adds
+`silk/MacroDebug.h`: every macro checks its operand and result ranges, prints a diagnostic
+(`fprintf(stderr, ...)`) and continues. The port (PLAN D-029): `celt/arch/fixed_debug.rs` and
+`silk/macro_debug.rs` replace the release functions of the same names (the release ones are
+`#[cfg(not(feature = "fixed-point-debug"))]`), keeping their Rust signatures, and compute what
+the C debug functions compute, which differs from the release macros where operands are out of
+range (no truncation of `MULT16_16`'s operands, 64-bit `MULT16_32_Q15`, 16-bit results of
+`SHR16`/`SUB16`/`MULT16_16_Q15`, `DIV32_16` saturation and division by zero, 16-bit
+`silk_ADD_LSHIFT`, ...) and in the multiply forms the debug header always uses (the 16-bit
+partial-product `MULT32_32_Q31` / `P31` / `Q32` / `MULT16_32_Q16` on every target; the
+`OPUS_FAST_INT64` accumulation of `_celt_lpc` stays). Diagnostics have libopus' text (the
+location is the Rust call site, `#[track_caller]`); they go to stderr with `std`, or to a
+per-thread handler (`fixed_debug::set_handler`, e.g. to collect them or to panic like
+`FIXED_DEBUG_ASSERT`); without `std` they are only counted. `celt_mips` counts each CELT macro's
+weight exactly as C; whole-codec totals differ from C's (the C macros re-evaluate operands with
+side effects, e.g. the debug `MULT32_32_Q31(a,b)` expands `b` three times, and the port computes
+some expressions without the macros). The functions that call the checking macros are no longer
+`const` in this build (`const_unless_fixed_debug!`). The overflow-hardening sites use the
+checking macros (which wrap and report like C).
+
+Verification (oracle built with `-DFIXED_DEBUG`; its `fprintf` is captured by
+`csrc/fixed_debug.c`): `tests/fixed_debug.rs` compares every CELT and SILK checking macro on
+random and edge operands (values, diagnostic text without location, `celt_mips`), and whole
+encode/decode streams including overflowing ones (stereo LFE on full-scale noise, maximum decoder
+gain: 34 607 C diagnostics in the 16-bit build) for the same set of distinct diagnostics; every fixed differential
+suite passes bit-exactly in 16-bit and 24-bit + QEXT + custom modes, also combined with
+`disable-float-api` (`just test-options`).

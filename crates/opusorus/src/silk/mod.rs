@@ -17,6 +17,8 @@ pub mod errors;
 pub mod fixed;
 #[cfg(not(feature = "fixed-point"))]
 pub mod float;
+#[cfg(feature = "fixed-point-debug")]
+mod macro_debug;
 pub mod macros;
 pub mod nlsf;
 pub mod nsq;

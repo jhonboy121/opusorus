@@ -9,6 +9,7 @@
  * signal buffers and the resampler state are opus_val32 (float, or opus_int32 in fixed point),
  * is_digital_silence takes opus_res (float, short, or int with ENABLE_RES24). */
 // oracle-build: any
+// oracle-requires: float-api
 #include <stddef.h>
 #include "opus_types.h"
 #include "opus_custom.h"

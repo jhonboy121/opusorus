@@ -15,6 +15,13 @@
 #include "entdec.h"
 #include "opus_custom.h"
 
+#ifdef FIXED_DEBUG
+/* celt/fixed_debug.h has no SHL and no MULT16_16_Q11 (libopus code does not use them): their
+   fixed_generic.h expansions over the checking macros. */
+#define SHL(a,shift) SHL32(a,shift)
+#define MULT16_16_Q11(a,b) (SHR(MULT16_16((a),(b)),11))
+#endif
+
 /* Defined in celt/mathops.c but not declared in a header. */
 opus_val16 celt_rcp_norm16(opus_val16 x);
 
@@ -138,19 +145,23 @@ int ofx_gconst(double x) { return GCONST(x); }
 int ofx_gconst2(double x, int bits) { return GCONST2(x, bits); }
 int ofx_frac_mul16(int a, int b) { return FRAC_MUL16(a, b); }
 float ofx_res2float(int a) { return RES2FLOAT((opus_res)a); }
-int ofx_float2res(float a) { return FLOAT2RES(a); }
 int ofx_float2int(float x) { return float2int(x); }
+#ifndef DISABLE_FLOAT_API
+int ofx_float2res(float a) { return FLOAT2RES(a); }
 int ofx_float2int16(float x) { return FLOAT2INT16(x); }
 int ofx_float2int24(float x) { return FLOAT2INT24(x); }
 int ofx_float2sig(float x) { return FLOAT2SIG(x); }
+#endif
 float ofx_fast_atan2f(float y, float x) { return fast_atan2f(y, x); }
 #ifdef ENABLE_QEXT
 float ofx_celt_cos_norm2(float x) { return celt_cos_norm2(x); }
 #endif
+#ifndef DISABLE_FLOAT_API
 void ofx_celt_float2int16(const float *in, short *out, int cnt) { celt_float2int16_c(in, out, cnt); }
 int ofx_opus_limit2_checkwithin1(float *samples, int cnt) {
   return opus_limit2_checkwithin1_c(samples, cnt);
 }
+#endif
 
 /* Build constants: see `constants()` in the Rust bindings for the order. */
 void ofx_constants(int *out) {

@@ -42,9 +42,11 @@ int oracle_pk_parse_impl(const unsigned char *data, int len, int self_delimited,
   return ret;
 }
 
+#ifndef DISABLE_FLOAT_API
 void oracle_pk_soft_clip_impl(float *x, int n, int c, float *mem) {
   opus_pcm_soft_clip_impl(x, n, c, mem, 0);
 }
+#endif
 
 /* ---------------------------------------------------------------- extensions.c */
 
@@ -200,6 +202,7 @@ void oracle_mm_multiply(int kind, int rows, int cols, const short *mdata, const 
                         int in_rows, void *out, int row, int out_rows, int frame_size) {
   MappingMatrix *m = mm_make(rows, cols, 0, mdata);
   switch (kind) {
+#ifndef DISABLE_FLOAT_API
     case 0:
       mapping_matrix_multiply_channel_in_float(m, (const float *)in, in_rows, (opus_res *)out,
                                                row, out_rows, frame_size);
@@ -208,6 +211,7 @@ void oracle_mm_multiply(int kind, int rows, int cols, const short *mdata, const 
       mapping_matrix_multiply_channel_out_float(m, (const opus_res *)in, row, in_rows,
                                                 (float *)out, out_rows, frame_size);
       break;
+#endif
     case 2:
       mapping_matrix_multiply_channel_in_short(m, (const opus_int16 *)in, in_rows,
                                                (opus_res *)out, row, out_rows, frame_size);
@@ -255,6 +259,7 @@ int oracle_mm_static(int idx, int *rows, int *cols, int *gain, short *data, int 
 }
 
 /* ---------------------------------------------------------------- mlp.c */
+#ifndef DISABLE_FLOAT_API /* mlp.c / mlp_data.c are part of the float API */
 
 void oracle_mlp_dense(const signed char *bias, const signed char *weights, int nb_inputs,
                       int nb_neurons, int sigmoid, float *output, const float *input) {
@@ -285,6 +290,7 @@ void oracle_mlp_builtin(int which, float *out_or_state, const float *input) {
   else if (which == 1) analysis_compute_gru(&layer1, out_or_state, input);
   else analysis_compute_dense(&layer2, out_or_state, input);
 }
+#endif
 
 /* ---------------------------------------------------------------- opus_multistream.c */
 
@@ -351,6 +357,7 @@ int oracle_rp_cat_sd(OpusRepacketizer *rp, const unsigned char *data, int len) {
   return opus_repacketizer_cat_impl(rp, data, len, 1);
 }
 
+#ifndef DISABLE_FLOAT_API
 #define analysis_compute_dense oracle_mlpc_dense
 #define analysis_compute_gru oracle_mlpc_gru
 #include "mlp.c"
@@ -359,3 +366,4 @@ int oracle_rp_cat_sd(OpusRepacketizer *rp, const unsigned char *data, int len) {
 
 float oracle_mlp_tansig(float x) { return tansig_approx(x); }
 float oracle_mlp_sigmoid(float x) { return sigmoid_approx(x); }
+#endif

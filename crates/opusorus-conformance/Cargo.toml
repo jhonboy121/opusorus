@@ -39,6 +39,19 @@ fixed-res24 = [
     "opusorus-oracle/fixed-res24",
     "opusorus-tools/fixed-res24",
 ]
+# libopus `DISABLE_FLOAT_API` (needs `fixed-point`) and `FIXED_DEBUG` builds of the port and the
+# oracle; the float-API tests are compiled out, `tests/fixed_debug.rs` checks the diagnostics.
+disable-float-api = [
+    "opusorus/disable-float-api",
+    "opusorus-oracle/disable-float-api",
+    "opusorus-tools/disable-float-api",
+]
+fixed-point-debug = [
+    "fixed-point",
+    "opusorus/fixed-point-debug",
+    "opusorus-oracle/fixed-point-debug",
+    "opusorus-tools/fixed-point-debug",
+]
 
 [dependencies]
 opusorus = { workspace = true, features = ["internals", "std"] }

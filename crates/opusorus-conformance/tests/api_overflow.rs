@@ -75,6 +75,18 @@ enum Input {
     F32,
 }
 
+/// `$x.encode_float(pcm, n, out)`, or with `disable-float-api` (no float API in libopus nor
+/// the port) `$x.encode24` of the same signal in 24-bit.
+macro_rules! encode_f32 {
+    ($x:expr, $pcm:expr, $n:expr, $out:expr) => {{
+        #[cfg(not(feature = "disable-float-api"))]
+        let r = $x.encode_float($pcm, $n, $out);
+        #[cfg(feature = "disable-float-api")]
+        let r = $x.encode24(&to_i24($pcm), $n, $out);
+        r
+    }};
+}
+
 fn to_i24(x: &[f32]) -> Vec<i32> {
     x.iter()
         .map(|&v| {
@@ -219,8 +231,8 @@ impl EncPair {
                 )
             }
             Input::F32 => (
-                code(self.r.encode_float(pcm, n, &mut out_r)),
-                self.c.encode_float(pcm, n, &mut out_c),
+                code(encode_f32!(self.r, pcm, n, &mut out_r)),
+                encode_f32!(self.c, pcm, n, &mut out_c),
             ),
         };
         assert_eq!(rr, cr, "{what}: encode result");
@@ -275,6 +287,16 @@ impl DecPair {
                 assert_eq!(rr, cr, "{what}: decode result");
                 assert_eq!(a, b, "{what}: int16 output");
             }
+            // DISABLE_FLOAT_API: 24-bit output instead of float.
+            #[cfg(feature = "disable-float-api")]
+            _ => {
+                let (mut a, mut b) = (vec![0i32; len], vec![0i32; len]);
+                let rr = code(self.r.decode24(data, &mut a, n, fec));
+                let cr = self.c.decode24(data, &mut b, n, fec);
+                assert_eq!(rr, cr, "{what}: decode24 result");
+                assert_eq!(a, b, "{what}: int24 output");
+            }
+            #[cfg(not(feature = "disable-float-api"))]
             1 => {
                 let (mut a, mut b) = (vec![0i32; len], vec![0i32; len]);
                 let rr = code(self.r.decode24(data, &mut a, n, fec));
@@ -282,6 +304,7 @@ impl DecPair {
                 assert_eq!(rr, cr, "{what}: decode24 result");
                 assert_eq!(a, b, "{what}: int24 output");
             }
+            #[cfg(not(feature = "disable-float-api"))]
             _ => {
                 let (mut a, mut b) = (vec![0f32; len], vec![0f32; len]);
                 let rr = code(self.r.decode_float(data, &mut a, n, fec));
@@ -333,8 +356,9 @@ fn lfe_stereo_encoder_matches_c() {
 /// Direct CELT use: up-sampled input with the full end band (see the module docs).
 #[test]
 fn celt_upsampled_full_band_matches_c() {
-    use opusorus::celt::arch::{OpusRes, float2res};
+    use opusorus::celt::arch::OpusRes;
     use opusorus::celt::celt_encoder::CeltEncoder;
+    use opusorus_conformance::float2res;
     use opusorus_oracle::celt_encoder::CeltEnc;
     let mut rng = Rng::new(0xce17_0f11);
     let mut packets = 0;
@@ -393,7 +417,7 @@ fn decoder_max_gain_matches_c() {
             .chunks(960 * 2)
             .map(|f| {
                 let mut buf = vec![0u8; 1500];
-                let n = e.encode_float(f, 960, &mut buf).unwrap();
+                let n = encode_f32!(e, f, 960, &mut buf).unwrap();
                 buf.truncate(n);
                 buf
             })
@@ -642,7 +666,7 @@ fn decoder_case(rng: &mut Rng) -> String {
     for (f, fr) in pcm.chunks(n * ech as usize).enumerate() {
         let w = format!("{what} packet {f}");
         let mut buf = vec![0u8; 1500];
-        let Ok(len) = e.encode_float(fr, n, &mut buf) else {
+        let Ok(len) = encode_f32!(e, fr, n, &mut buf) else {
             continue;
         };
         buf.truncate(len);
@@ -728,8 +752,8 @@ fn ms_case(rng: &mut Rng) -> String {
                 )
             }
             Input::F32 => (
-                code(r.encode_float(fr, n, &mut out_r)),
-                c.encode_float(fr, n, &mut out_c),
+                code(encode_f32!(r, fr, n, &mut out_r)),
+                encode_f32!(c, fr, n, &mut out_c),
             ),
         };
         assert_eq!(rr, cr, "{w}: result");
@@ -775,8 +799,8 @@ fn proj_case(rng: &mut Rng) -> String {
         let mut out_c = vec![0u8; 8000];
         let (rr, cr) = if float {
             (
-                code(r.encode_float(fr, n, &mut out_r)),
-                c.encode_float(fr, n, &mut out_c),
+                code(encode_f32!(r, fr, n, &mut out_r)),
+                encode_f32!(c, fr, n, &mut out_c),
             )
         } else {
             let x = signals::to_i16(fr);
@@ -927,7 +951,7 @@ fn extreme_input_no_panic() {
                         .collect();
                     let mut buf = vec![0u8; 1500];
                     let len = if f % 2 == 0 {
-                        e.encode_float(&x, n, &mut buf)
+                        encode_f32!(e, &x, n, &mut buf)
                     } else {
                         // The nominal 24-bit range, at its limits.
                         let y: Vec<i32> = (0..n * chu)
@@ -939,10 +963,15 @@ fn extreme_input_no_panic() {
                         e.encode24(&y, n, &mut buf)
                     };
                     if let Ok(len) = len {
+                        #[cfg(not(feature = "disable-float-api"))]
                         let mut out = vec![0f32; n * chu];
-                        accepted &= d
-                            .decode_float(Some(&buf[..len]), &mut out, n, false)
-                            .is_ok();
+                        #[cfg(not(feature = "disable-float-api"))]
+                        let r = d.decode_float(Some(&buf[..len]), &mut out, n, false);
+                        #[cfg(feature = "disable-float-api")]
+                        let mut out = vec![0i32; n * chu];
+                        #[cfg(feature = "disable-float-api")]
+                        let r = d.decode24(Some(&buf[..len]), &mut out, n, false);
+                        accepted &= r.is_ok();
                     }
                     calls += usize::from(accepted);
                 }

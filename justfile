@@ -16,6 +16,12 @@ export OPUSORUS_DNN_DEBUG_FLOAT_BLOB := env_var_or_default("OPUSORUS_DNN_DEBUG_F
 float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-tools/dred,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/dred,opusorus-capi/osce,opusorus-capi/internal-api,opusorus-bench/qext"
 fixed_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-bench/fixed-res24,opusorus-bench/qext,opusorus-tools/qext"
 
+# The fixed-point build without the float API (`disable-float-api`, libopus DISABLE_FLOAT_API)
+# and with the checking fixed-point macros (`fixed-point-debug`, libopus FIXED_DEBUG), with
+# everything else on (see `test-options`).
+nofloat_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/disable-float-api,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/disable-float-api,opusorus-capi/internal-api,opusorus-tools/qext"
+fixeddebug_all := "opusorus/internals,opusorus-conformance/fixed-point-debug,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-point-debug,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-tools/qext"
+
 default:
     @just --list
 
@@ -30,6 +36,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features qext,custom-modes,deep-plc,dred,osce
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features osce-training-data,dnn-debug-float,lossgen
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes,disable-float-api,fixed-point-debug
 
 # Format check.
 fmt:
@@ -45,6 +52,9 @@ clippy: dnn-blob
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/qext,opusorus-conformance/dred,opusorus-conformance/osce-training-data,opusorus-conformance/dnn-debug-float,opusorus-conformance/lossgen -- -D warnings
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/fixed-res24,opusorus-conformance/lossgen -- -D warnings
     cargo clippy -p opusorus --no-default-features --features lossgen -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi --all-targets --features {{nofloat_all}} -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi --all-targets --features {{fixeddebug_all}} -- -D warnings
+    cargo clippy -p opusorus --no-default-features --features fixed-point-debug,disable-float-api -- -D warnings
 
 # All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
 # loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds: the full
@@ -66,6 +76,22 @@ test: dnn-blob
     cargo test -p opusorus-capi --features fixed-point,custom-modes
     cargo test -p opusorus-capi --features fixed-res24,qext,custom-modes
     cargo test -p opusorus-bench --features fixed-res24,qext --test parity
+
+# The optional libopus build options (docs/FEATURES.md), each against the oracle built with the
+# same define(s): `disable-float-api` (DISABLE_FLOAT_API; every fixed differential suite,
+# the public-API tests and the upstream C suite through the C ABI, 16- and 24-bit + QEXT +
+# custom modes) and `fixed-point-debug` (FIXED_DEBUG; the checking macros one by one, then the
+# fixed differential suites, 16-bit and 24-bit + QEXT + custom modes).
+test-options:
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    cargo test -p opusorus -p opusorus-tools -p opusorus-conformance --features opusorus-conformance/fixed-point,opusorus-conformance/disable-float-api
+    cargo test -p opusorus -p opusorus-conformance --features fixed-res24,qext,custom-modes,disable-float-api
+    cargo test -p opusorus-capi --features fixed-point,custom-modes,disable-float-api
+    for f in fixed-point-debug fixed-point-debug,fixed-res24,qext,custom-modes fixed-point-debug,disable-float-api; do
+        cargo test -p opusorus-conformance --features "$f" --test fixed_debug --test fixed_foundation --test celt_fft --test celt_modes --test celt_pitch_lpc_fixed --test celt_bands --test celt_decoder --test celt_encoder --test silk_common --test silk_decoder --test silk_encoder_common --test silk_encoder_fix --test opus_decoder --test opus_encoder --test api_overflow --test vectors
+    done
+    cargo test -p opusorus --features fixed-point-debug --lib
 
 # Full-length libopus runs, exhaustive sweeps and timing tests, default and QEXT + custom-modes.
 # All tests including the ignored long ones (OPUS_TEST_FULL=1, --include-ignored).
@@ -196,4 +222,4 @@ fuzz-all:
     FEATURES=fixed-res24,qext fuzz/run_all.sh
 
 # Everything CI runs.
-ci: fmt clippy doc test cross cross-capi test-wasm
+ci: fmt clippy doc test test-options cross cross-capi test-wasm
