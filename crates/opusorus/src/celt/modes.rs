@@ -256,35 +256,24 @@ pub fn compute_allocation_table(
     alloc_vectors
 }
 
-/// Placeholder for `clt_mdct_init` (owned by the `celt_fft` unit, not available in this unit).
-///
-/// TODO(celt_fft merge): replace with `crate::celt::mdct::clt_mdct_init(n, maxshift)`.
-#[cfg(feature = "custom-modes")]
-const fn clt_mdct_init_pending(_n: i32, _maxshift: i32) -> Option<MdctLookup> {
-    None
-}
-
 /// Port of celt/modes.c:opus_custom_mode_create with `CUSTOM_MODES`.
 ///
 /// Returns a static mode when one matches (see [`opus_custom_mode_create`]), otherwise creates
 /// a custom mode. Errors are `BadArg` for unsupported parameters and `AllocFail` where C would
 /// jump to `failure`.
 ///
-/// Until the MDCT (`clt_mdct_init`, unit `celt_fft`) is merged this returns
-/// `Err(Error::AllocFail)` for non-static modes; use [`opus_custom_mode_create_with`] to supply
-/// the MDCT initialisation.
 #[cfg(feature = "custom-modes")]
 pub fn opus_custom_mode_create_custom(fs: i32, frame_size: i32) -> Result<Cow<'static, CeltMode>> {
-    opus_custom_mode_create_with(fs, frame_size, clt_mdct_init_pending)
+    opus_custom_mode_create_with(fs, frame_size, crate::celt::mdct::clt_mdct_init)
 }
 
 /// Port of celt/modes.c:opus_custom_mode_create with `CUSTOM_MODES`, with the MDCT set-up
-/// (`clt_mdct_init(&mode->mdct, N, maxLM)`, returning `None` on failure) supplied by the caller.
+/// (`clt_mdct_init(&mode->mdct, N, maxLM)`, returning an error on failure) supplied by the caller.
 #[cfg(feature = "custom-modes")]
 pub fn opus_custom_mode_create_with(
     fs: i32,
     frame_size: i32,
-    mdct_init: impl FnOnce(i32, i32) -> Option<MdctLookup>,
+    mdct_init: impl FnOnce(i32, i32) -> Result<MdctLookup>,
 ) -> Result<Cow<'static, CeltMode>> {
     use crate::celt::cwrs::log2_frac;
     use crate::celt::entcode::BITRES;
@@ -387,7 +376,9 @@ pub fn opus_custom_mode_create_with(
         ) as i16);
     }
 
-    let mdct = mdct_init(2 * short_mdct_size * nb_short_mdcts, max_lm).ok_or(Error::AllocFail)?;
+    // C jumps to `failure` (OPUS_ALLOC_FAIL) whenever clt_mdct_init fails, whatever the cause.
+    let mdct =
+        mdct_init(2 * short_mdct_size * nb_short_mdcts, max_lm).map_err(|_| Error::AllocFail)?;
 
     let empty_cache = PulseCache {
         size: 0,

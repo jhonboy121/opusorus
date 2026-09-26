@@ -203,6 +203,7 @@ fn rust_custom_create(fs: i32, n: i32) -> opusorus::Result<std::borrow::Cow<'sta
         (0..=maxshift)
             .all(|i| fft_size_ok(len >> 2 >> i))
             .then(|| MODE48000_960_120.mdct.clone())
+            .ok_or(opusorus::Error::AllocFail)
     })
 }
 
