@@ -501,3 +501,415 @@ Key files:
 - /home/neo/code/opusorus/.claude/worktrees/wf_cfc8900e-9ea-1/crates/opusorus/src/celt/{vq,quant_bands,bands,celt}.rs
 - crates/opusorus-oracle/{csrc/celt_bands.c, src/celt_bands.rs}
 - crates/opusorus-conformance/tests/celt_bands.rs
+
+## `celt_decoder`
+
+### api for other units
+
+Module opusorus::celt::celt_decoder (crates/opusorus/src/celt/celt_decoder.rs):
+
+pub struct CeltDecoder<'m> — the mode is borrowed. The Opus decoder should use CeltDecoder<'static>.
+- Public fields mirror C: mode, overlap, channels, stream_channels, downsample, start, end, signalling, disable_inv, complexity, [qext] qext_scale, rng, error, last_pitch_index, loss_duration, plc_duration, last_frame_type, skip_plc, postfilter_period/_old, postfilter_gain/_old, postfilter_tapset/_old, prefilter_and_fold, preemph_mem_d: [f32;2], [deep-plc] plc_pcm/plc_fill/plc_preemphasis_mem, [qext] qext_old_band_e: [f32;28], decode_mem: Vec<f32>, old_ebands, old_log_e, old_log_e2, background_log_e: Vec<f32> (2*nbEBands each), lpc: Vec<f32>.
+- Private preallocated scratch; implements Clone and Debug.
+
+Construction:
+- CeltDecoder::celt_decoder_init(sampling_rate: i32, channels: i32) -> Result<CeltDecoder<'static>>. Accepts 48/24/16/12/8 kHz, and 96 kHz with qext. Signalling defaults to 1 as in C, so the Opus decoder must call set_signalling(0) just as C does.
+- CeltDecoder::opus_custom_decoder_init(mode: &'m CeltMode, channels) -> Result<Self>.
+
+Decoding:
+- fn celt_decode_with_ec(&mut self, data: Option<&[u8]>, len: i32, pcm: &mut [OpusRes], frame_size: i32, dec: Option<&mut EcDec<'_>>, accum: bool) -> Result<i32>
+  - data None, or len <= 1, means packet loss (PLC).
+  - dec Some means hybrid with the shared SILK range decoder; dec None makes the decoder create its own over &data[..len].
+  - Returns the samples per channel. On an error, Err maps to the C code via Error::code().
+  - When C returns OPUS_INTERNAL_ERROR after writing the output, this returns Err(InternalError) and pcm is already written, exactly like C.
+- fn celt_decode_with_ec_dred(... same ..., #[cfg(qext)] qext_payload: Option<&[u8]>) -> Result<i32>
+  - The Opus decoder passes the QEXT padding-extension payload here (C ext->data / ext->len).
+  - There is no lpcnet argument yet (DNN hook).
+
+CTLs:
+- set_complexity(i32) -> Result<()>, complexity()
+- set_start_band(i32) -> Result<()> (CELT_SET_START_BAND)
+- set_end_band(i32) -> Result<()>
+- set_channels(i32) -> Result<()> (CELT_SET_CHANNELS = stream channels)
+- get_and_clear_error() -> i32
+- lookahead() -> i32
+- reset() (OPUS_RESET_STATE)
+- pitch() -> i32 (OPUS_GET_PITCH)
+- mode() -> &'m CeltMode (CELT_GET_MODE)
+- set_signalling(i32)
+- final_range() -> u32
+- set_phase_inversion_disabled(i32) -> Result<()>, phase_inversion_disabled() -> i32
+- Numeric forms ctl_set(request, value) -> Result<()> and ctl_get(request) -> Result<i32>; unknown requests return Err(Unimplemented). Request constants are re-exported: OPUS_*_REQUEST, OPUS_RESET_STATE, CELT_*_REQUEST.
+
+Free functions:
+- celt_decoder_get_size(channels) and opus_custom_decoder_get_size(mode, channels): Rust memory footprint in bytes, not the C struct size.
+- validate_celt_decoder(&CeltDecoder): debug_asserts.
+- deemphasis(input: &[&[f32]], pcm, n, c, downsample, coef: &[f32;4], mem: &mut [f32;2], accum, scratch: &mut [f32]).
+- celt_synthesis(mode, x, out_syn: &mut [&mut [f32]], old_band_e, start, eff_end, c, cc, is_transient: bool, lm, downsample, silence: bool, [qext] qext_mode: Option<&CeltMode>, qext_band_log_e: &[f32], qext_end, freq: &mut [f32]).
+- tf_decode(start, end, is_transient: bool, tf_res: &mut [i32], lm, dec: &mut EcDec).
+- celt_plc_pitch_search(decode_mem: &[&[f32]], c: usize, qext_scale: i32, lp_pitch_buf: &mut [f32]) -> i32.
+
+Constants: PLC_PITCH_LAG_MAX/MIN, FRAME_NONE/NORMAL/PLC_NOISE/PLC_PERIODIC/PLC_NEURAL/DRED, DECODE_BUFFER_SIZE, PLC_UPDATE_FRAMES, [deep-plc] PLC_UPDATE_SAMPLES.
+
+custom-modes only: pub struct CustomDecoder<'m> { pub st: CeltDecoder<'m>, .. }. It derefs (mutably too) to CeltDecoder, so the CTLs work on it directly.
+- CustomDecoder::opus_custom_decoder_create(mode: &'m CeltMode, channels) -> Result<Self>
+- opus_custom_decode(data: Option<&[u8]>, len, pcm: &mut [i16], frame_size) -> Result<i32>
+- opus_custom_decode24(.., pcm: &mut [i32], ..) -> Result<i32>
+- opus_custom_decode_float(.., pcm: &mut [f32], ..) -> Result<i32>
+- To get the mode, use modes::opus_custom_mode_create_custom(fs, frame) and pass &*mode.
+
+### external needs
+
+No bugs were found in already-ported units, and no files outside this unit were edited. Files changed: crates/opusorus/src/celt/celt_decoder.rs, crates/opusorus-oracle/src/celt_decoder.rs, crates/opusorus-oracle/csrc/celt_decoder.c and crates/opusorus-conformance/tests/celt_decoder.rs. The oracle lib.rs already declared the module.
+
+Needs for the orchestrator:
+1. crates/opusorus/src/lib.rs in HEAD (8ff76ac) is not rustfmt-clean: two long #[cfg(all(...))] lines on the dnn module. Because of that, cargo fmt --all -- --check fails until someone with ownership runs cargo fmt on lib.rs.
+2. docs/TRACKER.md: the celt_decoder row can be marked ✅ with the test summary. I did not edit it.
+3. Deep PLC / DRED (DNN unit) will need these changes:
+   - an `lpcnet: Option<&mut LPCNetPLCState>` parameter on celt_decode_with_ec_dred and celt_decode_lost;
+   - the hooks at the marked lines (C celt_decoder.c:726-736, 829-831 plus 623-673, 1020-1075, 1082-1087, 1288-1293);
+   - the plc_pcm, plc_fill and plc_preemphasis_mem fields, which already exist under cfg(deep-plc) and are cleared by reset().
+4. Shared scratchpad files: other agents overwrote my patch scripts in the shared scratchpad dir. This had no effect on the committed result.
+
+### notes
+
+Deviations and behaviour, all documented in the module doc:
+- **Rust-only guards where C would go out of bounds:** these return Err(BadArg):
+  - pcm shorter than (N/downsample)*channels;
+  - `len` larger than the data slice;
+  - custom signalling on an empty slice.
+- **Channels at init:** opus_custom_decoder_init rejects channels == 0. C accepts it and then misbehaves.
+- **Decoder size:** celt_decoder_get_size reports the Rust footprint, not sizeof(C struct).
+- **Asserts:** validate_celt_decoder and the C celt_asserts are debug_assert!s.
+- **C quirks ported faithfully:**
+  - the qext ext_balance loop reads extra_quant[nbEBands+1] instead of [nbEBands+i];
+  - `mode->Fs != 96000 → qext_end = 2` in celt_synthesis;
+  - prefilter_and_fold calls comb_filter with overlap 0, so the 96 kHz comb path is never used there;
+  - the add orders differ between the deemphasis variants (x+VERY_SMALL+m vs x+m+VERY_SMALL);
+  - the NaN-catching `!(S1 > 0.2f*S2)` test;
+  - the (0.008f*0.008f)*i*i lag window.
+- **FIXED_POINT:** branches are skipped, each with a marker.
+- **Buffer layout and scratch:**
+  - The C trailing arrays are separate Vecs.
+  - decode_mem is a single Vec of channels*(DECODE_BUFFER_SIZE*qext_scale+overlap), split per channel with split_at_mut.
+  - All C VLAs (X of 2*N, freq, the deemphasis scratch, etmp, _exc, fir_tmp, lp_pitch_buf, the per-band int arrays, collapse masks, the qext arrays, BandsScratch) are preallocated in the state at init. Decode and PLC make no per-call heap allocations; BandsScratch grows once on the first frame.
+  - The only per-frame clone is compute_qext_mode(mode), which is allocation-free for static modes.
+- **Performance:** release-mode decode of 20 ms stereo 128 kb/s runs at about 0.92x the C oracle time.
+
+Oracle shim:
+- csrc/celt_decoder.c includes a copy of celt_decoder.c with every external symbol renamed (oracle_cdc_*). This gives access to the struct layout and the static helpers.
+- Full decoding goes through the library functions: celt_decoder_init, celt_decode_with_ec[_dred], opus_custom_decoder_ctl and opus_custom_decode*.
+- It also wraps a C CELT encoder handle for packet generation:
+  - plain encoding into buf+1, so the QEXT code-3 path can write its TOC byte;
+  - a "shared range coder" mode for hybrid packets.
+
+## `dnn_core`
+
+### api for other units
+
+Module opusorus::dnn (compiled when any of deep-plc/dred/osce is on; pub with `internals`). All sizes are usize; `arch` args dropped; C NULL = None.
+
+nnet (dnn/nnet.rs):
+- `pub struct LinearLayer { bias, subias: Option<Vec<f32>>, weights: Option<Vec<i8>>, float_weights: Option<Vec<f32>>, weights_idx: Option<Vec<i32>>, diag, scale: Option<Vec<f32>>, nb_inputs, nb_outputs: usize }` (Default, Clone). `pub struct Conv2dLayer { bias, float_weights: Option<Vec<f32>>, in_channels, out_channels, ktime, kheight: usize }`.
+- ACTIVATION_LINEAR/SIGMOID/TANH/RELU/SOFTMAX/SWISH/EXP: i32; WEIGHT_TYPE_*; WEIGHT_BLOCK_SIZE; MAX_RNN_NEURONS_ALL=192; MAX_CONV_INPUTS_ALL=1024.
+- `compute_linear(&LinearLayer, out: &mut [f32], input: &[f32])`
+- `compute_generic_dense(layer, output, input, activation: i32)`
+- `compute_generic_gru(input_weights, recurrent_weights, state: &mut [f32], input: &[f32])`
+- `compute_glu(layer, output, input)` / `compute_glu_inplace(layer, x: &mut [f32])` (C calls with output==input)
+- `compute_generic_conv1d(layer, output, mem: &mut [f32], input, input_size, activation)`
+- `compute_generic_conv1d_dilation(layer, output, mem, input, input_size, dilation, activation)`
+- `compute_activation_inplace(x, n, act)`; out-of-place `nnet_arch::compute_activation(out, input, n, act)`
+- `compute_conv2d(conv, out, mem, input, height, hstride, activation, in_buf: &mut [f32])` — in_buf is caller scratch replacing the C 32 KB stack buffer; needs ktime*in_channels*(height+kheight-1) floats (nnet_arch::MAX_CONV2D_INPUTS = 8192 max).
+
+parse_lpcnet_weights:
+- `WeightArray<'a> { name: &'a [u8], type_: i32, size: i32, data: &'a [u8] }`
+- `parse_weights(&[u8]) -> Result<Vec<WeightArray>>` (BadArg where C returns -1)
+- `parse_record(&mut &[u8]) -> Option<WeightArray>`
+- `linear_init(arrays, bias, subias, weights, float_weights, weights_idx, diag, scale: Option<&str>, nb_inputs, nb_outputs) -> Result<LinearLayer>` (BadArg where C returns 1)
+- `conv2d_init(arrays, bias, float_weights, in_ch, out_ch, ktime, kheight) -> Result<Conv2dLayer>`
+- `find_array_entry` / `find_array_check` / `opt_array_check` / `find_idx_check`
+- `write_weights(&[WeightArray], &mut Vec<u8>)`
+- Later units port their generated `init_<model>(arrays) -> Result<Model>` exactly like `pitchdnn::init_pitchdnn` (translate each generated linear_init/conv2d_init line) and a `load_model(&[u8])` like `PitchDnnState::load_model`.
+
+vec: `tanh_approx`, `sigmoid_approx`, `lpcnet_exp`, `lpcnet_exp2` (f32->f32), `softmax(y, x, n)`, `vec_tanh`, `vec_sigmoid` (+ `_inplace`), `sgemv`, `sparse_sgemv8x4`, `cgemv8x4`, `sparse_cgemv8x4`, `MAX_INPUTS`.
+
+common: `log2_approx`, `log_approx`, `ulaw2lin`, `lin2ulaw -> i32`, `LOG256`.
+
+kiss99: `Kiss99Ctx { z, w, jsr, jcong }` with `.kiss99_srand(&[u8])`, `.kiss99_rand() -> u32`, and free fns `kiss99_srand(&mut ctx, data)` / `kiss99_rand(&mut ctx)`.
+
+burg: `silk_burg_analysis(a: &mut [f32], x, min_inv_gain: f32, subfr_length, nb_subfr, d) -> f32`.
+
+freq: constants LPC_ORDER, PREEMPHASIS, FRAME_SIZE (160), OVERLAP_SIZE, TRAINING_OFFSET, WINDOW_SIZE (320), FREQ_SIZE (161), NB_BANDS (18), NB_BANDS_1, EBAND5MS, COMPENSATION. Functions: `lpcn_compute_band_energy(band_e, &[KissFftCpx])`, `burg_cepstral_analysis(ceps, x)`, `apply_window(&mut [f32])`, `dct(out, input)`, `idct`, `forward_transform(out: &mut [KissFftCpx], input: &[f32])`, `inverse_transform(out, &[KissFftCpx])`, `lpc_from_cepstrum(lpc, ceps) -> f32`, `lpc_weighting(lpc, gamma)`, `lpcn_lpc`, `lpc_from_bands`, `interp_band_gain`, `compute_burg_cepstrum`, `compute_band_energy_inverse`. lpcnet_tables: `KFFT: KissFftState`, `HALF_WINDOW`, `DCT_TABLE`.
+
+pitchdnn: PITCH_MIN_PERIOD, PITCH_MAX_PERIOD, NB_XCORR_FEATURES, layer-size consts, `PitchDnn` (model), `init_pitchdnn(&[WeightArray]) -> Result<PitchDnn>`, `PitchDnnState::{new(), pitchdnn_init(), load_model(&[u8]) -> Result<()>}` (pub fields model, gru_state, xcorr_mem1/2/3), `compute_pitchdnn(&mut PitchDnnState, if_features, xcorr_features) -> f32`.
+
+lpcnet_enc: NB_FEATURES=20, NB_TOTAL_FEATURES=36, LPCNET_FRAME_SIZE, PITCH_FRAME_SIZE, PITCH_BUF_SIZE, PLC_MAX_FEC, MAX_FEATURE_BUFFER_SIZE, PITCH_IF_MAX_FREQ, PITCH_IF_FEATURES, CONT_VECTORS, FEATURES_DELAY.
+- `LpcnetEncState` (all C fields pub): `new() -> Box<Self>` (also Default), `lpcnet_encoder_init()` (keeps the loaded model), `load_model(&[u8])`
+- `lpcnet_compute_single_frame_features(st, pcm: &[i16], features: &mut [f32])`, `lpcnet_compute_single_frame_features_float(st, &[f32], features)` (C's always-0 return dropped)
+- `compute_frame_features(st, input)`, `preemphasis(y, mem: &mut f32, x, coef, n)` / `preemphasis_inplace(x, mem, coef, n)`, `frame_analysis`, `biquad` / `biquad_inplace`.
+
+nndsp: ADACONV_*/ADACOMB_*/ADASHAPE_* consts; `AdaConvState`, `AdaCombState`, `AdaShapeState` (Default, pub fields); `init_*_state(&mut)`; `compute_overlap_window(&mut [f32], n)`; `scale_kernel`, `transform_gains`.
+- `adaconv_process_frame(st, x_out: &mut [f32], x_in: Option<&[f32]>, features, kernel_layer, gain_layer, feature_dim, frame_size, overlap_size, in_ch, out_ch, kernel_size, left_padding, gain_a, gain_b, shape_gain, window: &[f32])`
+- `adacomb_process_frame(st, x_out, x_in: Option<&[f32]>, features, kernel, gain, global_gain, pitch_lag: i32, feature_dim, frame_size, overlap_size, kernel_size, left_padding, gain_a, gain_b, log_gain_limit, window)`
+- `adashape_process_frame(st, x_out, x_in: Option<&[f32]>, features, alpha1f, alpha1t, alpha2, feature_dim, frame_size, avg_pool_k, interpolate_k)`
+- x_in = None means in place (the C x_out == x_in calls).
+
+Oracle (opusorus_oracle::dnn_core, only with DNN features):
+- model ids MODEL_PITCHDNN/PLC/FARGAN/RDOVAE_ENC/RDOVAE_DEC/LACE/NOLACE/BBWENET; `write_blob(model) -> Vec<u8>` (weight blob of the compiled-in table, useful for later units' tests and for generating an embeddable blob); `model_arrays`, `model_count`, `parse_weights`
+- RAII handles `Linear` (`::new(LinearArrays, nb_in, nb_out)` or `::init(model, names..., nb_in, nb_out)`), `Conv2d`, `PitchDnn`, `LpcnetEnc`, `AdaConv`/`AdaComb`/`AdaShape`
+- the C shim exposes `oracle_dc_*`.
+- Test helper pattern worth reusing: parse the generated `init_*` of `vendor/libopus/dnn/*_data.c` at test time to get every layer spec (see `init_specs` in the test).
+
+### external needs
+
+Files edited outside this unit:
+1. crates/opusorus-oracle/csrc/silk_decoder.c (silk_decoder unit, a one-line fix). With ENABLE_DEEP_PLC, `silk_Decode` takes an extra `LPCNetPLCState*` argument. Without this fix the oracle did not compile with any DNN feature. It now passes NULL under `#ifdef ENABLE_DEEP_PLC`; the non-DNN build is unchanged. The silk_decoder unit, or whoever integrates deep PLC, should replace the NULL with a real LPCNetPLCState when it wires up deep PLC.
+2. crates/opusorus/src/lib.rs: rustfmt reflow only. The two `#[cfg(all(... any(deep-plc, dred, osce)))]` lines added by the layer-B merge were not rustfmt-clean, so `cargo fmt --all -- --check` failed at HEAD. I only re-wrapped them; there is no semantic change.
+3. crates/opusorus-oracle/src/lib.rs: added `pub mod dnn_core;`, as permitted.
+
+Requests for the orchestrator:
+- Cargo.toml (not mine to edit): upstream configure and CMake both define ENABLE_DEEP_PLC and compile the deep-PLC sources when `--enable-osce` is used, and osce also defines ENABLE_OSCE_BWE. The oracle build.rs now mirrors this: deep_plc = deep-plc || dred || osce. The opusorus crate feature `osce` does not imply `deep-plc`. It probably should be `osce = ["deep-plc"]` so the port and the oracle stay in the same configuration once the DNN hooks in the SILK and Opus decoders land.
+- The DNN oracle now builds, but the silk_decoder conformance tests fail under DNN features, as noted in checks. The DNN integration units must port the ENABLE_DEEP_PLC/OSCE hooks there.
+- docs/TRACKER.md, INTERNAL_API.md and PLAN.md need a dnn_core row, the API above, and these decisions:
+  - (a) the oracle forces the generic vec.h path;
+  - (b) DISABLE_DEBUG_FLOAT, the upstream default;
+  - (c) models are always loaded from blobs.
+
+### notes
+
+Key decisions and quirks (all documented in the source):
+
+1. **Oracle DNN build (build.rs).** For the deep-plc/dred/osce features the build now:
+   - adds DEEP_PLC/DRED/OSCE_SOURCES from lpcnet_sources.mk;
+   - adds the include dirs dnn and the source root (dred_*.c includes "celt/entenc.h");
+   - defines ENABLE_DEEP_PLC (also for dred and osce, as upstream does), ENABLE_DRED, and ENABLE_OSCE + ENABLE_OSCE_BWE;
+   - defines DISABLE_DEBUG_FLOAT, which is the upstream default in configure, CMake and meson;
+   - forces the generic vec.h path: `DISABLE_NEON`, plus `-U__SSE2__ -U__AVX__`, because on x86_64 `__SSE2__` would otherwise select vec_avx.h. Only dnn/vec*.h test those macros.
+   - fails with a message pointing to scripts/fetch_dnn_models.sh if any *_data.c or dred_rdovae_constants.h is missing.
+   Consequence: on real x86/ARM hosts upstream uses the SSE/AVX/NEON kernels (USE_SU_BIAS, different quantization), which are not bit-identical to the generic path. The port matches the generic C path, as the task specified.
+
+2. **SOFTMAX is not a copy.** nnet.c defines SOFTMAX_HACK, but compute_activation_c is compiled in nnet_default.c, which does not define it. ACTIVATION_SOFTMAX is therefore the normalized lpcnet_exp softmax. The tests caught this.
+
+3. **Weights are always loaded from a blob (PLAN D-015).**
+   - pitchdnn_init / lpcnet_encoder_init clear the state and keep whatever model is loaded.
+   - LinearLayer and Conv2dLayer own copies of the arrays, because blob payloads are not aligned for f32/i32.
+   - The blob is read as little-endian.
+   - Upstream's write_lpcnet_weights `main()` writes pitchdnn, fargan, plcmodel, rdovaeenc, rdovaedec, lace and nolace, but not bbwenet. A shipped blob would need bbwenet added for OSCE BWE.
+
+4. **Deviations only where C has undefined behaviour or would crash:**
+   - find_idx_check rejects negative block counts (C loops forever) and negative positions (C later reads before the input).
+   - linear_init returns BadArg when weights are named but scale is not (C would strcmp(NULL)).
+   - pitchdnn_load_model returns an error on an unparsable blob (C dereferences a NULL list).
+   - compute_linear / compute_conv2d `expect` on an int8 layer without scale or a conv2d layer without weights (a construction bug; C would dereference NULL). The expects carry reasons.
+
+5. **Other quirks ported as-is:**
+   - interp_band_gain clears only FREQ_SIZE bytes in C; this has no effect because every entry is overwritten afterwards.
+   - conv1d_dilation copies overlapping memory with OPUS_COPY; the Rust side uses copy_within.
+   - Many double promotions are replicated, for example `follow-2.5` in double in compute_burg_cepstrum versus `2.5f` in compute_frame_features, `0.2*tmp` in adashape, and fabs accumulation in double.
+   - nndsp's M_PI is the double from glibc math.h.
+   - kiss99.c is not in any upstream source list (only the unbuilt lpcnet.c uses it), so the shim #includes it.
+
+6. **Performance.** There are no heap allocations in any compute path.
+   - Scratch arrays are fixed-size stack buffers matching the C sizes, except conv2d's 32 KB buffer, which is a caller-provided scratch; PitchDnnState owns 2712 floats for it.
+   - vec_swish computes element-wise, with no 16 KB temporary.
+   - Matrix kernels slice to exact lengths.
+
+7. **In-place C calls** get explicit `_inplace` variants (activation, glu, biquad, preemphasis, softmax, vec_*) or `x_in: Option<&[f32]>` (nndsp).
+
+8. **Oracle shim (csrc/dnn_core.c).**
+   - The whole file is compiled only when ENABLE_DEEP_PLC is defined, so it is empty in default builds.
+   - To reach static functions it #includes renamed copies of burg.c, freq.c, lpcnet_enc.c and nndsp.c (prefix `dc_copy_`), plus a copy of nnet_arch.h built with RTCD_ARCH `_dccopy`.
+   - The Rust wrappers check every size C will touch. Handles from a failed linear_init are marked unusable.
+   - adacomb bounds: real OSCE lags are ≥ 32. Smaller lags, or an overlap of 0 (which trips the celt_pitch_xcorr max_pitch>0 debug_assert), make C read out of bounds, so the tests avoid them.
+
+9. The worktree holds the extracted model data (vendor/libopus/dnn/*_data.*) and the tarball in testdata/. Both are gitignored and were not committed.
+
+## `silk_encoder_flp`
+
+### api for other units
+
+Module crate::silk::encoder (enc_API.c / init_encoder.c / control_codec.c):
+- pub struct SilkEncoder { pub s_stereo: StereoEncState, pub n_bits_used_lbrr, n_bits_exceeded, n_channels_api, n_channels_internal, n_prev_channels_internal, time_since_switch_allowed_ms, allow_bandwidth_switch, prev_decode_only_middle: i32, pub state_fxx: [SilkEncoderStateFlp; 2] }. It derives Debug and Clone and implements Default. It is roughly 20 KB, so Box or embed it.
+- impl SilkEncoder:
+  - pub fn new() -> Self: all zeros, the memory as the Opus encoder clears it.
+  - pub fn init(&mut self, channels: i32, enc_status: &mut SilkEncControlStruct) -> i32: silk_InitEncoder, including silk_QueryEncoder. For mono, state_fxx[1] is left untouched, as in C.
+  - pub fn silk_encode(&mut self, enc_control: &mut SilkEncControlStruct, samples_in: &[OpusRes], n_samples_in: i32, ps_range_enc: &mut EcEnc<'_>, n_bytes_out: &mut i32, prefill_flag: i32, activity: i32) -> i32: silk_Encode. Input is opus_res (f32, converted with RES2INT16), interleaved when n_channels_api == 2. It returns silk::errors codes, or -1 accumulated from a failed resampler init.
+  - For prefill, C passes psRangeEnc = NULL and the coder is never touched. In Rust, pass any encoder, e.g. `EcEnc::new(&mut [])`; the tests assert it stays untouched.
+  - Feed exactly one packet per call, as opus_encoder.c does. silk_Encode resets nFramesEncoded on every call, so 10 ms chunks only make sense for 10/20 ms packets.
+- pub const fn silk_get_encoder_size(&mut i32, channels) -> i32: returns Rust struct sizes.
+- pub fn silk_init_encoder(&mut SilkEncoderStateFlp) -> i32
+- pub fn silk_control_encoder(&mut SilkEncoderStateFlp, &mut SilkEncControlStruct, allow_bw_switch, channel_nb, force_fs_khz) -> i32
+- pub fn silk_setup_resamplers / silk_setup_fs / silk_setup_complexity(&mut SilkEncoderState, i32) / silk_setup_lbrr (these are static in C, pub here for tests).
+
+Module crate::silk::float (re-exports from private submodules structs, sigproc, pitch_analysis_core, find, noise_shape, wrappers, encode_frame):
+- SilkShapeStateFlp { last_gain_index: i8, harm_shape_gain_smth, tilt_smth: f32 }
+- SilkEncoderStateFlp { s_cmn: SilkEncoderState, s_shape, x_buf: [f32; X_BUF_LEN = 720], ltp_corr: f32 }, with new()
+- SilkEncoderControlFlp (all fields of silk_encoder_control_FLP, snake_case)
+- silk_encode_frame_flp(&mut SilkEncoderStateFlp, pn_bytes_out: &mut i32, &mut EcEnc, cond_coding, max_bits, use_cbr) -> i32
+- silk_encode_do_vad_flp(&mut SilkEncoderStateFlp, activity)
+- All leaf functions as silk_*_flp, taking slices plus usize lengths.
+- Functions whose C `x`/`res`/`r_ptr` argument points into a buffer and reads before the pointer take (buffer, offset):
+  - silk_ltp_analysis_filter_flp(res, x_buf, x_off, ...)
+  - silk_find_ltp_flp(XX, xX, r_buf, r_off, lag, sl, nb)
+  - silk_find_pitch_lags_flp(s_cmn, &mut ltp_corr, ctrl, res, x_buf, x_off)
+  - silk_noise_shape_analysis_flp(s_cmn, s_shape, ltp_corr, ctrl, pitch_res, x_buf, x_off)
+  - silk_find_pred_coefs_flp(s_cmn, ctrl, res_buf, res_off, x_buf, x_off, cond)
+  - silk_process_gains_flp(s_cmn, s_shape, ctrl, cond)
+- silk_nsq_wrapper_flp(&NsqEncParams, &ctrl, &mut SideInfoIndices, &mut SilkNsqState, pulses, x)
+- silk_pitch_analysis_core_flp(frame, pitch_out(len>=4), &mut lag_index, &mut contour_index, &mut ltp_corr, prev_lag, thr1, thr2, fs_khz, complexity, nb_subfr) -> i32
+
+### external needs
+
+Everything was done inside the owned files. No existing unit had to change, no bug was found in ported code, and the oracle lib.rs already declared the module.
+
+Please record:
+1. cargo fmt --all -- --check fails on main's crates/opusorus/src/lib.rs (the dnn cfg attributes from the scaffolding commit). The orchestrator should run cargo fmt on lib.rs; I was not allowed to edit it.
+2. docs/TRACKER.md: the silk_encoder_flp row can be set to done, with test notes as in this report. docs/INTERNAL_API.md should get the API section above. I did not edit docs.
+3. The silk_encoder_common unit reported an overflow in silk_nlsf_del_dec_quant (nlsf.rs) with very sharp resonances. The full encoder never triggered it in these tests, including pure tones from 50 Hz to 7.9 kHz at all complexities and garbage input across roughly 120k packets, because the encoder limits prediction gain before NLSF quantization. I left nlsf.rs untouched.
+
+### notes
+
+Where the Rust code deliberately differs from C, or does something that might look wrong:
+- **State passed in parts:** C passes psEnc together with pointers into psEnc->x_buf. Rust passes the state's parts (s_cmn, s_shape, ltp_corr) and the buffer as (buffer, offset). The operations are identical.
+- **Range coder copies:** encode_frame's range coder copies use EcEnc::snapshot/restore plus copying the first `offs` bytes of the buffer, exactly as the C memcpy of the ec_enc struct and ec_buf_copy do.
+- **Error returns:** error paths that call celt_assert(0) in C (bad sample counts, prefill length, check_control_input errors) return their error codes without asserting. This matches the choice made by earlier units. Asserts in C that guard against memory corruption became debug_assert! (for example nChannelsAPI < nChannelsInternal).
+- **Uninitialised C state:** sEncCtrl and sNSQ_copy[1] are uninitialised in C; Rust zeroes them. They are always written before being read, and the full-state comparison confirms it.
+- **silk_encode buffer:** the ALLOC'd `buf` is a fixed stack array of MAX_API_FS_KHZ*20 samples (at most one 20 ms frame per loop pass). silk_setup_resamplers uses fixed stack buffers of 45 ms at 16 kHz and at MAX_API_FS_KHZ. There are no heap allocations anywhere in the encoder.
+- **Quirks kept on purpose:**
+  - silk_SMULBB(float LTPredCodGain, int) truncates the float to int16.
+  - The float silk_ADD_SAT16 low-pass in the pitch analysis is computed in float.
+  - The stage-3 search checks silk_CB_lags_stage3[0][j] even for 10 ms frames.
+  - The stereo-to-mono downmix saturates RES2INT16(L+R) before the rounding shift.
+  - `ret` is overwritten (not accumulated) by silk_encode_frame and silk_control_encoder.
+  - SILK_FIX_CONST((1-0.05f)/5000, 24) is computed with a float division.
+- **Markers:** FIXED_POINT is not ported (float build), with markers in encoder.rs (the x_bufFIX branch) and float.rs. For DNN, ENABLE_DRED only adds an #include in enc_API.c and init_encoder.c, so there is nothing to hook; comments note this. These files have no QEXT or CUSTOM_MODES code; qext only raises MAX_API_FS_KHZ (96 kHz input, tested).
+
+C oracle behaviours found while testing, which the harness avoids (they are misuse, never done by opus_encoder.c):
+1. Changing the API rate and then switching stereo to mono makes C run the uncontrolled side-channel resampler at the old rate and write out of bounds. The harness does not combine API-rate changes with channel switches.
+2. The C SILK decoder segfaults when its API rate changes mid-stream, so the decode sanity check is skipped for API-switching streams.
+3. nChannelsAPI > 2 indexes state_Fxx out of bounds in C before validation, so it is not tested; Rust panics on the index.
+
+Oracle shim: csrc/silk_encoder_flp.c keeps a persistent silk_encoder (allocated for 2 channels) plus an ec_enc over a private 4 KB buffer. It can call silk_Encode with a NULL coder for prefill, and it exposes a full state dump with float bit patterns. It reaches the static helpers by #including noise_shape_analysis_FLP.c and pitch_analysis_core_FLP.c with their exported functions renamed to oracle_sef_*. Exported leaf functions are declared directly in src/silk_encoder_flp.rs, and every wrapper asserts buffer sizes before calling C.
+
+Files:
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus/src/silk/encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus/src/silk/float.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus/src/silk/float/{structs,sigproc,pitch_analysis_core,find,noise_shape,wrappers,encode_frame}.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus-oracle/csrc/silk_encoder_flp.c
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus-oracle/src/silk_encoder_flp.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-3/crates/opusorus-conformance/tests/silk_encoder_flp.rs
+
+The commit message is plain with no trailers, as CLAUDE.md requires. That overrides the session's generic attribution reminder.
+
+## `celt_encoder`
+
+### api for other units
+
+Module crate::celt::celt_encoder.
+
+**Encoder type.** `pub struct CeltEncoder` has pub C-named fields:
+- mode: `Cow<'static, CeltMode>`
+- channels, stream_channels, force_intra, clip, disable_pf, complexity, upsample, start, end, bitrate, vbr, signalling, constrained_vbr, loss_rate, lsb_depth, lfe, disable_inv
+- qext only: enable_qext, qext_scale
+- rng, spread_decision, delayed_intra, tonal_average, last_coded_bands, hf_average, tapset_decision, prefilter_period, prefilter_gain, prefilter_tapset, consec_transient
+- analysis: `crate::analysis::AnalysisInfo`; silk_info: `crate::celt::celt::SilkInfo`
+- preemph_mem_e, preemph_mem_d: `[f32; 2]`
+- vbr_reservoir, vbr_drift, vbr_offset, vbr_count, overlap_max, stereo_saving, intensity
+- has_energy_mask, energy_mask: `Vec`, spec_avg
+- in_mem, prefilter_mem, old_band_e, old_log_e, old_log_e2, energy_error; qext: qext_old_band_e
+- It is Clone + Debug.
+
+**Construction:**
+- `CeltEncoder::celt_encoder_init(sampling_rate, channels) -> Result<Self>`: the 48 kHz mode, or the 96 kHz mode for 96000 with qext. Sets upsample.
+- `CeltEncoder::opus_custom_encoder_init_arch(mode: Cow<'static, CeltMode>, channels) -> Result<Self>`.
+- custom-modes: `opus_custom_encoder_init` / `opus_custom_encoder_create(mode, channels)`, and `pub type CustomEncoder = CeltEncoder`.
+- Without custom-modes, callers must `set_signalling(0)`, as opus_encoder_init does (C asserts this).
+
+**Encoding:**
+```rust
+pub fn celt_encode_with_ec(&mut self, pcm: &[OpusRes], frame_size: i32, compressed: Option<&mut [u8]>, nb_compressed_bytes: i32, enc: Option<&mut EcEnc<'_>>, #[cfg(feature = "qext")] toc: Option<&mut u8>) -> i32
+```
+- Returns C semantics: bytes written, or a negative OPUS_* code.
+- Opus-encoder mapping for `celt_encode_with_ec(celt_enc, pcm_buf, frame_size, NULL, nb_compr_bytes, &enc)`:
+  - Build `enc` over `data[1..]` (`let (toc, rest) = data.split_at_mut(1)`).
+  - Pass `None, nb, Some(&mut enc), Some(&mut toc[0])`.
+  - With QEXT, CELT sets toc |= 3 and advances `enc.buf` by 1+padding, as C does.
+- Redundancy and prefill calls pass `Some(&mut buf[..n]), n, None`.
+
+**CTL methods:**
+- Returning `Result<()>` (Err(BadArg) where C returns BAD_ARG): set_complexity, set_start_band, set_end_band, set_prediction, set_packet_loss_perc, set_bitrate, set_channels, set_lsb_depth, set_phase_inversion_disabled, set_qext (qext).
+- Setters with no validation: set_vbr_constraint, set_vbr, set_signalling, set_lfe, set_input_clipping (custom-modes).
+- Getters: lsb_depth, phase_inversion_disabled, qext (qext), mode() -> &CeltMode, final_range() -> u32.
+- reset() is OPUS_RESET_STATE.
+- set_analysis(Option<&AnalysisInfo>) and set_silk_info(Option<&SilkInfo>).
+- `set_energy_mask(Option<&[CeltGlog]>)` copies the values instead of storing a pointer, so the multistream encoder must set the mask before each frame, as C does.
+
+**Custom API (custom-modes):**
+- `opus_custom_encode(&[i16], frame_size, &mut [u8], nb) -> i32`
+- `opus_custom_encode24(&[i32], ...)`
+- `opus_custom_encode_float(&[f32], ...)`
+
+**Size functions:** `celt_encoder_get_size(channels) -> i32` and `opus_custom_encoder_get_size(mode, channels) -> i32` return the Rust memory footprint, not C's sizeof.
+
+**Public helpers:**
+- `celt_preemphasis(pcmp: &[OpusRes] /*starts at pcm+c*/, inp: &mut [CeltSig], n, cc, upsample, coef: &[f32;4], mem: &mut CeltSig, clip: bool)`
+- transient_analysis, patch_transient_decision, compute_mdcts, l1_metric, tf_analysis, tf_encode, alloc_trim_analysis, stereo_analysis, median_of_5/3, dynalloc_analysis (with DynallocScratch), tone_lpc, tone_detect, run_prefilter (PrefilterState/PrefilterOut), compute_vbr, encode_qext_stereo_params.
+
+**Oracle:** opusorus_oracle::celt_encoder provides:
+- CeltEnc: a persistent C encoder with state dumps as CeState.
+- OpusRec: a recording copy of the C Opus encoder, returning CeltCall records.
+- Wrappers for each static helper.
+
+The opus_encoder unit can reuse OpusRec to check its own CELT calls.
+
+### external needs
+
+None blocking. No other units' files were edited and no bugs were found in other units.
+
+1. **Private helper to deduplicate:** `crate::math` has no `acos`, so celt_encoder.rs has a private `fn acos(f64) -> f64` (std f64::acos or libm::acos). It belongs in crate::math.
+2. **Two AnalysisInfo types:** `crate::celt::celt::AnalysisInfo` (celt_bands) duplicates `crate::analysis::AnalysisInfo` (analysis). The encoder uses the `analysis` one because that is what run_analysis produces; the celt.rs copy should be removed or re-exported when merging.
+3. **Pre-existing formatting failure:** crates/opusorus/src/lib.rs is not rustfmt-clean at base commit 8ff76ac, so `cargo fmt --all -- --check` fails there. I did not touch it; whoever merges should run rustfmt on it.
+4. **Oracle symbol prefixes:** the shim csrc/celt_encoder.c builds private copies of celt/celt_encoder.c and src/opus_encoder.c with their external symbols renamed to `oracle_ce_dup_*`, and exports `oracle_ce_*`. Other shims (for example opus_encoder) must not reuse those names.
+5. **Docs:** per the rules I did not edit docs/TRACKER.md. The celt_encoder row can be set to ✅ with the test summary.
+
+### notes
+
+Deviations from C and quirks kept (all documented in the module docs and comments):
+
+**API choices**
+- **QEXT TOC byte.** The QEXT path writes C `compressed[-1]` (the Opus TOC) and advances `enc->buf`. Rust takes the TOC as an explicit `toc: Option<&mut u8>` (qext only) and moves `enc.buf` inside the `'a` buffer.
+  - With custom-mode signalling, the header byte is used instead.
+  - With `enc == None` and no signalling, C writes before the caller's buffer (undefined behaviour; the oracle heap-corrupts). Rust skips that write, so the tests run QEXT streams through a coder with a TOC slot, as the Opus encoder does.
+- **Energy mask.** C stores a pointer to the mask; Rust copies the values. OPUS_RESET_STATE clears the mask, as in C.
+- **QEXT mode is cached.** compute_qext_mode(mode) is computed once at init rather than every frame.
+
+**Rust-only safety checks.** These cases are out-of-bounds or undefined in C:
+- `pcm` too short, a missing or short output buffer, or `channels == 0` return BAD_ARG.
+- Unsupported rates in celt_encoder_init return Err(BadArg), where the hardened C build asserts.
+- Custom modes with `end > effEBands` in stereo make C read past `X`. Rust sizes the X scratch with a tail so it stays in bounds; a Rust-only test covers this. Mono in that configuration is well-defined in C and is compared bit-exactly.
+- `bitrate*frame_size` in CBR uses wrapping arithmetic to match the C build for absurd products.
+- The signalling header is written to the buffer before the toOpus check, as in C, so BAD_ARG leaves the same byte behind.
+
+**Not ported**
+- RESYNTH (debug only, never enabled) and the FUZZING branches.
+- The `#if 0` hysteresis spread decision.
+- FIXED_POINT branches (normalize_tone_input, acos_approx and the others), each marked.
+- ENABLE_OPUS_CUSTOM_API is treated as custom-modes (there is no separate feature).
+- There are no DNN, DRED or OSCE hooks in celt_encoder.c, so none were added.
+
+**Faithful numerics.** Every float-to-double promotion is reproduced: `celt_sqrt(mean*maxE*.5*len2)`, `0.0069*MIN16(163, tf_max) - 0.139`, `3.999999*lpc[1]`, `acos(.5f*lpc[0])`, and the double comparisons `activity < .4`, `tonality > .3`, `1.26*prefilter_period`. The C quirk `extra_quant[nbEBands+1]` in the QEXT ext_balance is kept.
+
+**Performance.** All C VLAs are preallocated scratch in the state, sized at init: `in`, `freq`, `X`, the band arrays, the prefilter `_pre` and `pitch_buf`, and the tf/dynalloc temporaries. `quant_all_bands` reuses a BandsScratch. `encode_frame` makes no per-frame heap allocations; small QEXT arrays live on the stack.
+
+**Commit.** The message is plain with no trailers, per CLAUDE.md, which takes precedence over the attribution reminder.
+
+Files:
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-2/crates/opusorus/src/celt/celt_encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-2/crates/opusorus-oracle/src/celt_encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-2/crates/opusorus-oracle/csrc/celt_encoder.c
+- /home/neo/code/opusorus/.claude/worktrees/wf_389153bc-def-2/crates/opusorus-conformance/tests/celt_encoder.rs
+
+## Post-merge cleanups (layer C)
+
+- `AnalysisInfo`/`LEAK_BANDS` canonical in `celt::celt`; `analysis` re-exports them.
+- `acos` moved to `crate::math`.

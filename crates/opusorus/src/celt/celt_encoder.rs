@@ -33,7 +33,6 @@ use alloc::borrow::Cow;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::analysis::{AnalysisInfo, LEAK_BANDS};
 #[cfg(feature = "qext")]
 use crate::celt::arch::Q15ONE;
 use crate::celt::arch::{
@@ -44,6 +43,7 @@ use crate::celt::bands::{
     BandsScratch, SPREAD_AGGRESSIVE, SPREAD_NONE, SPREAD_NORMAL, compute_band_energies, haar1,
     hysteresis_decision, normalise_bands, quant_all_bands, spreading_decision,
 };
+use crate::celt::celt::{AnalysisInfo, LEAK_BANDS};
 use crate::celt::celt::{
     COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD, SPREAD_ICDF, SilkInfo, TAPSET_ICDF,
     TF_SELECT_TABLE, TRIM_ICDF, bitrate_to_bits, comb_filter, init_caps, resampling_factor,
@@ -77,19 +77,6 @@ const OPUS_INTERNAL_ERROR: i32 = -3;
 const QEXT_BANDS: usize = NB_QEXT_BANDS as usize;
 #[cfg(not(feature = "qext"))]
 const QEXT_BANDS: usize = 0;
-
-/// C `acos` (double). Private copy: `crate::math` has no `acos` yet (dedupe candidate).
-#[inline(always)]
-fn acos(x: f64) -> f64 {
-    #[cfg(feature = "std")]
-    {
-        x.acos()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        libm::acos(x)
-    }
-}
 
 /// C `floor` applied to a double expression, converted with C `(int)` (truncation).
 #[inline(always)]
@@ -1757,7 +1744,7 @@ pub fn tone_detect(
         // Squared radius of the poles.
         *toneishness = -lpc[1];
         // FIXED_POINT: acos_approx not ported (float build).
-        (acos(f64::from(0.5f32 * lpc[0])) / f64::from(delay)) as f32
+        (math::acos(f64::from(0.5f32 * lpc[0])) / f64::from(delay)) as f32
     } else {
         *toneishness = 0.0;
         -1.0

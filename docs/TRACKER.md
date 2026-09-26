@@ -29,11 +29,20 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | B | `silk_decoder` | `silk/decoder.rs`<br>`silk/plc.rs`<br>`silk/cng.rs` | silk/{dec_API,init_decoder,decoder_set_fs,decode_frame,decode_core,decode_indices,decode_parameters,stereo_MS_to_LR}.c<br>silk/PLC.c, silk/PLC.h<br>silk/CNG.c | ✅ | silk_decoder.rs: real SILK packets from C encoder, all API rates, PLC, FEC/LBRR, CNG, stereo, garbage — bit-exact |
 | B | `silk_encoder_common` | `silk/nsq.rs`<br>`silk/nsq_del_dec.rs`<br>`silk/vad.rs`<br>`silk/encoder_common.rs` | silk/NSQ.c, silk/NSQ.h<br>silk/NSQ_del_dec.c<br>silk/VAD.c<br>silk/{encode_indices,process_NLSFs,quant_LTP_gains,VQ_WMat_EC,stereo_LR_to_MS,stereo_find_predictor,stereo_quant_pred,HP_variable_cutoff,control_SNR,control_audio_bandwidth,check_control_input}.c | ✅ | silk_encoder_common.rs: NSQ + NSQ_del_dec multi-frame state, VAD, encode_indices bytes, NLSF/LTP quant, stereo enc — bit-exact |
 | B | `analysis` | `analysis.rs` | src/analysis.c, src/analysis.h | ✅ | analysis.rs: streamed signals all rates, AnalysisInfo + state — bit-exact |
-| C | `celt_decoder` | `celt/celt_decoder.rs` | celt/celt_decoder.c | ⬜ | |
-| C | `celt_encoder` | `celt/celt_encoder.rs` | celt/celt_encoder.c | ⬜ | |
-| C | `silk_encoder_flp` | `silk/float.rs`<br>`silk/encoder.rs` | silk/float/*.c, silk/float/*.h (may add submodules under silk/float/)<br>silk/{enc_API,init_encoder,control_codec}.c | ⬜ | |
+| C | `celt_decoder` | `celt/celt_decoder.rs` | celt/celt_decoder.c | ✅ | celt_decoder.rs: all LM/ch/rates/budgets, hybrid shared ec, downsample, PLC noise+pitch, corrupt input, custom modes, qext 96k — bit-exact (PCM, rng, full state); release perf 0.92x C time |
+| C | `celt_encoder` | `celt/celt_encoder.rs` | celt/celt_encoder.c | ✅ | celt_encoder.rs: all LM/ch/bitrates/VBR modes/complexity/lsb depth/lfe/masks/hybrid, qext — bytes + rng bit-exact |
+| C | `silk_encoder_flp` | `silk/float.rs`<br>`silk/encoder.rs` | silk/float/*.c, silk/float/*.h (may add submodules under silk/float/)<br>silk/{enc_API,init_encoder,control_codec}.c | ✅ | silk_encoder_flp.rs: silk_Encode all rates/internal bw/packet sizes/complexity/CBR-VBR/FEC/DTX/stereo — bytes + rng bit-exact |
 | D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ⬜ | |
 | D | `opus_encoder` | `encoder.rs`<br>`ms_encoder.rs`<br>`projection_encoder.rs` | src/opus_encoder.c<br>src/opus_multistream_encoder.c<br>src/opus_projection_encoder.c | ⬜ | |
+
+## DNN units
+
+| Unit | Rust files | Status | Tests |
+|---|---|---|---|
+| `dnn_core` | `dnn/*` (nnet, weights blob parse, vec math, burg, freq, pitchdnn, lpcnet_enc, nndsp, kiss99) | ✅ | dnn_core.rs (features deep-plc/osce/dred): layers + real model weights via blob — bit-exact |
+| `dnn_plc` (FARGAN, lpcnet_plc) | | ⬜ | |
+| `dnn_dred` | | ⬜ | |
+| `dnn_osce` (LACE/NoLACE/BWE) | | ⬜ | |
 
 ## Infrastructure
 

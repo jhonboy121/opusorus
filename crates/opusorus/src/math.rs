@@ -40,6 +40,8 @@ unary!(/// C `log10`.
     log10, f64, log10, log10);
 unary!(/// C `log2`.
     log2, f64, log2, log2);
+unary!(/// C `acos`.
+    acos, f64, acos, acos);
 unary!(/// C `atan`.
     atan, f64, atan, atan);
 unary!(/// C `tanh`.

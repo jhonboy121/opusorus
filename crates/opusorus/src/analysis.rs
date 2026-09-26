@@ -30,8 +30,7 @@ use crate::mlp::{
     LAYER0, LAYER1, LAYER2, MAX_NEURONS, analysis_compute_dense, analysis_compute_gru,
 };
 
-/// `LEAK_BANDS` (celt/celt.h).
-pub const LEAK_BANDS: usize = 19;
+pub use crate::celt::celt::LEAK_BANDS;
 
 /// `NB_FRAMES`.
 pub const NB_FRAMES: usize = 8;
@@ -53,24 +52,7 @@ const LEAKAGE_OFFSET: f32 = 2.5;
 /// `LEAKAGE_SLOPE`.
 const LEAKAGE_SLOPE: f32 = 2.0;
 
-/// `AnalysisInfo` (celt/celt.h): per-frame result of the tonality analysis.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct AnalysisInfo {
-    /// Non-zero when the other fields hold a valid analysis.
-    pub valid: i32,
-    pub tonality: f32,
-    pub tonality_slope: f32,
-    pub noisiness: f32,
-    pub activity: f32,
-    pub music_prob: f32,
-    pub music_prob_min: f32,
-    pub music_prob_max: f32,
-    pub bandwidth: i32,
-    pub activity_probability: f32,
-    pub max_pitch_ratio: f32,
-    /// Stored as Q6 to save space.
-    pub leak_boost: [u8; LEAK_BANDS],
-}
+pub use crate::celt::celt::AnalysisInfo;
 
 /// `downmix_func` (src/opus_private.h): `downmix(x, y, subframe, offset, c1, c2, C)` mixes
 /// `subframe` samples starting at sample `offset` of the interleaved `C`-channel buffer `x`
