@@ -18,6 +18,9 @@ pub mod fixed_foundation;
 
 // Units whose shims compile in both oracles (`// oracle-build: any`).
 pub mod celt_fft;
+pub mod celt_modes;
+pub mod celt_pitch_lpc;
+pub mod opus_packet;
 pub mod silk_common;
 pub mod silk_decoder;
 pub mod silk_encoder_common;
@@ -34,10 +37,6 @@ pub mod celt_decoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod celt_encoder;
 #[cfg(not(feature = "fixed-point"))]
-pub mod celt_modes;
-#[cfg(not(feature = "fixed-point"))]
-pub mod celt_pitch_lpc;
-#[cfg(not(feature = "fixed-point"))]
 pub mod dnn_core;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_dred;
@@ -51,8 +50,6 @@ pub mod dnn_plc;
 pub mod opus_decoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod opus_encoder;
-#[cfg(not(feature = "fixed-point"))]
-pub mod opus_packet;
 #[cfg(not(feature = "fixed-point"))]
 pub mod silk_encoder_flp;
 #[cfg(not(feature = "fixed-point"))]
