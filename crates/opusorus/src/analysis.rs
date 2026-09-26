@@ -625,18 +625,40 @@ pub fn tonality_get_info(tonal: &mut TonalityAnalysisState, info_out: &mut Analy
 /// starting at sample `offset`, and runs one analysis step each time 20 ms (at 24 kHz) have
 /// been buffered.
 #[expect(clippy::too_many_arguments, reason = "mirrors C signature")]
-#[expect(clippy::too_many_lines, reason = "mirrors the C function")]
 pub fn tonality_analysis<T>(
     tonal: &mut TonalityAnalysisState,
     celt_mode: &CeltMode,
     x: &[T],
-    mut len: i32,
-    mut offset: i32,
+    len: i32,
+    offset: i32,
     c1: i32,
     c2: i32,
     c: i32,
     lsb_depth: i32,
     downmix: DownmixFunc<T>,
+) {
+    let mut resample = |y: &mut [OpusVal32], s: &mut [OpusVal32; 3], subframe, offset, fs| {
+        downmix_and_resample(downmix, x, y, s, subframe, offset, c1, c2, c, fs)
+    };
+    tonality_analysis_impl(tonal, celt_mode, len, offset, lsb_depth, &mut resample);
+}
+
+/// `downmix_and_resample(downmix, x, y, s, subframe, offset, c1, c2, C, Fs)` with the
+/// input-type dependent arguments (`downmix`, `x`, `c1`, `c2`, `C`) bound:
+/// `(y, s, subframe, offset, Fs)`.
+type DownmixResampleFn<'a> =
+    &'a mut dyn FnMut(&mut [OpusVal32], &mut [OpusVal32; 3], i32, i32, i32) -> OpusVal32;
+
+/// Body of [`tonality_analysis`]. Size: only the input downmix depends on the sample type, so
+/// it is passed as a type-erased closure instead of monomorphizing the analysis per type.
+#[expect(clippy::too_many_lines, reason = "mirrors the C function")]
+fn tonality_analysis_impl(
+    tonal: &mut TonalityAnalysisState,
+    celt_mode: &CeltMode,
+    mut len: i32,
+    mut offset: i32,
+    lsb_depth: i32,
+    downmix_and_resample: DownmixResampleFn<'_>,
 ) {
     const N: usize = 480;
     const N2: usize = 240;
@@ -682,15 +704,10 @@ pub fn tonality_analysis<T>(
     {
         let mf = tonal.mem_fill as usize;
         tonal.hp_ener_accum += downmix_and_resample(
-            downmix,
-            x,
             &mut tonal.inmem[mf..],
             &mut tonal.downmix_state,
             imin(len, BUF - tonal.mem_fill),
             offset,
-            c1,
-            c2,
-            c,
             tonal.fs,
         );
     }
@@ -723,15 +740,10 @@ pub fn tonality_analysis<T>(
     tonal.inmem.copy_within(ANALYSIS_BUF_SIZE - 240.., 0);
     let remaining = len - (BUF - tonal.mem_fill);
     tonal.hp_ener_accum = downmix_and_resample(
-        downmix,
-        x,
         &mut tonal.inmem[240..],
         &mut tonal.downmix_state,
         remaining,
         offset + BUF - tonal.mem_fill,
-        c1,
-        c2,
-        c,
         tonal.fs,
     );
     tonal.mem_fill = 240 + remaining;

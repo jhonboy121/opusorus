@@ -6,8 +6,8 @@ use crate::silk::define::{
 };
 use crate::silk::macros::{
     SILK_INT16_MAX, silk_add_sat16, silk_add_sat32, silk_div32_16, silk_lshift_sat32,
-    silk_lshift32, silk_rand, silk_rshift, silk_rshift_round, silk_sat16, silk_smlawb, silk_smultt,
-    silk_smulwb, silk_smulww, silk_sqrt_approx, silk_sub_lshift32,
+    silk_lshift32, silk_rand, silk_rshift, silk_rshift_round, silk_sat16, silk_smlawb_chain,
+    silk_smultt, silk_smulwb, silk_smulww, silk_sqrt_approx, silk_sub_lshift32,
 };
 use crate::silk::nlsf::silk_nlsf2a;
 use crate::silk::structs::{SilkDecoderControl, SilkDecoderState};
@@ -152,27 +152,16 @@ pub fn silk_cng(
         cng_sig_q14[..MLPC].copy_from_slice(&ps_cng.cng_synth_state);
         debug_assert!(lpc_order == 10 || lpc_order == 16);
         for i in 0..length {
-            let s = &cng_sig_q14[i..i + MLPC];
-            // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf
-            let mut lpc_pred_q10 = silk_rshift(lpc_order as i32, 1);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 1], a_q12[0] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 2], a_q12[1] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 3], a_q12[2] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 4], a_q12[3] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 5], a_q12[4] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 6], a_q12[5] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 7], a_q12[6] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 8], a_q12[7] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 9], a_q12[8] as i32);
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 10], a_q12[9] as i32);
-            if lpc_order == 16 {
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 11], a_q12[10] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 12], a_q12[11] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 13], a_q12[12] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 14], a_q12[13] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 15], a_q12[14] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 16], a_q12[15] as i32);
-            }
+            // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf.
+            // Perf: `silk_smlawb_chain` is the C chain `silk_SMLAWB( lpc_pred_Q10,
+            // CNG_sig_Q14[ MAX_LPC_ORDER + i - j - 1 ], A_Q12[ j ] )` for j = 0..LPC_order
+            // (bit-identical, see there).
+            let acc = silk_rshift(lpc_order as i32, 1);
+            let lpc_pred_q10 = if lpc_order == 16 {
+                silk_smlawb_chain(acc, &cng_sig_q14[i + MLPC - 16..i + MLPC], &a_q12)
+            } else {
+                silk_smlawb_chain(acc, &cng_sig_q14[i + MLPC - 10..i + MLPC], &a_q12)
+            };
 
             // Update states
             let v = silk_add_sat32(cng_sig_q14[MLPC + i], silk_lshift_sat32(lpc_pred_q10, 4));

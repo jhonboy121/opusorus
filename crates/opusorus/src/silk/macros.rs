@@ -56,6 +56,29 @@ pub const fn silk_smulwb(a32: i32, b32: i32) -> i32 {
 pub const fn silk_smlawb(a32: i32, b32: i32, c32: i32) -> i32 {
     (a32 as i64 + ((b32 as i64 * (c32 as i16) as i64) >> 16)) as i32
 }
+/// Perf helper, no C counterpart: the `silk_SMLAWB` chain of the SILK short-term prediction
+/// loops,
+/// `acc = silk_SMLAWB(acc, x[n-1], c[0]); acc = silk_SMLAWB(acc, x[n-2], c[1]); ...
+/// acc = silk_SMLAWB(acc, x[0], c[n-1])` with `n = x.len()`, over a history window `x` (oldest
+/// sample first, so `x[n-1]` is the newest one).
+///
+/// Each `silk_SMLAWB` step is an `i64` sum truncated to 32 bits (the `OPUS_FAST_INT64` form),
+/// so the chain equals `acc` plus the `silk_SMULWB` terms summed modulo 2^32, in any order:
+/// the result is bit-identical to the C chain. The terms are added oldest first here, which
+/// takes the newest sample (usually the output of the previous loop iteration) off the long
+/// serial add chain of the recursive filters. Callers pass a window of constant length (the
+/// branches on the LPC order) so that the loop is fully unrolled.
+#[inline(always)]
+#[must_use]
+pub fn silk_smlawb_chain(acc: i32, x: &[i32], c: &[i16]) -> i32 {
+    let n = x.len();
+    let c = &c[..n];
+    let mut acc = acc;
+    for k in (0..n).rev() {
+        acc = acc.wrapping_add(silk_smulwb(x[n - 1 - k], c[k] as i32));
+    }
+    acc
+}
 /// `silk_SMULWT`: `(a32 * (b32 >> 16)) >> 16`.
 #[inline(always)]
 #[must_use]

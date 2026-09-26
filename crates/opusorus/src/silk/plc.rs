@@ -11,8 +11,8 @@ use crate::silk::macros::{
     SILK_INT32_MAX, silk_add_sat32, silk_clz32, silk_div32, silk_div32_16, silk_fix_const,
     silk_inverse32_varq, silk_lshift, silk_lshift_sat32, silk_lshift32, silk_max, silk_max_16,
     silk_max_32, silk_max_int, silk_min, silk_min_32, silk_min_int, silk_rand, silk_rshift,
-    silk_rshift_round, silk_sat16, silk_smlawb, silk_smulbb, silk_smulwb, silk_smulww,
-    silk_sqrt_approx,
+    silk_rshift_round, silk_sat16, silk_smlawb, silk_smlawb_chain, silk_smulbb, silk_smulwb,
+    silk_smulww, silk_sqrt_approx,
 };
 use crate::silk::sigproc::{
     silk_bwexpander, silk_lpc_analysis_filter, silk_lpc_inverse_pred_gain, silk_sum_sqr_shift,
@@ -389,21 +389,15 @@ fn silk_plc_conceal(
     for i in 0..frame_length {
         // partly unrolled
         // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf
-        let s = &s_lpc_q14[i..i + MLPC];
-        let mut lpc_pred_q10 = silk_rshift(lpc_order as i32, 1);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 1], a_q12[0] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 2], a_q12[1] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 3], a_q12[2] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 4], a_q12[3] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 5], a_q12[4] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 6], a_q12[5] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 7], a_q12[6] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 8], a_q12[7] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 9], a_q12[8] as i32);
-        lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - 10], a_q12[9] as i32);
-        for j in 10..lpc_order {
-            lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s[MLPC - j - 1], a_q12[j] as i32);
-        }
+        // Perf: `silk_smlawb_chain` is the C chain `silk_SMLAWB( lpc_pred_Q10,
+        // sLPC_Q14_ptr[ MAX_LPC_ORDER + i - j - 1 ], A_Q12[ j ] )` for j = 0..LPC_order
+        // (bit-identical, see there); the branches give the window a constant length.
+        let acc = silk_rshift(lpc_order as i32, 1);
+        let lpc_pred_q10 = match lpc_order {
+            16 => silk_smlawb_chain(acc, &s_lpc_q14[i + MLPC - 16..i + MLPC], &a_q12),
+            10 => silk_smlawb_chain(acc, &s_lpc_q14[i + MLPC - 10..i + MLPC], &a_q12),
+            _ => silk_smlawb_chain(acc, &s_lpc_q14[i + MLPC - lpc_order..i + MLPC], &a_q12),
+        };
 
         // Add prediction to LPC excitation
         let v = silk_add_sat32(s_lpc_q14[MLPC + i], silk_lshift_sat32(lpc_pred_q10, 4));

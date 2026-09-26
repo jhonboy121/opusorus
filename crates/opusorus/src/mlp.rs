@@ -69,6 +69,12 @@ pub const fn sigmoid_approx(x: f32) -> f32 {
 }
 
 /// Port of `src/mlp.c:gemm_accum` (static): `out[i] += sum_j weights[j*col_stride + i]*x[j]`.
+///
+/// Perf/size: the loops are swapped (column-outer). Every `out[i]` still receives its
+/// `+= weights[..]*x[j]` updates one by one in increasing `j`, so the result is bit-identical,
+/// but the inner loop walks a contiguous weight column and vectorizes across outputs. Not
+/// inlined: one copy serves all six call sites.
+#[inline(never)]
 fn gemm_accum(
     out: &mut [f32],
     weights: &[i8],
@@ -77,9 +83,11 @@ fn gemm_accum(
     col_stride: usize,
     x: &[f32],
 ) {
-    for (i, o) in out[..rows].iter_mut().enumerate() {
-        for (j, &xj) in x[..cols].iter().enumerate() {
-            *o += weights[j * col_stride + i] as f32 * xj;
+    let out = &mut out[..rows];
+    for (j, &xj) in x[..cols].iter().enumerate() {
+        let w = &weights[j * col_stride..j * col_stride + rows];
+        for (o, &wv) in out.iter_mut().zip(w) {
+            *o += wv as f32 * xj;
         }
     }
 }

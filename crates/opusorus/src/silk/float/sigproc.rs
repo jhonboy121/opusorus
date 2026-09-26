@@ -258,20 +258,37 @@ pub fn silk_burg_modified_flp(
         // Update last row of correlation matrix (without last element, stored in reversed order)
         // Update C * Af
         // Update C * flipud(Af) (stored in reversed order)
+        // Perf: the loops over `k` walk `x_ptr[n - k - 1]` / `x_ptr[n - k]` backwards and
+        // `x_ptr[sl - n + k]` / `x_ptr[sl - n + k - 1]` forwards with iterators (no bounds
+        // checks); same operations in the same order.
         for s in 0..nb_subfr {
             let x_ptr = &x[s * sl..(s + 1) * sl];
-            tmp1 = x_ptr[n] as f64;
-            tmp2 = x_ptr[sl - n - 1] as f64;
-            for k in 0..n {
-                c_first_row[k] -= (x_ptr[n] * x_ptr[n - k - 1]) as f64;
-                c_last_row[k] -= (x_ptr[sl - n - 1] * x_ptr[sl - n + k]) as f64;
-                let atmp = af[k];
-                tmp1 += x_ptr[n - k - 1] as f64 * atmp;
-                tmp2 += x_ptr[sl - n + k] as f64 * atmp;
+            let x_n = x_ptr[n];
+            let x_e = x_ptr[sl - n - 1];
+            tmp1 = x_n as f64;
+            tmp2 = x_e as f64;
+            for ((((cf, cl), &atmp), &xa), &xb) in c_first_row[..n]
+                .iter_mut()
+                .zip(&mut c_last_row[..n])
+                .zip(&af[..n])
+                .zip(x_ptr[..n].iter().rev())
+                .zip(&x_ptr[sl - n..])
+            {
+                // xa = x_ptr[n - k - 1], xb = x_ptr[sl - n + k]
+                *cf -= (x_n * xa) as f64;
+                *cl -= (x_e * xb) as f64;
+                tmp1 += xa as f64 * atmp;
+                tmp2 += xb as f64 * atmp;
             }
-            for k in 0..=n {
-                caf[k] -= tmp1 * x_ptr[n - k] as f64;
-                cab[k] -= tmp2 * x_ptr[sl - n + k - 1] as f64;
+            for (((cf, cb), &xa), &xb) in caf[..=n]
+                .iter_mut()
+                .zip(&mut cab[..=n])
+                .zip(x_ptr[..=n].iter().rev())
+                .zip(&x_ptr[sl - n - 1..])
+            {
+                // xa = x_ptr[n - k], xb = x_ptr[sl - n + k - 1]
+                *cf -= tmp1 * xa as f64;
+                *cb -= tmp2 * xb as f64;
             }
         }
         tmp1 = c_first_row[n];
@@ -814,6 +831,8 @@ pub fn silk_warped_autocorrelation_flp(
     order: usize,
 ) {
     const MSO: usize = MAX_SHAPE_LPC_ORDER as usize;
+    /// Most samples in flight at once in the wavefront below (`order / 2 + 1`).
+    const MAX_IN_FLIGHT: usize = MSO / 2 + 1;
     let mut state = [0f64; MSO + 1];
     let mut c = [0f64; MSO + 1];
     let w = warping as f64;
@@ -821,25 +840,53 @@ pub fn silk_warped_autocorrelation_flp(
     // Order must be even
     debug_assert!(order & 1 == 0);
     debug_assert!(order <= MSO);
+    let input = &input[..length];
 
-    // Loop over samples
-    for &x in &input[..length] {
-        let mut tmp1 = x as f64;
-        // Loop over allpass sections
-        let mut i = 0usize;
-        while i < order {
-            // Output of allpass section
-            let tmp2 = state[i] + w * state[i + 1] - w * tmp1;
-            state[i] = tmp1;
-            c[i] += state[0] * tmp1;
-            // Output of allpass section
-            tmp1 = state[i + 1] + w * state[i + 2] - w * tmp2;
-            state[i + 1] = tmp2;
-            c[i + 1] += state[0] * tmp2;
-            i += 2;
+    // Perf: the C loop runs the allpass sections of one sample after the other, a serial
+    // dependency chain of `order` sections per sample. Sample `n` only needs, at section pair
+    // `p` (sections 2p, 2p+1), the states written by sample `n - 1` up to section pair
+    // `p + 1`. The samples are therefore processed as a wavefront: at time step `t` every
+    // sample `n` in flight advances by one step `p = t - n` (in increasing `n`), which keeps
+    // the chains of up to `order / 2 + 1` samples overlapping. Every state value and every
+    // `C[ i ]` accumulation sees exactly the operations of C in the same order (the
+    // accumulations into each `C[ i ]` still happen in sample order), so the result is
+    // bit-identical. `state[ 0 ]` equals the current input sample after the first section, so
+    // the `C[ i ] += state[ 0 ] * tmp` products use the sample value `x` directly.
+    let pairs = order / 2;
+    // carry[p]: `tmp1` entering step `p` of the sample that runs step `p` next.
+    let mut carry = [0f64; MAX_IN_FLIGHT];
+    let last = length.saturating_sub(1);
+    let steps = if length > 0 { length + pairs } else { 0 };
+    for t in 0..steps {
+        if t < length {
+            carry[0] = input[t] as f64;
         }
-        state[order] = tmp1;
-        c[order] += state[0] * tmp1;
+        // Last step of sample t - pairs
+        if t >= pairs {
+            let x = input[t - pairs] as f64;
+            let tmp1 = carry[pairs];
+            state[order] = tmp1;
+            c[order] += x * tmp1;
+        }
+        // Section pair p of sample n = t - p, for decreasing p (increasing n)
+        if pairs > 0 {
+            let p_hi = t.min(pairs - 1);
+            let p_lo = t.saturating_sub(last);
+            for p in (p_lo..=p_hi).rev() {
+                let x = input[t - p] as f64;
+                let tmp1 = carry[p];
+                let i = 2 * p;
+                // Output of allpass section
+                let tmp2 = state[i] + w * state[i + 1] - w * tmp1;
+                state[i] = tmp1;
+                c[i] += x * tmp1;
+                // Output of allpass section
+                let tmp1 = state[i + 1] + w * state[i + 2] - w * tmp2;
+                state[i + 1] = tmp2;
+                c[i + 1] += x * tmp2;
+                carry[p + 1] = tmp1;
+            }
+        }
     }
 
     // Copy correlations in silk_float output format

@@ -176,6 +176,12 @@ const MAX_ENCODER_BUFFER: usize = 480;
 /// `PSEUDO_SNR_THRESHOLD`: 10^(25/10).
 const PSEUDO_SNR_THRESHOLD: f32 = 316.23;
 
+/// The `run_analysis` call of `opus_encode_native` with the input-type dependent arguments
+/// (`analysis_pcm`, `analysis_size`, `c1`, `c2`, `analysis_channels`, `downmix`) bound:
+/// `(analysis, celt_mode, frame_size, Fs, lsb_depth, analysis_info)`.
+type AnalyzeFn<'a> =
+    &'a mut dyn FnMut(&mut TonalityAnalysisState, &CeltMode, i32, i32, i32, &mut AnalysisInfo);
+
 /// Largest packet a single call may produce (`packet_size_cap*6` in `opus_encode_native`).
 #[cfg(feature = "qext")]
 const MAX_PACKET_BYTES: usize = 6 * QEXT_PACKET_SIZE_CAP as usize;
@@ -1556,18 +1562,37 @@ impl Encoder {
         float_api: i32,
     ) -> i32 {
         let out_data_bytes = imin(out_data_bytes, len_i32(data.len()));
+        // Size: only the tonality analysis depends on the input sample type, so it is passed
+        // to the (large, non-generic) body as a type-erased closure instead of monomorphizing
+        // the whole encoder per sample type.
+        let mut analyze = |analysis: &mut TonalityAnalysisState,
+                           celt_mode: &CeltMode,
+                           frame_size: i32,
+                           fs: i32,
+                           lsb_depth: i32,
+                           analysis_info: &mut AnalysisInfo| {
+            run_analysis(
+                analysis,
+                celt_mode,
+                analysis_pcm,
+                analysis_size,
+                frame_size,
+                c1,
+                c2,
+                analysis_channels,
+                fs,
+                lsb_depth,
+                downmix,
+                analysis_info,
+            );
+        };
         match self.encode_native_impl(
             pcm,
             frame_size,
             data,
             out_data_bytes,
             lsb_depth,
-            analysis_pcm,
-            analysis_size,
-            c1,
-            c2,
-            analysis_channels,
-            downmix,
+            &mut analyze,
             float_api,
         ) {
             Ok(n) => n,
@@ -1580,19 +1605,14 @@ impl Encoder {
         clippy::cognitive_complexity,
         reason = "one C function; splitting it would obscure the correspondence"
     )]
-    fn encode_native_impl<T>(
+    fn encode_native_impl(
         &mut self,
         pcm: &[OpusRes],
         frame_size: i32,
         data: &mut [u8],
         out_data_bytes: i32,
         lsb_depth: i32,
-        analysis_pcm: Option<&[T]>,
-        analysis_size: i32,
-        c1: i32,
-        c2: i32,
-        analysis_channels: i32,
-        downmix: DownmixFunc<T>,
+        analyze: AnalyzeFn<'_>,
         float_api: i32,
     ) -> Result<i32> {
         let mut redundancy = 0;
@@ -1640,18 +1660,15 @@ impl Encoder {
             analysis_read_pos_bak = self.analysis.read_pos;
             analysis_read_subframe_bak = self.analysis.read_subframe;
             let celt = celt_of(&mut self.celt_enc)?;
-            run_analysis(
+            // run_analysis(&st->analysis, celt_mode, analysis_pcm, analysis_size, frame_size,
+            //              c1, c2, analysis_channels, st->Fs, lsb_depth, downmix,
+            //              &analysis_info)
+            analyze(
                 &mut self.analysis,
                 celt.mode(),
-                analysis_pcm,
-                analysis_size,
                 frame_size,
-                c1,
-                c2,
-                analysis_channels,
                 self.fs,
                 lsb_depth,
-                downmix,
                 &mut analysis_info,
             );
         } else if self.analysis.initialized != 0 {

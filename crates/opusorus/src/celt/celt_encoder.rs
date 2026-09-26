@@ -798,51 +798,78 @@ pub fn transient_analysis(
     }
     let len2 = len / 2;
     let len2u = len2 as usize;
-    for ch in 0..c {
-        let mut unmask: i32 = 0;
-        let mut mem0: OpusVal32 = 0.0;
-        let mut mem1: OpusVal32 = 0.0;
-        let x_in = &input[(ch * len) as usize..(ch * len) as usize + lenu];
-        // High-pass filter: (1 - 2*z^-1 + z^-2) / (1 - z^-1 + .5*z^-2)
-        for i in 0..lenu {
-            let x: OpusVal32 = x_in[i];
-            let y: OpusVal32 = mem0 + x;
-            // Modified code to shorten dependency chains.
-            let mem00 = mem0;
-            mem0 = mem0 - x + 0.5f32 * mem1;
-            mem1 = x - mem00;
-            tmp[i] = y;
-        }
-        // First few samples are bad because we don't propagate the memory
-        tmp[..12].fill(0.0);
-        // FIXED_POINT: normalisation of tmp not ported (float build).
 
-        let mut mean: OpusVal32 = 0.0;
-        mem0 = 0.0;
-        // Grouping by two to reduce complexity
-        // Forward pass to compute the post-echo threshold
+    // Perf: C runs, for one channel after the other, three serial recursions over the frame
+    // (the high-pass filter, the forward and the backward masking). Here the high-pass filter
+    // is fused with the forward pass (a sample pair is filtered right before it is used,
+    // giving two independent chains), and both channels advance together through these
+    // loops and through the backward pass, so that the dependency chains overlap. Every value
+    // is computed with the operations of C, in the same order. Channel `ch` keeps its
+    // thresholds in `tmp[ch*len2..(ch+1)*len2]` (C reuses `tmp[0..len2]` per channel).
+    debug_assert!(c == 1 || c == 2);
+    let cu = (c as usize).min(2);
+    let mut mem0 = [0.0 as OpusVal32; 2];
+    let mut mem1 = [0.0 as OpusVal32; 2];
+    let mut fwd = [0.0 as OpusVal32; 2];
+    let mut mean = [0.0 as OpusVal32; 2];
+    let x_ch: [&[OpusVal32]; 2] = [
+        &input[..lenu],
+        &input[(cu - 1) * lenu..(cu - 1) * lenu + lenu],
+    ];
+    {
+        let (tmp0, tmp1) = tmp.split_at_mut(len2u);
         for i in 0..len2u {
-            let x2: OpusVal32 = tmp[2 * i] * tmp[2 * i] + tmp[2 * i + 1] * tmp[2 * i + 1];
-            mean += x2;
-            mem0 = x2 + (1.0f32 - forward_decay) * mem0;
-            tmp[i] = forward_decay * mem0;
-        }
+            for ch in 0..cu {
+                let x_in = x_ch[ch];
+                // High-pass filter: (1 - 2*z^-1 + z^-2) / (1 - z^-1 + .5*z^-2)
+                let mut y = [0.0 as OpusVal32; 2];
+                for (k, yk) in y.iter_mut().enumerate() {
+                    let x: OpusVal32 = x_in[2 * i + k];
+                    let v: OpusVal32 = mem0[ch] + x;
+                    // Modified code to shorten dependency chains.
+                    let mem00 = mem0[ch];
+                    mem0[ch] = mem0[ch] - x + 0.5f32 * mem1[ch];
+                    mem1[ch] = x - mem00;
+                    // First few samples are bad because we don't propagate the memory
+                    *yk = if 2 * i + k < 12 { 0.0 } else { v };
+                }
+                // FIXED_POINT: normalisation of tmp not ported (float build).
 
-        mem0 = 0.0;
-        let mut max_e: OpusVal16 = 0.0;
+                // Grouping by two to reduce complexity
+                // Forward pass to compute the post-echo threshold
+                let x2: OpusVal32 = y[0] * y[0] + y[1] * y[1];
+                mean[ch] += x2;
+                fwd[ch] = x2 + (1.0f32 - forward_decay) * fwd[ch];
+                let t = if ch == 0 { &mut tmp0[i] } else { &mut tmp1[i] };
+                *t = forward_decay * fwd[ch];
+            }
+        }
+    }
+
+    let mut bwd = [0.0 as OpusVal32; 2];
+    let mut max_e = [0.0 as OpusVal16; 2];
+    {
+        let (tmp0, tmp1) = tmp.split_at_mut(len2u);
         // Backward pass to compute the pre-echo threshold
         for i in (0..len2u).rev() {
-            // Backward masking: 13.9 dB/ms.
-            mem0 = tmp[i] + 0.875f32 * mem0;
-            tmp[i] = 0.125f32 * mem0;
-            max_e = max16(max_e, 0.125f32 * mem0);
+            for ch in 0..cu {
+                let t = if ch == 0 { &mut tmp0[i] } else { &mut tmp1[i] };
+                // Backward masking: 13.9 dB/ms.
+                bwd[ch] = *t + 0.875f32 * bwd[ch];
+                *t = 0.125f32 * bwd[ch];
+                max_e[ch] = max16(max_e[ch], 0.125f32 * bwd[ch]);
+            }
         }
+    }
 
+    for ch in 0..cu {
+        let mut unmask: i32 = 0;
+        let tmp = &tmp[ch * len2u..(ch + 1) * len2u];
         // Compute the ratio of the "frame energy" over the harmonic mean of the energy. As a
         // compromise with the old transient detector, frame energy is the geometric mean of
         // the energy and half the max.
         // C: celt_sqrt(mean * maxE*.5*len2) (double arithmetic after the first product).
-        mean = math::sqrt(f64::from(mean * max_e) * 0.5 * f64::from(len2)) as f32;
+        let mean = math::sqrt(f64::from(mean[ch] * max_e[ch]) * 0.5 * f64::from(len2)) as f32;
         // Inverse of the mean energy in Q15+6
         let norm: OpusVal32 = len2 as f32 / (EPSILON + mean);
         // We should never see NaNs here (C aborts with hardening).
@@ -862,7 +889,7 @@ pub fn transient_analysis(
         // table
         unmask = 64 * unmask * 4 / (6 * (len2 - 17));
         if unmask > mask_metric {
-            *tf_chan = ch;
+            *tf_chan = ch as i32;
             mask_metric = unmask;
         }
     }

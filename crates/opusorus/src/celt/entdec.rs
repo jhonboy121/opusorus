@@ -220,7 +220,8 @@ impl<'a> EcDec<'a> {
     }
 
     /// Port of `ec_dec_icdf16`: like [`Self::dec_icdf`] with 16-bit entries.
-    #[inline]
+    // Size: not inlined (tens of call sites; the call is cheap next to the symbol search).
+    #[inline(never)]
     pub const fn dec_icdf16(&mut self, icdf: &[u16], ftb: u32) -> usize {
         let mut s = self.rng;
         let d = self.val;

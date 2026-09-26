@@ -270,7 +270,8 @@ impl<'a> EcEnc<'a> {
     }
 
     /// Port of `ec_enc_icdf`: encodes symbol `s` with an inverse CDF table (8-bit entries).
-    #[inline]
+    // Size: not inlined (tens of call sites; the call is cheap next to the symbol search).
+    #[inline(never)]
     pub const fn enc_icdf(&mut self, s: usize, icdf: &[u8], ftb: u32) {
         let r = self.rng >> ftb;
         if s > 0 {
@@ -285,7 +286,8 @@ impl<'a> EcEnc<'a> {
     }
 
     /// Port of `ec_enc_icdf16`: like [`Self::enc_icdf`] with 16-bit entries.
-    #[inline]
+    // Size: not inlined (tens of call sites; the call is cheap next to the symbol search).
+    #[inline(never)]
     pub const fn enc_icdf16(&mut self, s: usize, icdf: &[u16], ftb: u32) {
         let r = self.rng >> ftb;
         if s > 0 {

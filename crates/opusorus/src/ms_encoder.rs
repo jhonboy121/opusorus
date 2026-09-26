@@ -146,6 +146,104 @@ const MS_FRAME_TMP: usize = 6 * 1275 + 12;
 pub(crate) type CopyChannelIn<T> =
     fn(&mut [OpusRes], usize, &[T], usize, usize, usize, Option<&MappingMatrix>);
 
+/// The input of `opus_multistream_encode_native` with its sample-type dependent functions
+/// (`copy_channel_in`, `downmix`) bound. Size: the large multistream encoder body and
+/// `surround_analysis` take it as a trait object instead of being monomorphized per sample
+/// type.
+trait MsInput {
+    /// Number of input samples (all channels).
+    fn len(&self) -> usize;
+    /// `copy_channel_in(dst, dst_stride, pcm, src_stride, src_channel, frame_size, user_data)`.
+    fn copy_channel_in(
+        &self,
+        dst: &mut [OpusRes],
+        dst_stride: usize,
+        src_stride: usize,
+        src_channel: usize,
+        frame_size: usize,
+        user_data: Option<&MappingMatrix>,
+    );
+    /// `opus_encode_native(enc, pcm, frame_size, data, out_data_bytes, lsb_depth, <input>,
+    /// analysis_size, c1, c2, analysis_channels, downmix, float_api)`.
+    fn encode_native(
+        &self,
+        enc: &mut Encoder,
+        pcm: &[OpusRes],
+        frame_size: i32,
+        data: &mut [u8],
+        out_data_bytes: i32,
+        lsb_depth: i32,
+        analysis_size: i32,
+        c1: i32,
+        c2: i32,
+        analysis_channels: i32,
+        float_api: i32,
+    ) -> i32;
+}
+
+/// [`MsInput`] for samples of type `T`.
+struct MsPcm<'a, T> {
+    pcm: &'a [T],
+    copy_channel_in: CopyChannelIn<T>,
+    downmix: DownmixFunc<T>,
+}
+
+impl<T> MsInput for MsPcm<'_, T> {
+    fn len(&self) -> usize {
+        self.pcm.len()
+    }
+
+    fn copy_channel_in(
+        &self,
+        dst: &mut [OpusRes],
+        dst_stride: usize,
+        src_stride: usize,
+        src_channel: usize,
+        frame_size: usize,
+        user_data: Option<&MappingMatrix>,
+    ) {
+        (self.copy_channel_in)(
+            dst,
+            dst_stride,
+            self.pcm,
+            src_stride,
+            src_channel,
+            frame_size,
+            user_data,
+        );
+    }
+
+    fn encode_native(
+        &self,
+        enc: &mut Encoder,
+        pcm: &[OpusRes],
+        frame_size: i32,
+        data: &mut [u8],
+        out_data_bytes: i32,
+        lsb_depth: i32,
+        analysis_size: i32,
+        c1: i32,
+        c2: i32,
+        analysis_channels: i32,
+        float_api: i32,
+    ) -> i32 {
+        enc.opus_encode_native(
+            pcm,
+            frame_size,
+            data,
+            out_data_bytes,
+            lsb_depth,
+            Some(self.pcm),
+            analysis_size,
+            c1,
+            c2,
+            analysis_channels,
+            self.downmix,
+            float_api,
+        )
+    }
+}
+
 /// Port of src/opus_multistream_encoder.c:validate_ambisonics: whether `nb_channels` is a
 /// valid ambisonics channel count, with the resulting stream counts.
 fn validate_ambisonics(nb_channels: i32) -> Option<(i32, i32)> {
@@ -253,9 +351,9 @@ struct SurroundScratch {
 
 /// Port of src/opus_multistream_encoder.c:surround_analysis: computes the per-channel
 /// surround masking curves (`bandLogE`, 21 bands per channel) of one frame of `len` samples.
-fn surround_analysis<T>(
+fn surround_analysis(
     celt_mode: &CeltMode,
-    pcm: &[T],
+    pcm: &dyn MsInput,
     band_log_e: &mut [CeltGlog],
     mem: &mut [OpusVal32],
     preemph_mem: &mut [OpusVal32],
@@ -263,7 +361,6 @@ fn surround_analysis<T>(
     overlap: i32,
     channels: i32,
     rate: i32,
-    copy_channel_in: CopyChannelIn<T>,
     scratch: &mut SurroundScratch,
 ) {
     let mut pos = [0i32; 8];
@@ -308,7 +405,7 @@ fn surround_analysis<T>(
         let nb_frames = frame_size / freq_size;
         debug_assert!(nb_frames * freq_size == frame_size);
         input[..ov].copy_from_slice(&mem[c * ov..(c + 1) * ov]);
-        copy_channel_in(x, 1, pcm, channels as usize, c, len as usize, None);
+        pcm.copy_channel_in(x, 1, channels as usize, c, len as usize, None);
         celt_preemphasis(
             x,
             &mut input[ov..],
@@ -431,9 +528,14 @@ pub fn surround_analysis_float(
         return Err(Error::BadArg);
     }
     let mut scratch = SurroundScratch::default();
+    let input = MsPcm {
+        pcm,
+        copy_channel_in: opus_copy_channel_in_float,
+        downmix: downmix_float,
+    };
     surround_analysis(
         mode,
-        pcm,
+        &input,
         band_log_e,
         mem,
         preemph_mem,
@@ -441,7 +543,6 @@ pub fn surround_analysis_float(
         mode.overlap,
         channels,
         rate,
-        opus_copy_channel_in_float,
         &mut scratch,
     );
     Ok(())
@@ -991,10 +1092,6 @@ impl MsEncoder {
     /// Port of src/opus_multistream_encoder.c:opus_multistream_encode_native, with the C
     /// semantics (returns the packet length or a negative `OPUS_*` error code). `data.len()`
     /// is `max_data_bytes`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one C function; splitting it would obscure the correspondence"
-    )]
     pub(crate) fn opus_multistream_encode_native<T>(
         &mut self,
         copy_channel_in: CopyChannelIn<T>,
@@ -1003,6 +1100,35 @@ impl MsEncoder {
         data: &mut [u8],
         lsb_depth: i32,
         downmix: DownmixFunc<T>,
+        float_api: i32,
+        user_data: Option<&MappingMatrix>,
+    ) -> i32 {
+        let input = MsPcm {
+            pcm,
+            copy_channel_in,
+            downmix,
+        };
+        self.multistream_encode_native_impl(
+            &input,
+            analysis_frame_size,
+            data,
+            lsb_depth,
+            float_api,
+            user_data,
+        )
+    }
+
+    /// Body of [`Self::opus_multistream_encode_native`] (see [`MsInput`]).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one C function; splitting it would obscure the correspondence"
+    )]
+    fn multistream_encode_native_impl(
+        &mut self,
+        pcm: &dyn MsInput,
+        analysis_frame_size: i32,
+        data: &mut [u8],
+        lsb_depth: i32,
         float_api: i32,
         user_data: Option<&MappingMatrix>,
     ) -> i32 {
@@ -1062,7 +1188,6 @@ impl MsEncoder {
                 celt_mode.overlap,
                 nb_channels,
                 fs,
-                copy_channel_in,
                 &mut scratch.surround,
             );
         }
@@ -1142,19 +1267,17 @@ impl MsEncoder {
             if s < layout.nb_coupled_streams {
                 let left = get_left_channel(layout, s, -1);
                 let right = get_right_channel(layout, s, -1);
-                copy_channel_in(
+                pcm.copy_channel_in(
                     &mut scratch.buf,
                     2,
-                    pcm,
                     nb_channels as usize,
                     left as usize,
                     fsu,
                     user_data,
                 );
-                copy_channel_in(
+                pcm.copy_channel_in(
                     &mut scratch.buf[1..],
                     2,
-                    pcm,
                     nb_channels as usize,
                     right as usize,
                     fsu,
@@ -1171,10 +1294,9 @@ impl MsEncoder {
                 enc_channels = 2;
             } else {
                 let chan = get_mono_channel(layout, s, -1);
-                copy_channel_in(
+                pcm.copy_channel_in(
                     &mut scratch.buf,
                     1,
-                    pcm,
                     nb_channels as usize,
                     chan as usize,
                     fsu,
@@ -1216,18 +1338,17 @@ impl MsEncoder {
                     return e.code();
                 }
             }
-            let len = enc.opus_encode_native(
+            let len = pcm.encode_native(
+                enc,
                 &scratch.buf[..fsu * enc_channels],
                 frame_size,
                 &mut scratch.tmp_data,
                 curr_max,
                 lsb_depth,
-                Some(pcm),
                 analysis_frame_size,
                 c1,
                 c2,
                 nb_channels,
-                downmix,
                 float_api,
             );
             if len < 0 {

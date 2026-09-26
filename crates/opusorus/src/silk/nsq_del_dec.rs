@@ -75,11 +75,23 @@ impl NsqDelDecStruct {
     /// sizeof( NSQ_del_dec_struct ) - i * sizeof( opus_int32 ) )`: copies every field of `src`
     /// except the first `i` words, which (as `i < MAX_SUB_FRAME_LENGTH + NSQ_LPC_BUF_LENGTH`)
     /// all lie in `sLPC_Q14`.
+    ///
+    /// Perf: copies the fields directly (one pass over the data, like the C `memcpy`) instead
+    /// of copying the whole struct and restoring the kept prefix.
     fn copy_from_word(&mut self, src: &Self, i: usize) {
         debug_assert!(i < MSFL + NLBL);
-        let keep = self.s_lpc_q14;
-        *self = *src;
-        self.s_lpc_q14[..i].copy_from_slice(&keep[..i]);
+        self.s_lpc_q14[i..].copy_from_slice(&src.s_lpc_q14[i..]);
+        self.rand_state = src.rand_state;
+        self.q_q10 = src.q_q10;
+        self.xq_q14 = src.xq_q14;
+        self.pred_q15 = src.pred_q15;
+        self.shape_q14 = src.shape_q14;
+        self.s_ar2_q14 = src.s_ar2_q14;
+        self.lf_ar_q14 = src.lf_ar_q14;
+        self.diff_q14 = src.diff_q14;
+        self.seed = src.seed;
+        self.seed_init = src.seed_init;
+        self.rd_q10 = src.rd_q10;
     }
 }
 
@@ -435,13 +447,22 @@ fn silk_noise_shape_quantizer_del_dec(
             0
         };
 
-        for k in 0..n_states {
-            // Delayed decision state
-            let ps_dd = &mut ps_del_dec[k];
-
-            // Sample state
-            let ps_ss = &mut ps_sample_state[k];
-
+        // Perf: the delayed-decision states are independent. The short-term prediction and
+        // the noise shape feedback (a long serial chain of allpass sections per state) are
+        // first computed for all states, with the allpass sections of the states interleaved
+        // so that their dependency chains overlap instead of running back to back; the rest
+        // of the per-state work follows in a second loop. For each state the operations and
+        // their order are exactly those of C.
+        let mut lpc_pred = [0i32; MDDS];
+        let mut t1 = [0i32; MDDS];
+        let mut n_ar = [0i32; MDDS];
+        debug_assert!((shaping_lpc_order & 1) == 0); // check that order is even
+        for (((ps_dd, lpc_pred_q14), tmp1), n_ar_q14) in ps_del_dec
+            .iter_mut()
+            .zip(&mut lpc_pred)
+            .zip(&mut t1)
+            .zip(&mut n_ar)
+        {
             // Generate dither
             ps_dd.seed = silk_rand(ps_dd.seed);
 
@@ -449,47 +470,61 @@ fn silk_noise_shape_quantizer_del_dec(
             // psLPC_Q14 = &psDD->sLPC_Q14[ NSQ_LPC_BUF_LENGTH - 1 + i ]
             let ps_lpc_q14 = NLBL - 1 + i;
             // Short-term prediction
-            let mut lpc_pred_q14 = silk_noise_shape_quantizer_short_prediction_c(
+            *lpc_pred_q14 = silk_noise_shape_quantizer_short_prediction_c(
                 &ps_dd.s_lpc_q14[..=ps_lpc_q14],
                 a_q12,
                 predict_lpc_order,
             );
-            lpc_pred_q14 = silk_lshift(lpc_pred_q14, 4); // Q10 -> Q14
+            *lpc_pred_q14 = silk_lshift(*lpc_pred_q14, 4); // Q10 -> Q14
 
             // Noise shape feedback
-            debug_assert!((shaping_lpc_order & 1) == 0); // check that order is even
             // Output of lowpass section
-            let mut tmp2 = silk_smlawb(ps_dd.diff_q14, ps_dd.s_ar2_q14[0], warping_q16);
+            let tmp2 = silk_smlawb(ps_dd.diff_q14, ps_dd.s_ar2_q14[0], warping_q16);
             // Output of allpass section
-            let mut tmp1 = silk_smlawb(
+            *tmp1 = silk_smlawb(
                 ps_dd.s_ar2_q14[0],
                 silk_sub32_ovflw(ps_dd.s_ar2_q14[1], tmp2),
                 warping_q16,
             );
             ps_dd.s_ar2_q14[0] = tmp2;
-            let mut n_ar_q14 = silk_rshift(shaping_lpc_order, 1);
-            n_ar_q14 = silk_smlawb(n_ar_q14, tmp2, ar_shp_q13[0] as i32);
-            // Loop over allpass sections
-            let mut j = 2;
-            while j < shp_order {
+            *n_ar_q14 = silk_rshift(shaping_lpc_order, 1);
+            *n_ar_q14 = silk_smlawb(*n_ar_q14, tmp2, ar_shp_q13[0] as i32);
+        }
+        // Loop over allpass sections
+        let mut j = 2;
+        while j < shp_order {
+            for ((ps_dd, tmp1), n_ar_q14) in ps_del_dec.iter_mut().zip(&mut t1).zip(&mut n_ar) {
+                let s_ar2_q14 = &mut ps_dd.s_ar2_q14;
                 // Output of allpass section
-                tmp2 = silk_smlawb(
-                    ps_dd.s_ar2_q14[j - 1],
-                    silk_sub32_ovflw(ps_dd.s_ar2_q14[j], tmp1),
+                let tmp2 = silk_smlawb(
+                    s_ar2_q14[j - 1],
+                    silk_sub32_ovflw(s_ar2_q14[j], *tmp1),
                     warping_q16,
                 );
-                ps_dd.s_ar2_q14[j - 1] = tmp1;
-                n_ar_q14 = silk_smlawb(n_ar_q14, tmp1, ar_shp_q13[j - 1] as i32);
+                s_ar2_q14[j - 1] = *tmp1;
+                *n_ar_q14 = silk_smlawb(*n_ar_q14, *tmp1, ar_shp_q13[j - 1] as i32);
                 // Output of allpass section
-                tmp1 = silk_smlawb(
-                    ps_dd.s_ar2_q14[j],
-                    silk_sub32_ovflw(ps_dd.s_ar2_q14[j + 1], tmp2),
+                *tmp1 = silk_smlawb(
+                    s_ar2_q14[j],
+                    silk_sub32_ovflw(s_ar2_q14[j + 1], tmp2),
                     warping_q16,
                 );
-                ps_dd.s_ar2_q14[j] = tmp2;
-                n_ar_q14 = silk_smlawb(n_ar_q14, tmp2, ar_shp_q13[j] as i32);
-                j += 2;
+                s_ar2_q14[j] = tmp2;
+                *n_ar_q14 = silk_smlawb(*n_ar_q14, tmp2, ar_shp_q13[j] as i32);
             }
+            j += 2;
+        }
+
+        for k in 0..n_states {
+            // Delayed decision state
+            let ps_dd = &mut ps_del_dec[k];
+
+            // Sample state
+            let ps_ss = &mut ps_sample_state[k];
+
+            let lpc_pred_q14 = lpc_pred[k];
+            let mut tmp1 = t1[k];
+            let mut n_ar_q14 = n_ar[k];
             ps_dd.s_ar2_q14[shp_order - 1] = tmp1;
             n_ar_q14 = silk_smlawb(n_ar_q14, tmp1, ar_shp_q13[shp_order - 1] as i32);
 
@@ -504,7 +539,7 @@ fn silk_noise_shape_quantizer_del_dec(
             // Input minus prediction plus noise feedback
             // r = x[ i ] - LTP_pred - LPC_pred + n_AR + n_Tilt + n_LF + n_LTP
             tmp1 = silk_add_sat32(n_ar_q14, n_lf_q14); // Q14
-            tmp2 = silk_add32_ovflw(n_ltp_q14, lpc_pred_q14); // Q13
+            let tmp2 = silk_add32_ovflw(n_ltp_q14, lpc_pred_q14); // Q13
             tmp1 = silk_sub_sat32(tmp2, tmp1); // Q13
             tmp1 = silk_rshift_round(tmp1, 4); // Q10
 
@@ -666,8 +701,17 @@ fn silk_noise_shape_quantizer_del_dec(
 
         // Replace a state if best from second set outperforms worst in first set
         if rdmin_q10 < rdmax_q10 {
-            let src = ps_del_dec[rdmin_ind];
-            ps_del_dec[rdmax_ind].copy_from_word(&src, i);
+            // rdmin_ind != rdmax_ind: ps_sample_state[k][0].rd_q10 < [k][1].rd_q10 for every
+            // state, so the worst first-set state cannot also be the best second-set state
+            // when rdmin_q10 < rdmax_q10.
+            let (dst, src) = if rdmax_ind < rdmin_ind {
+                let (a, b) = ps_del_dec.split_at_mut(rdmin_ind);
+                (&mut a[rdmax_ind], &b[0])
+            } else {
+                let (a, b) = ps_del_dec.split_at_mut(rdmax_ind);
+                (&mut b[0], &a[rdmin_ind])
+            };
+            dst.copy_from_word(src, i);
             ps_sample_state[rdmax_ind][0] = ps_sample_state[rdmin_ind][1];
         }
 

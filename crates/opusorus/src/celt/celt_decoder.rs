@@ -395,12 +395,59 @@ pub fn deemphasis(
     let coef0 = coef[0];
     let ds = downsample as usize;
     let nd = n / ds;
+    // C: `#if defined(CUSTOM_MODES) || ... || defined(ENABLE_QEXT)` around this branch.
+    let custom = cfg!(any(feature = "custom-modes", feature = "qext")) && coef[1] != 0.0;
+    if c == 2 && downsample == 1 {
+        // Perf: stereo without downsampling with both channels in one loop, so that their
+        // recursions overlap; the same operations per sample as the per-channel loops below
+        // (with `downsample == 1` the custom filter output goes straight to `pcm`).
+        let (x0, x1) = (&input[0][..n], &input[1][..n]);
+        let pcm = &mut pcm[..2 * n];
+        let [mut m0, mut m1] = *mem;
+        if custom {
+            let coef1 = coef[1];
+            let coef3 = coef[3];
+            for ((y, &a), &b) in pcm.as_chunks_mut::<2>().0.iter_mut().zip(x0).zip(x1) {
+                let mut tmp0: CeltSig = saturate(a + m0 + VERY_SMALL, SIG_SAT);
+                let mut tmp1: CeltSig = saturate(b + m1 + VERY_SMALL, SIG_SAT);
+                m0 = mult16_32_q15(coef0, tmp0) - mult16_32_q15(coef1, a);
+                m1 = mult16_32_q15(coef0, tmp1) - mult16_32_q15(coef1, b);
+                tmp0 = shl32(mult16_32_q15(coef3, tmp0), 2);
+                tmp1 = shl32(mult16_32_q15(coef3, tmp1), 2);
+                if accum {
+                    y[0] = add_res(y[0], sig2res(tmp0));
+                    y[1] = add_res(y[1], sig2res(tmp1));
+                } else {
+                    y[0] = sig2res(tmp0);
+                    y[1] = sig2res(tmp1);
+                }
+            }
+        } else if accum {
+            for ((y, &a), &b) in pcm.as_chunks_mut::<2>().0.iter_mut().zip(x0).zip(x1) {
+                let tmp0: CeltSig = saturate(a + m0 + VERY_SMALL, SIG_SAT);
+                let tmp1: CeltSig = saturate(b + m1 + VERY_SMALL, SIG_SAT);
+                m0 = mult16_32_q15(coef0, tmp0);
+                m1 = mult16_32_q15(coef0, tmp1);
+                y[0] = add_res(y[0], sig2res(tmp0));
+                y[1] = add_res(y[1], sig2res(tmp1));
+            }
+        } else {
+            for ((y, &a), &b) in pcm.as_chunks_mut::<2>().0.iter_mut().zip(x0).zip(x1) {
+                let tmp0: CeltSig = saturate(a + VERY_SMALL + m0, SIG_SAT);
+                let tmp1: CeltSig = saturate(b + VERY_SMALL + m1, SIG_SAT);
+                m0 = mult16_32_q15(coef0, tmp0);
+                m1 = mult16_32_q15(coef0, tmp1);
+                y[0] = sig2res(tmp0);
+                y[1] = sig2res(tmp1);
+            }
+        }
+        *mem = [m0, m1];
+        return;
+    }
     for ch in 0..c {
         let mut m: CeltSig = mem[ch];
         let x = &input[ch][..n];
         let y = &mut pcm[ch..];
-        // C: `#if defined(CUSTOM_MODES) || ... || defined(ENABLE_QEXT)` around this branch.
-        let custom = cfg!(any(feature = "custom-modes", feature = "qext")) && coef[1] != 0.0;
         if custom {
             let coef1 = coef[1];
             let coef3 = coef[3];

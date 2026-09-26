@@ -757,31 +757,40 @@ pub fn silk_lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i16], len: 
     // (FIXED_POINT && USE_CELT_FIR) branch not ported: USE_CELT_FIR is 0.
 
     let (out, input, b) = (&mut out[..len], &input[..len], &b[..d]);
-    for ix in d..len {
-        let p = ix - 1; // in_ptr = &in[ ix - 1 ]
-        let mut out32_q12 = silk_smulbb(input[p] as i32, b[0] as i32);
-        // Allowing wrap around so that two wraps can cancel each other. The rare
-        // cases where the result wraps around can only be triggered by invalid streams
-        out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - 1] as i32, b[1] as i32);
-        out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - 2] as i32, b[2] as i32);
-        out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - 3] as i32, b[3] as i32);
-        out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - 4] as i32, b[4] as i32);
-        out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - 5] as i32, b[5] as i32);
-        let mut j = 6;
-        while j < d {
-            out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - j] as i32, b[j] as i32);
-            out32_q12 = silk_smlabb_ovflw(out32_q12, input[p - j - 1] as i32, b[j + 1] as i32);
-            j += 2;
+
+    // Perf: the C loop computes, for each output `ix`, the prediction
+    // `sum_j in[ ix - 1 - j ] * B[ j ]` with a chain of `silk_SMLABB_ovflw` (wrapping) steps.
+    // Wrapping i32 addition is associative, so the terms are summed here tap by tap over a
+    // block of outputs instead (tap-outer, sample-inner), which vectorizes; the result is
+    // bit-identical. `acc[k]` holds the prediction of output `start + k`.
+    const BLOCK: usize = 64;
+    let mut start = d;
+    while start < len {
+        let n = (len - start).min(BLOCK);
+        let mut acc = [0i32; BLOCK];
+        let acc = &mut acc[..n];
+        for (j, &bj) in b.iter().enumerate() {
+            // in_ptr[ -j ] for the outputs start..start + n
+            let x = &input[start - 1 - j..start - 1 - j + n];
+            for (a, &xv) in acc.iter_mut().zip(x) {
+                *a = a.wrapping_add(silk_smulbb(xv as i32, bj as i32));
+            }
         }
+        for ((o, &pred), &xv) in out[start..start + n]
+            .iter_mut()
+            .zip(acc.iter())
+            .zip(&input[start..start + n])
+        {
+            // Subtract prediction
+            let out32_q12 = silk_sub32_ovflw(silk_lshift(xv as i32, 12), pred);
 
-        // Subtract prediction
-        out32_q12 = silk_sub32_ovflw(silk_lshift(input[p + 1] as i32, 12), out32_q12);
+            // Scale to Q0
+            let out32 = silk_rshift_round(out32_q12, 12);
 
-        // Scale to Q0
-        let out32 = silk_rshift_round(out32_q12, 12);
-
-        // Saturate output
-        out[ix] = silk_sat16(out32) as i16;
+            // Saturate output
+            *o = silk_sat16(out32) as i16;
+        }
+        start += n;
     }
 
     // Set first d output samples to zero

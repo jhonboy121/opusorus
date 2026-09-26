@@ -337,6 +337,25 @@ pub fn celt_pitch_xcorr(
     debug_assert!(max_pitch > 0);
     let xcorr = &mut xcorr[..max_pitch];
     let mut i = 0usize;
+    // Perf: C computes four lags at a time (xcorr_kernel), four dependency chains. Each
+    // correlation is `sum_j x[j]*y[i+j]`, accumulated from 0 in increasing `j` (C's register
+    // rotation in the kernel only reuses loaded `y` values). Sixteen lags at a time, with
+    // exactly that per-lag sequence of operations, give the compiler independent vector
+    // accumulators; the remaining lags use the C loops.
+    const LAGS: usize = 16;
+    let xs = &x[..len];
+    while i + LAGS <= max_pitch {
+        let mut sum: [OpusVal32; LAGS] = [0.0; LAGS];
+        let yb = &y[i..i + len + LAGS - 1];
+        for (j, &xj) in xs.iter().enumerate() {
+            let yj = &yb[j..j + LAGS];
+            for (s, &yk) in sum.iter_mut().zip(yj) {
+                *s = mac16_16(*s, xj, yk);
+            }
+        }
+        xcorr[i..i + LAGS].copy_from_slice(&sum);
+        i += LAGS;
+    }
     // C: for (i=0;i<max_pitch-3;i+=4)
     while i + 3 < max_pitch {
         let mut sum: [OpusVal32; 4] = [0.0; 4];

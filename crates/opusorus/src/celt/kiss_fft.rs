@@ -53,18 +53,19 @@ impl CpxBuf for [KissFftCpx] {
 /// Interleaved complex view of an `f32` slice (`[r0, i0, r1, i1, ...]`).
 pub(crate) struct Interleaved<'a>(pub(crate) &'a mut [f32]);
 
+// Perf: element `i` is accessed as pair `i` of the `[f32; 2]` view (one bounds check per
+// access instead of two).
 impl CpxBuf for Interleaved<'_> {
     #[inline(always)]
     fn ld(&self, i: usize) -> KissFftCpx {
-        KissFftCpx {
-            r: self.0[2 * i],
-            i: self.0[2 * i + 1],
-        }
+        let [r, im] = self.0.as_chunks::<2>().0[i];
+        KissFftCpx { r, i: im }
     }
     #[inline(always)]
     fn st(&mut self, i: usize, v: KissFftCpx) {
-        self.0[2 * i] = v.r;
-        self.0[2 * i + 1] = v.i;
+        let p = &mut self.0.as_chunks_mut::<2>().0[i];
+        p[0] = v.r;
+        p[1] = v.i;
     }
 }
 

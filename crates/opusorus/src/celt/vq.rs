@@ -35,10 +35,19 @@ use crate::math;
 /// of this size live on the stack; larger (custom mode) bands fall back to the heap.
 pub(crate) const MAX_BAND_SIZE: usize = 176;
 
+/// Length up to which [`Scratch`] uses its small inline array.
+const SCRATCH_SMALL: usize = 32;
+
 /// Scratch storage replacing a C VLA: on the stack up to `N` elements, heap beyond (only
 /// reachable with custom modes), so no input size can make the port panic where C would not.
+///
+/// Perf: a safe stack array must be initialized, and zeroing the worst-case `N` elements on
+/// every call costs a `memset` that C (uninitialized VLA) does not have. Most requests are
+/// short (small bands), so they are served from a small array; the `N`-element array is only
+/// initialized when a request needs it.
 pub(crate) struct Scratch<T, const N: usize> {
-    stack: [T; N],
+    small: [T; SCRATCH_SMALL],
+    stack: Option<[T; N]>,
     heap: Vec<T>,
 }
 
@@ -46,8 +55,10 @@ impl<T: Copy + Default, const N: usize> Scratch<T, N> {
     /// Creates empty scratch storage (no allocation).
     #[inline(always)]
     pub(crate) fn new() -> Self {
+        const { assert!(N >= SCRATCH_SMALL) };
         Self {
-            stack: [T::default(); N],
+            small: [T::default(); SCRATCH_SMALL],
+            stack: None,
             heap: Vec::new(),
         }
     }
@@ -56,8 +67,10 @@ impl<T: Copy + Default, const N: usize> Scratch<T, N> {
     /// uninitialised); callers write before reading, exactly like the C code.
     #[inline(always)]
     pub(crate) fn get(&mut self, len: usize) -> &mut [T] {
-        if len <= N {
-            &mut self.stack[..len]
+        if len <= SCRATCH_SMALL {
+            &mut self.small[..len]
+        } else if len <= N {
+            &mut self.stack.insert([T::default(); N])[..len]
         } else {
             self.heap.resize(len, T::default());
             &mut self.heap[..len]

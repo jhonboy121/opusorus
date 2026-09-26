@@ -22,8 +22,8 @@ use crate::silk::define::{
 use crate::silk::macros::{
     silk_add_lshift32, silk_add_sat32, silk_add32, silk_add32_ovflw, silk_div32_varq,
     silk_inverse32_varq, silk_limit_32, silk_lshift, silk_lshift32, silk_max, silk_rand,
-    silk_rshift, silk_rshift_round, silk_sat16, silk_smlabb, silk_smlawb, silk_smlawt, silk_smulbb,
-    silk_smulwb, silk_smulww, silk_sub32, silk_sub32_ovflw,
+    silk_rshift, silk_rshift_round, silk_sat16, silk_smlabb, silk_smlawb, silk_smlawb_chain,
+    silk_smlawt, silk_smulbb, silk_smulwb, silk_smulww, silk_sub32, silk_sub32_ovflw,
 };
 use crate::silk::sigproc::silk_lpc_analysis_filter;
 use crate::silk::structs::{SideInfoIndices, SilkEncoderState, SilkNsqState};
@@ -83,7 +83,7 @@ impl NsqEncParams {
 ///
 /// `buf32` ends at the C pointer `buf32` (i.e. C `buf32[ -j ]` is `buf32[ buf32.len() - 1 - j ]`);
 /// it must hold at least `order` elements.
-#[inline]
+#[inline(always)]
 #[must_use]
 pub fn silk_noise_shape_quantizer_short_prediction_c(
     buf32: &[i32],
@@ -92,30 +92,16 @@ pub fn silk_noise_shape_quantizer_short_prediction_c(
 ) -> i32 {
     debug_assert!(order == 10 || order == 16);
     let n = buf32.len();
-    let b = |j: usize| buf32[n - 1 - j];
 
-    // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf
-    let mut out = silk_rshift(order, 1);
-    out = silk_smlawb(out, b(0), coef16[0] as i32);
-    out = silk_smlawb(out, b(1), coef16[1] as i32);
-    out = silk_smlawb(out, b(2), coef16[2] as i32);
-    out = silk_smlawb(out, b(3), coef16[3] as i32);
-    out = silk_smlawb(out, b(4), coef16[4] as i32);
-    out = silk_smlawb(out, b(5), coef16[5] as i32);
-    out = silk_smlawb(out, b(6), coef16[6] as i32);
-    out = silk_smlawb(out, b(7), coef16[7] as i32);
-    out = silk_smlawb(out, b(8), coef16[8] as i32);
-    out = silk_smlawb(out, b(9), coef16[9] as i32);
-
+    // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf.
+    // Perf: `silk_smlawb_chain` is the C chain `out = silk_SMLAWB( out, buf32[ -j ],
+    // coef16[ j ] )` for j = 0..order (bit-identical, see there); the window is
+    // `buf32[ -order + 1 ..= 0 ]`.
     if order == 16 {
-        out = silk_smlawb(out, b(10), coef16[10] as i32);
-        out = silk_smlawb(out, b(11), coef16[11] as i32);
-        out = silk_smlawb(out, b(12), coef16[12] as i32);
-        out = silk_smlawb(out, b(13), coef16[13] as i32);
-        out = silk_smlawb(out, b(14), coef16[14] as i32);
-        out = silk_smlawb(out, b(15), coef16[15] as i32);
+        silk_smlawb_chain(8, &buf32[n - 16..], coef16)
+    } else {
+        silk_smlawb_chain(5, &buf32[n - 10..], coef16)
     }
-    out
 }
 
 /// Port of silk/NSQ.h:silk_NSQ_noise_shape_feedback_loop_c.

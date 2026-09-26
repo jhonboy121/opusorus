@@ -46,8 +46,9 @@ use core::marker::PhantomData;
 
 use crate::celt::arch::{
     CeltEner, CeltGlog, CeltNorm, CeltSig, EPSILON, NORM_SCALING, OpusVal16, OpusVal32, Q31ONE,
-    add32, div32_16, extend32, half32, imax, imin, max32, maxg, min16, min32, ming, mult16_16,
-    mult16_16_q15, mult16_32_q15, mult32_32_q31, qconst16, qconst32, shl32, shr32, sub32, vshr32,
+    add32, div32_16, extend32, half32, imax, imin, mac16_16, max32, maxg, min16, min32, ming,
+    mult16_16, mult16_16_q15, mult16_32_q15, mult32_32_q31, qconst16, qconst32, shl32, shr32,
+    sub32, vshr32,
 };
 use crate::celt::entcode::{BITRES, EcCoder, celt_sudiv, celt_udiv, ec_ilog};
 use crate::celt::entenc::EcEncSnapshot;
@@ -151,6 +152,27 @@ pub fn compute_band_energies(
 ) {
     let e_bands = &m.e_bands;
     let n = m.short_mdct_size << lm;
+    if c == 2 {
+        // Perf: stereo computes the two channels' sums of each band in one loop (two
+        // independent dependency chains); each sum has the operations of
+        // `celt_inner_prod`, in the same order.
+        let nb = m.nb_ebands as usize;
+        for i in 0..end as usize {
+            let off = (i32::from(e_bands[i]) << lm) as usize;
+            let len = ((i32::from(e_bands[i + 1]) - i32::from(e_bands[i])) << lm) as usize;
+            let x0 = &x[off..off + len];
+            let x1 = &x[n as usize + off..n as usize + off + len];
+            let mut xy0: OpusVal32 = 0.0;
+            let mut xy1: OpusVal32 = 0.0;
+            for (&a, &b) in x0.iter().zip(x1) {
+                xy0 = mac16_16(xy0, a, a);
+                xy1 = mac16_16(xy1, b, b);
+            }
+            band_e[i] = celt_sqrt(1e-27f32 + xy0);
+            band_e[i + nb] = celt_sqrt(1e-27f32 + xy1);
+        }
+        return;
+    }
     for ch in 0..c {
         for i in 0..end {
             let iu = i as usize;
