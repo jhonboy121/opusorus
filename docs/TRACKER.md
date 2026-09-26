@@ -32,17 +32,18 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | C | `celt_decoder` | `celt/celt_decoder.rs` | celt/celt_decoder.c | ✅ | celt_decoder.rs: all LM/ch/rates/budgets, hybrid shared ec, downsample, PLC noise+pitch, corrupt input, custom modes, qext 96k — bit-exact (PCM, rng, full state); release perf 0.92x C time |
 | C | `celt_encoder` | `celt/celt_encoder.rs` | celt/celt_encoder.c | ✅ | celt_encoder.rs: all LM/ch/bitrates/VBR modes/complexity/lsb depth/lfe/masks/hybrid, qext — bytes + rng bit-exact |
 | C | `silk_encoder_flp` | `silk/float.rs`<br>`silk/encoder.rs` | silk/float/*.c, silk/float/*.h (may add submodules under silk/float/)<br>silk/{enc_API,init_encoder,control_codec}.c | ✅ | silk_encoder_flp.rs: silk_Encode all rates/internal bw/packet sizes/complexity/CBR-VBR/FEC/DTX/stereo — bytes + rng bit-exact |
-| D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ⬜ | |
-| D | `opus_encoder` | `encoder.rs`<br>`ms_encoder.rs`<br>`projection_encoder.rs` | src/opus_encoder.c<br>src/opus_multistream_encoder.c<br>src/opus_projection_encoder.c | ⬜ | |
+| D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ✅ | opus_decoder.rs: 180 C-encoded streams all apps/rates/frame sizes/transitions, FEC/PLC/DTX, garbage, extensions, multistream 0/1/255, projection 2/3, RFC 8251 vectors all rates bit-exact + opus_compare pass, Opus HD vectors (qext) — bit-exact; release ≈0.86–0.94× C time |
+| D | `opus_encoder` | `encoder.rs`<br>`ms_encoder.rs`<br>`projection_encoder.rs` | src/opus_encoder.c<br>src/opus_multistream_encoder.c<br>src/opus_projection_encoder.c | ✅ | opus_encoder.rs: long streams over all apps/rates/bitrates/VBR modes/complexity/frame durations/FEC/DTX/ctl switches, multistream+surround, projection, qext — bytes+rng bit-exact |
 
 ## DNN units
 
 | Unit | Rust files | Status | Tests |
 |---|---|---|---|
 | `dnn_core` | `dnn/*` (nnet, weights blob parse, vec math, burg, freq, pitchdnn, lpcnet_enc, nndsp, kiss99) | ✅ | dnn_core.rs (features deep-plc/osce/dred): layers + real model weights via blob — bit-exact |
-| `dnn_plc` (FARGAN, lpcnet_plc) | | ⬜ | |
-| `dnn_dred` | | ⬜ | |
-| `dnn_osce` (LACE/NoLACE/BWE) | | ⬜ | |
+| `dnn_plc` | `dnn/fargan.rs`, `dnn/lpcnet_plc.rs` | ✅ | dnn_plc.rs: FARGAN + neural PLC sequences vs C — bit-exact |
+| `dnn_dred` | `dnn/dred_*.rs` | ✅ | dnn_dred.rs: RDOVAE enc/dec, latents, payload bytes, dred_ec_decode — bit-exact |
+| `dnn_osce` | `dnn/osce.rs`, `dnn/osce_features.rs` | ✅ | dnn_osce.rs: LACE/NoLACE/BBWENet + features — bit-exact |
+| `dnn_integration` (wire deep PLC/DRED/OSCE into Opus/SILK/CELT + opus_dred_* API + DNN blob CTLs) | | ⬜ | opus_decoder/encoder tests currently fail with DNN features on (expected until integration) |
 
 ## Infrastructure
 

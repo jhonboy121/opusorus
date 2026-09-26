@@ -913,3 +913,454 @@ Files:
 
 - `AnalysisInfo`/`LEAK_BANDS` canonical in `celt::celt`; `analysis` re-exports them.
 - `acos` moved to `crate::math`.
+
+## `dnn_plc`
+
+### api for other units
+
+Module opusorus::dnn::fargan (cfg deep-plc):
+- Constants: FARGAN_CONT_SAMPLES=320, FARGAN_NB_SUBFRAMES=4, FARGAN_SUBFRAME_SIZE=40, FARGAN_FRAME_SIZE=160, FARGAN_COND_SIZE=80, FARGAN_DEEMPHASIS, SIG_NET_INPUT_SIZE, SIG_NET_FWC0_STATE_SIZE, FARGAN_MAX_RNN_NEURONS, plus all the fargan_data.h sizes.
+- `pub struct Fargan` has the 20 LinearLayer fields. `init_fargan(&[WeightArray]) -> Result<Fargan>`.
+- `pub struct FarganState { model, cont_initialized: bool, deemph_mem, pitch_buf[256], cond_conv1_state[128], fwc0_mem[328], gru1_state[160], gru2_state[128], gru3_state[128], last_period: i32 }`.
+  - `FarganState::new() -> Box<Self>` and `new_inline()`, both with no model.
+  - `.fargan_init()` clears the state and keeps the model.
+  - `.load_model(&[u8]) -> Result<()>`.
+- Functions:
+  - `fargan_cont(st, pcm0: &[f32] (320, ±1 scale), features0: &[f32] (5*20))`
+  - `fargan_synthesize(st, pcm: &mut [f32] (160), features: &[f32] (>=20))`
+  - `fargan_synthesize_int(st, pcm: &mut [i16], features)`
+  - The static helpers are pub for testing: `compute_fargan_cond`, `fargan_deemphasis`, `run_fargan_subframe`.
+- DRED uses FARGAN directly: call fargan_cont / fargan_synthesize on `LpcnetPlcState.fargan`.
+
+Module opusorus::dnn::lpcnet_plc (cfg deep-plc):
+- Constants: PLC_BUF_SIZE=2400, PLC_INPUT_SIZE=57, and the PLC_* layer sizes.
+- `PlcModel` and `init_plcmodel(&[WeightArray]) -> Result<PlcModel>`. `PlcNetState` is Copy.
+- `pub struct LpcnetPlcState { model, fargan: FarganState, enc: LpcnetEncState, loaded: bool, fec: [[f32;20];104], analysis_gap, fec_read_pos, fec_fill_pos, fec_skip, analysis_pos, predict_pos: i32, pcm: [f32;2400], blend: i32, features: [f32;36], cont_features: [f32;100], loss_count: i32, plc_net, plc_bak: [PlcNetState;2] }`. All fields are pub; `arch` is dropped.
+- Methods:
+  - `LpcnetPlcState::new() -> Box<Self>` (after lpcnet_plc_init, `loaded` = false)
+  - `.lpcnet_plc_init()`
+  - `.lpcnet_plc_reset()`
+  - `.load_model(blob) -> Result<()>` (one blob must hold the pitchdnn, plcmodel and fargan arrays; this is upstream lpcnet_plc_load_model)
+- Free functions:
+  - `lpcnet_plc_init` / `lpcnet_plc_reset` / `lpcnet_plc_load_model`
+  - `lpcnet_plc_fec_add(st, Option<&[f32]>)` (None = C NULL)
+  - `const fn lpcnet_plc_fec_clear(st)`
+  - `lpcnet_plc_update(st, pcm: &[i16] (160 @16 kHz))`
+  - `lpcnet_plc_conceal(st, pcm: &mut [i16] (160))`
+  - The C versions always return 0; those returns are dropped.
+  - pub static helpers: `compute_plc_pred`, `get_fec_or_pred -> bool`, `queue_features`.
+
+Where the integration unit must call these (mirroring C):
+- opus_decoder_init: LpcnetPlcState::new / lpcnet_plc_init (src/opus_decoder.c:180).
+- OPUS_RESET_STATE: lpcnet_plc_reset (:1120).
+- OPUS_SET_DNN_BLOB: load_model (:1226).
+- DRED: fec_clear, then fec_add per feature vector with None for negative offsets (:741-754).
+- Every good 16 kHz 10 ms frame: lpcnet_plc_update (celt_decoder.c:668, silk/PLC.c:109 and :412).
+- Every lost frame: lpcnet_plc_conceal (celt_decoder.c:1039, silk/PLC.c:404), only when `loaded` is set.
+
+Oracle (opusorus_oracle::dnn_plc, needs any DNN feature):
+- RAII handles `Fargan` (new/init/load_model/cont/synthesize/synthesize_int/state/set_state/compute_cond/run_subframe) and `Plc` (new/reset/load_model/update/conceal/fec_add/fec_clear/compute_plc_pred/get_fec_or_pred/queue_features/state).
+- Free function `fargan_deemphasis`, plus `c_sizes`.
+- State-dump layout constants: FARGAN_STATE_LEN, PLC_STATE_LEN, PLC_STATE_INTS, ENC_STATE_LEN.
+- The C shim symbols are oracle_pc_*.
+
+### external needs
+
+- Allowed edit: added `pub mod dnn_plc;` to crates/opusorus-oracle/src/lib.rs. No other shared files were touched.
+- No bugs found in already-ported units.
+- Docs to update: docs/TRACKER.md (dnn_plc row can be marked done, test summary as above) and docs/INTERNAL_API.md (api section above). I did not edit docs.
+- Test setup: the worktree needs the model data. I copied testdata/opus_data-*.tar.gz from the main checkout and ran scripts/fetch_dnn_models.sh. Both are gitignored and not committed.
+- Integration unit: the deep-PLC hooks in the CELT, SILK and Opus decoders still have to be wired to the entry points listed in api_for_other_units. The oracle's csrc/silk_decoder.c still passes NULL for lpcnet.
+
+### notes
+
+Design decisions and quirks (all documented in the source):
+
+1. **Weights always come from a blob (PLAN D-015).**
+   - fargan_init and lpcnet_plc_init clear the state but keep any loaded model. `loaded` is also kept, so a model loaded once plays the role of the compiled-in tables.
+   - The flag starts false; C with compiled-in weights sets it to 1 in init.
+   - lpcnet_plc_load_model keeps C's order (plc model, then pitch DNN, then FARGAN). A model that binds is replaced even if a later one fails, and `loaded` is set only when all three succeed. The one difference: a failing model is kept rather than partially overwritten, and an unparsable blob is rejected instead of crashing.
+
+2. **float→int casts (`(int)floor(...)` for the period and the int16 output).** These are undefined in C for NaN or out-of-range values. The oracle host is aarch64, where fcvtzs saturates and NaN gives 0. That is exactly Rust's `as`, and the tests confirm it for periods that saturate to INT_MAX. As a result the period is always in 0..=i32::MAX, so the period arithmetic cannot overflow. On x86-64, C would give INT_MIN instead; that only happens with absurd pitch features the models never produce.
+
+3. **Period 0 (pitch feature above about 7.5, or NaN).** C then reads pitch_buf[256..297], which is past the array and into the next struct field, cond_conv1_state. `pitch_buf_at` reproduces that read instead of panicking, and it is tested bit-exact.
+
+4. **Other deviations only where C is undefined or would crash.**
+   - lpcnet_plc_fec_add past PLC_MAX_FEC drops the vector (debug_assert). C writes out of bounds there.
+   - Conceal or synthesize without a model gives zeros instead of dereferencing NULL; debug_assert(loaded) is kept.
+   - skip_cat[10000] becomes an exact 688-float array.
+
+5. **Performance.** No heap allocation per frame; all scratch is fixed-size stack arrays of the C sizes. In-place C calls (compute_glu on gru1_in and skip_out, st->features as output) use compute_glu_inplace or small copies.
+
+6. **Oracle shim (csrc/dnn_plc.c).**
+   - Compiled only under ENABLE_DEEP_PLC.
+   - It #includes private copies of fargan.c and lpcnet_plc.c with the exported symbols renamed (pc_copy_*) to reach the static helpers. The public functions come from the library.
+   - It provides state dump and set for FARGANState, and a full LPCNetPLCState dump.
+
+## `dnn_osce`
+
+### api for other units
+
+Module opusorus::dnn::osce (feature osce). The generated lace/nolace/bbwenet data constants and layer structs are re-exported from private submodules osce/{lace,nolace,bbwenet}_data.rs.
+
+Constants:
+- OSCE_MODE_SILK_ONLY / HYBRID / CELT_ONLY / SILK_BBWE = 1000..1003
+- OSCE_METHOD_NONE / LACE / NOLACE = 0 / 1 / 2; OSCE_DEFAULT_METHOD = NOLACE
+- all osce_config.h constants
+
+Types (all fields pub):
+- OsceModel { loaded: bool, lace: Lace, nolace: NoLace, bbwenet: Bbwenet } (Default)
+- SilkOsceStruct { features: OsceFeatureState, state: OsceState { lace, nolace }, method: i32 } is C silk_OSCE_struct
+- SilkOsceBweStruct { features: OsceBweFeatureState, state: OsceBweState { bbwenet: BbwenetState } }
+- Default on both structs is the zeroed state from the C memset in silk_init_decoder.
+
+Functions:
+- `osce_load_models(&mut OsceModel, Option<&[u8]>) -> Result<()>`. None or empty fails, as with USE_WEIGHTS_FILE. The caller sets `model.loaded = result.is_ok()`, as silk_LoadOSCEModels does.
+- `osce_reset(&mut SilkOsceStruct, method: i32)`
+- `osce_enhance_frame(&OsceModel, &mut SilkOsceStruct, OsceDecInfo, &SilkDecoderControl, xq: &mut [i16], num_bits: i32)`
+- `osce_bwe_reset(&mut SilkOsceBweStruct)`
+- `osce_bwe(&OsceModel, &mut SilkOsceBweStruct, xq48: &mut [i16], xq16: &[i16], xq16_len: usize)`
+
+Module opusorus::dnn::osce_features:
+- `OsceDecInfo { fs_khz, nb_subfr, lpc_order, signal_type }`, built with `OsceDecInfo::from_decoder(&SilkDecoderState)`. These are the decoder-state fields C reads from psDec. Passing them separately lets the OSCE structs live inside SilkDecoderState without borrow conflicts: `let i = OsceDecInfo::from_decoder(ps_dec); osce_enhance_frame(m, &mut ps_dec.osce, i, ctrl, xq, n)`.
+- `osce_calculate_features(&mut OsceFeatureState, OsceDecInfo, &SilkDecoderControl, features, &mut [f32;2], &mut [i32;4], xq, num_bits)`
+- `osce_bwe_calculate_features`, `osce_cross_fade_10ms(x_enh, x_in, len)`, `osce_bwe_cross_fade_10ms(x_fadein: &mut [i16], x_fadeout: &[i16], len)`
+- The static helpers are pub for tests: apply_filterbank(.., Filterbank::{Clean,Noisy,Bwe}), mag_spec_320_onesided, calculate_log_spectrum_from_lpc, calculate_cepstrum, calculate_acorr(buf, pos, lag), pitch_postprocessing.
+
+Integration hook points (the C lines the later unit must wire):
+- init_decoder.c:63: silk_init_decoder resets both structs to Default, then calls osce_reset(DEFAULT). silk_reset_decoder calls only osce_reset(DEFAULT).
+- dec_API.c:64-72 LoadOSCEModels (sets loaded); dec_API.c:116-121 (loaded = 0, then load(None), which fails, so the model stays unloaded until a blob is set).
+- dec_API.c:350-353: osce_reset when the method changes.
+- decode_frame.c:109-114: osce_enhance_frame with ec_tell - ec_start.
+- decode_frame.c:139-141: osce_reset on loss.
+- dec_API.c:385-437: BWE branch and prev_osce_extended_mode.
+- opus_decoder.c:444-466: method and extended mode from complexity.
+- opus_decoder.c:595: the BWE condition; plus the OSCE_BWE CTLs.
+
+The oracle wrapper opusorus_oracle::dnn_osce offers CapDecoder (a capturing C SILK decoder with an event log and state dumps), Model, DecState, BweState and the helper wrappers. Integration units can reuse it for end-to-end tests.
+
+### external needs
+
+Files edited outside the owned list: crates/opusorus/src/dnn/osce/{lace_data,nolace_data,bbwenet_data}.rs. These are new private submodules of my own osce.rs, which PORTING allows. I also added the permitted line `pub mod dnn_osce;` to crates/opusorus-oracle/src/lib.rs. No other files were changed and no bugs were found in already-ported units.
+
+For the orchestrator or docs:
+1. docs need updates: TRACKER.md (dnn_osce row set to done, tests dnn_osce.rs bit-exact), INTERNAL_API.md (the API above), FEATURES.md.
+2. The dnn_core note says OSCE adacomb lags are >= 32, but that is not true: unvoiced frames use OSCE_NO_PITCH_VALUE = 7. The ported nndsp adacomb is bit-exact with lag 7 and with last_pitch_lag 0; this is now covered by real streams. C stays in bounds for lags >= 7.
+3. Upstream write_lpcnet_weights does not write BBWENet, and osce_load_models also inits BBWENet under ENABLE_OSCE_BWE. So a blob written by upstream write_lpcnet_weights fails to load in both C and Rust. A shipped blob must include lace + nolace + bbwenet; the test builds one from dnn_core::write_blob(MODEL_LACE/NOLACE/BBWENET).
+4. Same point as dnn_core: the opusorus feature `osce` should probably imply `deep-plc`, because the oracle defines ENABLE_DEEP_PLC for osce.
+5. The worktree has the extracted model data (vendor/libopus/dnn/*_data.*) and testdata/opus_data-*.tar.gz, copied from the main checkout. Both are gitignored and not committed.
+
+### notes
+
+Port files:
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-5/crates/opusorus/src/dnn/osce.rs
+- .../crates/opusorus/src/dnn/osce_features.rs
+- .../crates/opusorus/src/dnn/osce/{lace,nolace,bbwenet}_data.rs: constants, layer structs and init_*layers. These were generated by a script from the upstream generated headers and init functions.
+
+Oracle and tests:
+- .../crates/opusorus-oracle/csrc/dnn_osce.c
+- .../crates/opusorus-oracle/src/dnn_osce.rs
+- .../crates/opusorus-conformance/tests/dnn_osce.rs
+
+Faithfulness notes (all documented in the source):
+- CLIP(a, min, max) returns `a`, not `min`, when a < min. This quirk is kept.
+- Double literals stored in float arrays (hq_2x_*, frac_*_24, band_weights_bwe, 1e-9 in last_spec) are converted through f64.
+- Double promotions are replicated: fabs + 1e-6f, 0.3f*log, 320*sqrt, + 1e-9 in the BWE features, and + 0.5 in the BWE cross-fade.
+- The C memset(pfeatures, 0, 93) clears only 93 bytes and has no effect; it is noted, not ported.
+- OSCE_HANGOVER_BUGFIX is off, and its dead branches are kept.
+
+Deviations (only where C has undefined behaviour or would crash):
+- The OSCEState union is a struct holding both members; the union is never read through the wrong member.
+- An unparsable blob returns Err (C passes a NULL list on).
+- An invalid method passes the input through (C asserts and leaves the output buffer uninitialized).
+- An invalid method in osce_reset is a debug_assert.
+
+Performance: no per-frame heap allocation. BBWENet's 2 x 34 KB C stack buffers are replaced by a scratch Vec of 4800 floats (only the used part) owned by BbwenetState; equality on that struct ignores the scratch. NoLACE uses about 10 KB of stack buffers, as in C. The NoLACE "160 variant" does not exist in 1.6.1.
+
+Oracle shim design: it #includes renamed copies of osce.c and osce_features.c to reach the static functions, plus renamed copies of silk/decode_frame.c and dec_API.c whose OSCE calls go through logging wrappers. osce_bwe is renamed with a function-like macro because it is also a field name; the silk_* functions use object-like macros because their parameter lists contain #ifdef. The log is thread-local, so parallel tests are safe.
+
+## `dnn_dred`
+
+### api for other units
+
+Module opusorus::dnn (feature dred).
+
+dred_coding:
+- DRED_* config constants: DRED_EXTENSION_ID=126, DRED_EXPERIMENTAL_VERSION=12, DRED_EXPERIMENTAL_BYTES=2, DRED_MIN_BYTES, DRED_SILK_ENCODER_DELAY, DRED_FRAME_SIZE, DRED_DFRAME_SIZE, DRED_MAX_DATA_SIZE, DRED_ENC_Q0/Q1, DRED_MAX_LATENTS=26, DRED_NUM_REDUNDANCY_FRAMES=52, DRED_MAX_FRAMES=104.
+- `const fn compute_quantizer(q0, dq, qmax, i) -> i32`.
+
+dred_rdovae:
+- Constants DRED_NUM_FEATURES/LATENT_DIM/STATE_DIM/... and layer sizes.
+- Stats tables DRED_{LATENT,STATE}_{QUANT_SCALES,DEAD_ZONE,R,P0}_Q8.
+- Structs RdovaeEnc / RdovaeDec (models), RdovaeEncState / RdovaeDecState (new() = memset 0).
+- `init_rdovaeenc(&[WeightArray]) -> Result<RdovaeEnc>`, `init_rdovaedec(...)`.
+- `dred_rdovae_enc_load_model(&[u8])` and `dred_rdovae_dec_load_model(&[u8]) -> Result<Model>`: parse the blob, then init.
+- `dred_rdovae_encode_dframe(st, model, latents, initial_state, input)`.
+- `dred_rdovae_dec_init_states(h, model, initial_state)`, `dred_rdovae_decode_qframe(h, model, qframe, input)`.
+- `dred_rdovae_decode_all(model, features, state, latents, nb_latents: usize)`.
+
+dred_decoder:
+- `OpusDred { fec_features: [f32; 2080], state: [f32; 50], latents: [f32; 676], nb_latents, process_stage, dred_offset: i32 }` with new()/Default.
+- `dred_decode_latents(&mut EcDec, x, scale, r, p0, dim)`.
+- `dred_ec_decode(&mut OpusDred, bytes: &[u8], min_feature_frames: i32, dred_frame_offset: i32) -> i32`. C's num_bytes is bytes.len().
+
+opus_dred_process maps to: copy src to dst, then `dred_rdovae_decode_all(&model, &mut dst.fec_features, &dst.state, &dst.latents, dst.nb_latents as usize)`, then set process_stage = 2.
+
+The OpusDREDDecoder struct (model + loaded + magic) belongs to the opus_decoder unit. dred_decoder_load_model maps to `dred_rdovae_dec_load_model`, with BadArg on error.
+
+dred_encoder:
+- `DredEnc` (all C fields public; `loaded: bool`, `fs`, `channels`, buffers, `latents_buffer_fill`, ...).
+- `DredEnc::new(fs, channels) -> Box<Self>` (dred_encoder_init). Not loaded until `load_model(blob)`, which needs the RDOVAE-encoder and pitchdnn arrays in the blob. This is USE_WEIGHTS_FILE semantics.
+- Methods `.dred_encoder_init(fs, ch)`, `.dred_encoder_reset()` (for OPUS_RESET_STATE), `.load_model(&[u8]) -> Result<()>` (for OPUS_SET_DNN_BLOB; BadArg on failure), `.dred_convert_to_16k(...)`.
+- `dred_compute_latents(&mut DredEnc, pcm: &[f32], frame_size, extra_delay)`: pass `&pcm_buf[total_buffer*channels..]` and total_buffer.
+- `dred_encode_silk_frame(&mut DredEnc, buf: &mut [u8] (len >= max_bytes), max_chunks, max_bytes, q0, dq, qmax, activity_mem: &[u8]) -> i32`.
+- Also `dred_process_frame`, `filter_df2t[_inplace]`, `dred_encode_latents`, `dred_voice_active`.
+- Constants DRED_ACTIVITY_MEM_SIZE=416, RESAMPLING_ORDER, MAX_DOWNMIX_BUFFER.
+
+The opus_encoder unit must also do what C does when DRED is off: set `latents_buffer_fill = 0` and clear activity_mem.
+
+Oracle: opusorus_oracle::dnn_dred has the C handles RdovaeEnc, RdovaeDec and DredEnc (compiled-in model; ints()/floats() give the full state), plus ec_decode, encode_latents/decode_latents, filter_df2t, voice_active, stats and constants.
+
+### external needs
+
+For the opus_encoder integration unit: in the C OpusEncoder, dred_voice_active can read up to 8 bytes past the 416-byte activity_mem. This happens in the while loop when latent_offset reaches 51. The bytes it reads are the next struct fields: nonfinal_frame, then the rangeFinal bytes, little-endian. The Rust port treats bytes past the end of the slice as inactive. To match C exactly in that corner case, pass a 424-byte slice: activity_mem followed by nonfinal_frame (i32 LE) and rangeFinal (u32 LE).
+
+Test prerequisite: the DNN model data must be extracted into vendor/libopus/dnn (gitignored). I did this in the worktree from the main checkout's testdata tarball, and nothing was committed.
+
+The docs (TRACKER, INTERNAL_API, PLAN) need a dnn_dred row and the API listed above. PLAN should add a decision that the DRED stats tables are Rust constants, because upstream always compiles them in and they are not in the weight blob.
+
+### notes
+
+No bugs found in already-ported units, and no files outside this unit were edited. The only shared-file change is the `pub mod dnn_dred;` line in crates/opusorus-oracle/src/lib.rs.
+
+C quirks ported as-is, each with a comment in the source:
+1. The RDOVAE states have one `initialized` flag shared by all five convolutions, so only conv1 is ever cleared. dred_rdovae_dec_init_states never clears the conv2..5 memories.
+2. In dred_compute_latents, for frames longer than 20 ms the pcm pointer advances by process_size, not process_size*channels, so stereo input is partly re-read.
+3. dred_ec_decode computes dred_offset in unsigned arithmetic, reproduced with wrapping u32 ops.
+4. `curr_offset16k += 320` is never read afterwards and is dropped with a comment.
+5. The double promotions are kept: `.5*up*(..)` in the stereo downmix, `floor(.5f+xq)`, `q_level*.125-1`, and `floor((x+20.f)/40.f)`.
+
+Deviations, only where C would crash, hang or read out of bounds:
+- dred_voice_active reads past the slice end as inactive (see external_needs).
+- Unparsable blobs return Err (C dereferences NULL).
+- If the RDOVAE binding fails in load_model, the model is left unchanged (C may partially overwrite it).
+- An unsupported rate in dred_convert_to_16k hits debug_assert and returns (C uses `up` uninitialized).
+
+Finding: a Laplace p0 of 0 makes the sign ICDF start at 32768, which zeroes the range and makes the C range coder loop forever. The real tables have p0 >= 1, so this cannot happen in practice; the random-table tests exclude p0 == 0.
+
+Design:
+- The model is never compiled in (PLAN D-015). dred_encoder_init clears `loaded`, like upstream USE_WEIGHTS_FILE.
+- The 15 KB (qext) downmix stack buffer is a scratch field in DredEnc.
+- There are no per-frame heap allocations. dred_encoder_reset allocates through lpcnet_encoder_init, but only on reset.
+- dred_encode_latents lives in dred_encoder.rs and dred_decode_latents in dred_decoder.rs, next to their C counterparts. dred_coding.rs holds compute_quantizer and the dred_config.h constants. The stats tables are a private submodule, dnn/dred_rdovae/stats_data.rs, generated from the C file and checked against the oracle.
+
+The oracle shim, csrc/dnn_dred.c, is compiled only with ENABLE_DRED. It reaches the statics of dred_encoder.c through a private #include copy with the exported symbols renamed (dd_copy_*), and reuses oracle_dc_lpcnet_enc_state from the dnn_core shim.
+
+## `opus_encoder`
+
+### api for other units
+
+crate::encoder:
+- Encoder
+  - Construction: new(fs, channels, Application) -> Result<Encoder>; #[doc(hidden)] new_raw(fs, ch, app_i32); init(&mut self, fs, ch, Application).
+  - Encoding: encode(&[i16], frame_size: usize, out) -> Result<usize>; encode24(&[i32], ..); encode_float(&[f32], ..).
+  - Info: channels().
+  - Typed CTLs:
+    - set_application(Application)->Result / application()
+    - set_bitrate(Bitrate)->Result / bitrate()->i32
+    - set_force_channels(Option<u8>)->Result / force_channels()->Option<u8>
+    - set_max_bandwidth(Bandwidth) / max_bandwidth()
+    - set_bandwidth(Option<Bandwidth>) / bandwidth()
+    - set_dtx(bool) / dtx()
+    - set_complexity(i32)->Result / complexity()
+    - set_inband_fec(i32 0..2)->Result / inband_fec()
+    - set_packet_loss_perc->Result / packet_loss_perc()
+    - set_vbr(bool) / vbr()
+    - set_vbr_constraint(bool) / vbr_constraint()
+    - set_signal(Signal) / signal()
+    - lookahead()->usize, sample_rate(), final_range()->u32
+    - set_lsb_depth->Result / lsb_depth()
+    - set_expert_frame_duration(FrameSize) / expert_frame_duration()
+    - set_prediction_disabled(bool) / prediction_disabled()
+    - set_phase_inversion_disabled(bool) / phase_inversion_disabled()
+    - in_dtx()->bool, reset()
+    - cfg qext: set_qext(bool) / qext()
+    - cfg dred: set_dred_duration->Result / dred_duration(), set_dnn_blob(&[u8])
+  - #[doc(hidden)] pub CTLs: set_voice_ratio / voice_ratio, set_force_mode(i32: 1000/1001/1002/-1000), set_lfe(i32), set_energy_mask(Option<&[f32]>) (copies up to 42 values).
+  - Numeric escape hatches: ctl_set(request, value)->Result<()> (all SET requests + OPUS_RESET_STATE); ctl_get(&self, request)->Result<i32> (all GET requests; FINAL_RANGE as u32 bits). Unknown requests and pointer requests (ENERGY_MASK, CELT_GET_MODE, DNN_BLOB) return Err(Unimplemented).
+  - pub(crate) celt_mode()->Option<&CeltMode>.
+  - #[doc(hidden)] pub fn opus_encode_native<T>(&mut self, pcm: &[f32], frame_size, data: &mut [u8], out_data_bytes: i32, lsb_depth, analysis_pcm: Option<&[T]>, analysis_size, c1, c2, analysis_channels, downmix: DownmixFunc<T>, float_api) -> i32 (C semantics).
+  - #[cfg(internals)] debug_state_dump().
+- encoder::request: every CTL request constant (OPUS_*_REQUEST, OPUS_RESET_STATE, OPUS_SET_FORCE_MODE_REQUEST=11002, LFE, ENERGY_MASK, CELT_GET_MODE, MULTISTREAM/PROJECTION requests).
+- Free functions: encoder_get_size(ch)->usize, frame_size_select(app, n, vd, fs)->i32, and #[doc(hidden)] helpers gen_toc, hp_cutoff, dc_reject, stereo_fade/gain_fade (in place), compute_stereo_width + StereoWidthState, decide_fec, compute_silk_rate_for_hybrid, compute_equiv_rate, compute_frame_energy, decide_dtx_mode, compute_redundancy_bytes, silk_biquad_res.
+- pub(crate): code_to_result(i32)->Result<usize>, c_ignored(Result<()>), check_init_args(fs, ch, app), packet_pad_with(data, len, new_len, &mut Vec<u8>) (opus_packet_pad using a reusable copy buffer).
+
+crate::ms_encoder:
+- MsEncoder
+  - Construction: new(fs, channels, streams, coupled, mapping: &[u8], Application); new_surround(fs, channels, mapping_family, Application); #[doc(hidden)] new_raw / new_surround_raw.
+  - Accessors: channels(), streams(), coupled_streams(), mapping()->&[u8].
+  - Encoding: encode / encode24 / encode_float -> Result<usize>.
+  - Typed forwarded CTLs following C: setters apply to every stream and stop at the first error; getters query the first stream. bitrate() is the sum over streams and final_range() the XOR.
+  - set_expert_frame_duration / expert_frame_duration()->Result<FrameSize>, encoder_state(stream_id)->Result<&mut Encoder>, reset(), ctl_set / ctl_get with the exact C request lists.
+- Free functions: ms_encoder_get_size(streams, coupled), ms_surround_encoder_get_size(ch, family), and #[doc(hidden)] log_sum, channel_pos, surround_analysis_float.
+- pub(crate) opus_multistream_encode_native<T>(copy_channel_in: CopyChannelIn<T>, pcm, analysis_frame_size, data, lsb_depth, downmix, float_api, user_data: Option<&MappingMatrix>) -> i32.
+
+crate::projection_encoder:
+- ProjectionEncoder
+  - Construction: new_ambisonics(fs, channels, family, Application) (+ #[doc(hidden)] new_ambisonics_raw).
+  - Accessors: streams(), coupled_streams(), channels(), ms()/ms_mut().
+  - Encoding: encode / encode24 / encode_float.
+  - Demixing matrix: demixing_matrix_size()->usize, demixing_matrix_gain()->i32, write_demixing_matrix(&mut [u8])->Result, demixing_matrix()->Vec<u8>.
+  - ctl_set / ctl_get (projection GETs, otherwise forwarded to MS).
+- Free function: projection_ambisonics_encoder_get_size(ch, family).
+
+Oracle opusorus_oracle::opus_encoder:
+- Enc: library encoder with energy mask support.
+- MsEnc: per-stream ctl get/set and final range via GET_ENCODER_STATE.
+- ProjEnc: includes encode24 and demixing_matrix_sized.
+- DupEnc: private C copy with dump().
+- Wrappers for every static helper.
+- Symbols are prefixed oracle_oe_*; the shim compiles renamed copies of opus_encoder.c and opus_multistream_encoder.c.
+
+### external needs
+
+1. No other units' files were edited and no bugs were found in the already-ported units; everything was bit-exact on the first run.
+2. Docs are off-limits, so these were not updated:
+   - docs/TRACKER.md: the opus_encoder row can be set to done with the test summary above.
+   - docs/INTERNAL_API.md: needs the API section above.
+3. The orchestrator should add crate-root re-exports (Encoder, MsEncoder, ProjectionEncoder).
+4. DNN integration still to do. Hooks are marked `TODO(dnn)` with exact C line ranges in encoder.rs:
+   - fields (80-82, 134-141)
+   - init (287-290)
+   - compute_dred_bitrate (666-731 / 1335-1339) and the dred_bitrate_bps parameters
+   - curr_max (1786-1789)
+   - latents (2027-2041)
+   - CBR branch (2168-2172)
+   - activity_mem (2237-2240)
+   - max_celt_bytes (2399-2412)
+   - CBR DRED (2465-2477)
+   - extension encoding (2603-2645, which uses first_frame; the parameter is kept)
+   - reset (3260-3263)
+   - DNN blob (3324-3338)
+   With the dred feature, dred_duration is stored and validated (DRED_MAX_FRAMES=104 hard-coded locally), and reset clears it as C does (the field sits in the C reset region). set_dnn_blob is a validated no-op.
+5. The repacketizer's out_range_impl allocates a Vec when extensions are present (QEXT multi-frame and multistream QEXT). That code lives in the opus_packet unit and could take a scratch buffer to remove per-frame allocation in QEXT mode.
+6. The C ABI crate should map pointer CTLs to the typed methods: OPUS_SET_ENERGY_MASK to set_energy_mask, OPUS_GET_FINAL_RANGE through ctl_get (returns the u32 bits), OPUS_MULTISTREAM_GET_ENCODER_STATE to encoder_state, and OPUS_PROJECTION_GET_DEMIXING_MATRIX to write_demixing_matrix.
+
+### notes
+
+Deviations and quirks kept for bit-exactness:
+- **Projection encode24:** opus_projection_encode24 passes downmix_int (not downmix_int24) to the tonality analysis, so C reads the int32 buffer as int16. This is reproduced with a native-byte-order reinterpretation (downmix_int_on_int24) and verified bit-exact.
+- **Other C quirks kept:**
+  - mode_music uses mode_thresholds[1][1] twice.
+  - In multi-frame SILK with a to_mono transition, force_channels is permanently set to 1.
+  - OPUS_RESET_STATE clears dred_duration.
+  - Encoder `other_bits` is truncated to int16.
+  - hybrid_stereo_width_Q14 is stored as int16.
+  - Most internal CTL return values are ignored; c_ignored accepts only BAD_ARG, e.g. a CELT bitrate of 500 or less in hybrid.
+  - Multistream adds an unchecked out_range result to tot_size. Rust returns INTERNAL_ERROR only if tot_size would go negative, where C has undefined behaviour.
+- **Projection create errors:** creating a projection encoder with an unsupported channel count or family returns AllocFail, as C create does.
+- **Energy mask:** copied instead of stored as a pointer (the multistream encoder sets it every frame, as C does).
+- **Rust-only checks** (C would read or write out of bounds): short PCM slices, a mapping shorter than the channel count, and frame_native buffers smaller than their size argument return BadArg.
+- **frame_size_select:** uses wrapping multiplies for absurd frame sizes (C has undefined behaviour there).
+- **silk_assert:** the check in hp_cutoff is a comment, not a debug_assert (it is a no-op in libopus).
+- **Getters on validated enums:** use expect with an #[expect] reason, since only validated values are ever stored.
+- **Not ported:** FUZZING, MLP_TRAINING and ENABLE_OSCE_TRAINING_DATA branches. FIXED_POINT branches are marked.
+- **Allocation:** no per-frame heap allocation. The pcm_buf, tmp_prefill, delay buffer, multistream buf/bandSMR/tmp_data and surround scratch are preallocated. The int-to-res input buffer (single-stream encode/encode24), the multi-frame tmp_data (sized to max(need, 6*cap)) and the pad copy grow once on first use.
+- **Commit message:** plain, with no trailers, per CLAUDE.md.
+
+Files:
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus/src/encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus/src/ms_encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus/src/projection_encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus-oracle/src/opus_encoder.rs
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus-oracle/csrc/opus_encoder.c
+- /home/neo/code/opusorus/.claude/worktrees/wf_a29f8554-2f9-2/crates/opusorus-conformance/tests/opus_encoder.rs
+
+## `opus_decoder`
+
+### api for other units
+
+**decoder.rs** (`crate::decoder`)
+- `pub struct Decoder` (Clone, Debug).
+  - Construction: `new(fs: i32, channels: i32) -> Result<Decoder>`, `init(&mut self, fs, channels)`, `get_size(channels) -> usize` (Rust footprint, 0 if invalid), `channels() -> usize`.
+  - Typed decode: `decode(&mut self, data: Option<&[u8]>, pcm: &mut [i16], frame_size: usize, decode_fec: bool) -> Result<usize>`, plus `decode24` (`&mut [i32]`) and `decode_float` (`&mut [f32]`).
+  - `nb_samples(&self, packet) -> Result<usize>`.
+  - CTLs: `reset()`, `bandwidth() -> Option<Bandwidth>`, `set_complexity(i32) -> Result<()>` / `complexity()`, `final_range() -> u32`, `sample_rate()`, `pitch()`, `gain()` / `set_gain(i32) -> Result<()>`, `last_packet_duration() -> usize`, `set_phase_inversion_disabled(bool)` / `phase_inversion_disabled() -> bool`, `set_ignore_extensions(bool)` / `ignore_extensions() -> bool`.
+  - Feature-gated CTLs: `set_osce_bwe(i32)` / `osce_bwe()` with osce; `set_dnn_blob(&[u8]) -> Result<()>` with deep-plc or osce.
+  - Numeric escape hatch: `ctl_set(request, value) -> Result<()>` and `ctl_get(request) -> Result<i32>`. `GET_FINAL_RANGE` returns the u32 bits. Unknown requests return `Unimplemented` like C; wrong-direction requests return `BadArg`.
+  - `#[doc(hidden)]` pub, for the C ABI and multistream:
+    - C-typed decode: `opus_decode` / `opus_decode24` / `opus_decode_float(&mut self, data, pcm, frame_size: i32, decode_fec: i32) -> Result<i32>`.
+    - `opus_decode_native(&mut self, data: Option<&[u8]>, pcm: &mut [f32], frame_size: i32, decode_fec: i32, self_delimited: bool, packet_offset: Option<&mut usize>, soft_clip: bool) -> Result<i32>`.
+    - `snapshot() -> DecoderSnapshot`.
+  - Request constants: `OPUS_*_REQUEST` and `OPUS_RESET_STATE` for every request the decoder handles, including DNN_BLOB and OSCE_BWE.
+
+**ms_decoder.rs** (`crate::ms_decoder`)
+- `pub struct MsDecoder` (Clone, Debug).
+  - Construction: `new(fs, channels, streams, coupled_streams, mapping: &[u8]) -> Result<MsDecoder>`, `init(...)`, `get_size(streams, coupled)`, `channels()`, `streams()`, `coupled_streams()`.
+  - Decode: `decode`, `decode24`, `decode_float` (same shape as `Decoder`).
+  - CTLs: `bandwidth()`, `sample_rate()`, `gain()`, `last_packet_duration()`, `phase_inversion_disabled()`, `complexity()` (first stream); `final_range()` (XOR of all streams); `reset()`; `set_gain`, `set_complexity`, `set_phase_inversion_disabled` (all streams); `decoder_state(stream_id: i32) -> Result<&mut Decoder>` (OPUS_MULTISTREAM_GET_DECODER_STATE); `ctl_set` / `ctl_get`.
+  - `#[doc(hidden)]`: C-typed `opus_multistream_decode`, `opus_multistream_decode24`, `opus_multistream_decode_float`; the generic `opus_multistream_decode_native<T>(data, pcm: &mut [T], copy_channel_out: &mut CopyChannelOut<T>, frame_size, decode_fec, soft_clip)`; type `CopyChannelOut`.
+  - Constant `OPUS_MULTISTREAM_GET_DECODER_STATE_REQUEST`.
+
+**projection_decoder.rs** (`crate::projection_decoder`)
+- `pub struct ProjectionDecoder`.
+  - Construction: `new(fs, channels, streams, coupled_streams, demixing_matrix: &[u8]) -> Result<ProjectionDecoder>`. It returns `AllocFail` where C's get_size is 0, and `BadArg` for a wrong matrix size. Also `init`, `get_size(channels, streams, coupled)`.
+  - Decode: `decode`, `decode24`, `decode_float`, plus `#[doc(hidden)]` C-typed `opus_projection_decode*`.
+  - CTLs: `ms_decoder() -> &mut MsDecoder` (every CTL), `reset()`, `final_range()`, `ctl_set` / `ctl_get` (forwarded).
+
+**Notes for the C ABI unit**
+- A negative C `len` must be mapped to OPUS_BAD_ARG before calling. It is always BAD_ARG in C and cannot be expressed with slices.
+- data NULL or len 0 maps to None or `Some(&[])`.
+- Without DRED, the OpusDRED* functions just return UNIMPLEMENTED (0 for the sizes, NULL for alloc), exactly as C does.
+
+### external needs
+
+1. **Bug fix in another unit's file (celt_bands), please review:** `crates/opusorus/src/celt/bands.rs` `quant_all_bands` / `quant_band` / `quant_band_stereo`.
+   - **Trigger:** C's decoder `lowband_scratch` is `X_ + M*eBands[effEBands-1]`. When band `effEBands-1` is not the last band, the scratch *is* that band's X. This happens when a 96 kHz QEXT stream (qext_end = 14) is decoded at 48 kHz: the QEXT mode then has effEBands = 2.
+   - **Why the port was wrong:** it assumed a separate buffer gives identical results. That is false in dual stereo: `quant_band(Y)` copies Y's lowband over the X band decoded just before it.
+   - **Symptom:** `qext_vector*.bit` decoded at 48 kHz differed from C (first seen at qext_vector03 packet 2001). It was isolated at CELT level: channel 0's X in QEXT band 1 was different.
+   - **Fix:** a write-back of the scratch into X after the dual-stereo Y call, under the same copy condition as C. `quant_band` also gets an `x_alias` flag that reproduces C's self-alias semantics: the lowband is copied over X and the in-place transforms are applied twice to that one buffer. The encoder never reaches that case with standard modes, and for the decoder the result is unchanged.
+   - **Verification:** the module doc is updated. Regression test `qext::qext_96k_stream_at_48k_dual_stereo` fails on the old code and passes now. celt_bands, celt_decoder and celt_encoder tests still pass in both configurations.
+   - **Known gap:** the N==2 stereo case with c=1 plus encoder aliasing is not reproduced. It is unreachable for the band widths any mode uses and is documented at the call.
+2. **Opus HD vectors:** the `qext_vector*.bit` files do not decode to their references with libopus 1.6.1.
+   - Our C oracle and an independently built upstream opus_demo (gcc -DENABLE_QEXT, in the scratchpad) both report a range-coder mismatch from the first QEXT packet: frame 1, 0x2679933 vs 0xac291f.
+   - The output of both fails qext_compare against qext_vector*dec.f32.
+   - These vectors most likely target a newer QEXT bitstream. The test asserts only Rust == C for them and prints NOTEs. The RFC vectors decoded at 96 kHz pass qext_compare.
+   - The tools_compare and vectors owners should know.
+3. **Duplication to clean up later:** decoder.rs defines `OPUS_*_REQUEST` constants (the encoder unit will likely define its own), and celt_decoder.rs has its own copies. A shared ctl-constants module would dedupe them.
+4. **Docs are not edited (not allowed):**
+   - TRACKER: mark opus_decoder ✅ with the test summary above.
+   - FEATURES/STATUS: Opus, multistream and projection decoding are done; decode performance is about 0.86-0.94x C.
+   - Crate root: re-export `Decoder`, `MsDecoder` and `ProjectionDecoder` (they are `pub mod`s now).
+5. **DNN hooks for later units:**
+   - deep-plc: an lpcnet field in `Decoder`, `lpcnet_plc_init`/`reset`/`load_model`, and passing `&lpcnet` to `silk_decode` and `celt_decode_with_ec_dred`.
+   - dred: DRED feature feeding in `opus_decode_native`, and the OpusDRED/OpusDREDDecoder API.
+   - osce: `osce_method` and `osce_extended_mode` in `DecControl` (the SilkDecControlStruct fields do not exist yet, so `enable_osce_bwe` lives in `Decoder` for now), and skipping CELT in SILK_BBWE mode.
+   - C returns 1 (not an error code) when the DNN blob fails to load; `set_dnn_blob` maps that to `BadArg`.
+   - All hook points are marked `DNN hook` with the C line numbers.
+
+### notes
+
+Design and deviations (all documented in the module docs):
+- **Buffer lengths:** output buffers are slices, and one that is too short returns BadArg (C would overflow). For the single-stream decoder the required length is min(frame_size, packet duration) * channels (frame_size * channels for PLC/FEC). Multistream requires frame_size * channels, with frame_size limited to 120 ms. A mapping shorter than channels is BadArg.
+- **Assertions:** `celt_assert` / `validate_*` are debug_assert!s. MUST_SUCCEED failures return InternalError instead of aborting.
+- **Ignored returns:** where C ignores a return value (the transition PLC into scratch, redundant CELT frames, the hybrid->SILK silence frame), the port uses an explicit `c_ignores_result` helper. There is no `let _ =`.
+- **SILK PLC failure:** the zero-fill is clamped to the buffer (C can write past frame_size there).
+- **Buffers and allocation:**
+  - pcm_transition is a stack array, created only when a transition happens (960 floats with qext, 480 without).
+  - pcm_silk, redundant_audio and the int16/int24 `out` buffer are preallocated in the Decoder. `out` grows only for PLC/FEC requests longer than 120 ms. The multistream `buf` is preallocated.
+  - No heap allocation per frame in steady state.
+  - SilkDecoder is boxed (about 9 KB).
+- **Multistream copy-out:** the C function-pointer callbacks are a generic `&mut dyn FnMut`. Projection passes closures that capture its MappingMatrix.
+- **Integer arguments:** `decode_fec` and `frame_size` stay C ints in the hidden C-typed API, so the C ABI can reproduce every BAD_ARG ordering. The public API uses bool/usize.
+- **FIXED_POINT:** skipped with markers. QEXT (96 kHz, per-frame extension lookup) is under `cfg(feature = "qext")`.
+- **Files changed:**
+  - crates/opusorus/src/decoder.rs
+  - crates/opusorus/src/ms_decoder.rs
+  - crates/opusorus/src/projection_decoder.rs
+  - crates/opusorus/src/celt/bands.rs (bug fix, see external_needs)
+  - crates/opusorus-oracle/src/opus_decoder.rs
+  - crates/opusorus-oracle/csrc/opus_decoder.c
+  - crates/opusorus-conformance/tests/opus_decoder.rs
+- The oracle shim copies the OpusDecoder struct definition verbatim, with the same #ifdefs, to dump its state. It also exposes the per-stream decoder of the multistream and projection decoders. Its safe wrappers include `opus_projection_decode24`, which the shared api.rs lacks.
+- **Commit:** the message is plain with no trailers, as CLAUDE.md requires; that takes precedence over the attribution reminder. The worktree is clean.
