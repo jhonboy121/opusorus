@@ -517,7 +517,9 @@ fn opushd_vectors() {
 #[cfg(unix)]
 fn lib_config_matches(lib: &[u8]) -> bool {
     let has = |needle: &[u8]| lib.windows(needle.len()).any(|w| w == needle);
-    has(b"-mini_kfft.o") == cfg!(feature = "qext")
+    // Fixed-point oracles compile silk/fixed/* (e.g. burg_modified_FIX.c) instead of silk/float.
+    has(b"-burg_modified_FIX.o") == cfg!(feature = "fixed-point")
+        && has(b"-mini_kfft.o") == cfg!(feature = "qext")
         && has(b"opus_custom_encoder_create") == cfg!(feature = "custom-modes")
         && has(b"-lpcnet_plc.o")
             == cfg!(any(
