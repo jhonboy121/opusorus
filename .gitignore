@@ -5,3 +5,7 @@ target/
 /testdata/vectors/
 *.profraw
 .claude/
+/testdata/*.tar.gz
+/vendor/libopus/dnn/*_data.c
+/vendor/libopus/dnn/*_data.h
+/vendor/libopus/dnn/dred_rdovae_constants.h
