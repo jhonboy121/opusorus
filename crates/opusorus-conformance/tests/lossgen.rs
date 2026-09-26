@@ -25,7 +25,7 @@ use opusorus::dnn::lossgen_data::{as_weight_arrays, lossgen_arrays};
 use opusorus::dnn::parse_lpcnet_weights::write_weights;
 use opusorus::lossgen::{LossGenState, sample_loss};
 use opusorus_oracle::dnn_lossgen as c;
-use opusorus_tools::demo::GlibcRand;
+use opusorus::glibc_rand::GlibcRand;
 use std::path::{Path, PathBuf};
 
 /// Asserts that the Rust state equals the C snapshot bit for bit.
