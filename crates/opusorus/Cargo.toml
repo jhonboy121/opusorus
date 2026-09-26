@@ -26,6 +26,15 @@ deep-plc = []
 dred = ["deep-plc"]
 # SILK speech enhancement + bandwidth extension (libopus `--enable-osce`).
 osce = ["deep-plc"]
+# FIXED-POINT BUILD (libopus `--enable-fixed-point`). NOT ADDITIVE: it *replaces* the float
+# implementation with the integer one (bit-exact with a libopus fixed-point build), exactly like
+# upstream's configure switch. While the fixed-point port is in progress (docs/FIXED_POINT.md),
+# enabling it compiles a reduced crate: only the modules already converted are available.
+# Cannot be combined with deep-plc/dred/osce (upstream configure refuses it too).
+fixed-point = []
+# 24-bit internal resolution for the fixed-point build (libopus `ENABLE_RES24`, which upstream
+# autotools enables by default for fixed-point builds; `--disable-fixed-res24` turns it off).
+fixed-res24 = ["fixed-point"]
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

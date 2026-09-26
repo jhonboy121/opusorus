@@ -11,6 +11,9 @@
 //! searched upwards from this crate (so git worktrees find the main checkout's copy) or at
 //! `$OPUSORUS_VECTORS`; they print a note and pass if the vectors are absent.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

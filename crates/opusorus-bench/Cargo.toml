@@ -11,6 +11,15 @@ publish = false
 # Adds the 96 kHz Opus HD (QEXT) encode/decode benchmarks (all three implementations built with
 # QEXT; upstream CMake has no QEXT switch, so the optimized build gets -DENABLE_QEXT).
 qext = ["opusorus/qext", "opusorus-oracle/qext", "opus-sys-optimized/qext"]
+# Fixed-point build of `opusorus` (docs/FIXED_POINT.md): benchmarks are compiled out until the
+# fixed-point codec is ported.
+fixed-point = ["opusorus/fixed-point", "opusorus-oracle/fixed-point", "opusorus-conformance/fixed-point"]
+fixed-res24 = [
+    "fixed-point",
+    "opusorus/fixed-res24",
+    "opusorus-oracle/fixed-res24",
+    "opusorus-conformance/fixed-res24",
+]
 
 [dependencies]
 # `internals` exposes the MDCT/FFT/range coder/resampler for the micro benchmarks; `std` selects

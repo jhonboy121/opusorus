@@ -3,6 +3,10 @@
 //! (`src/repacketizer.c`), mapping matrix (`src/mapping_matrix.c`), analysis MLP
 //! (`src/mlp.c`) and multistream layout helpers (`src/opus_multistream.c`) vs the C oracle.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opusorus::extensions::{self, Extension, ExtensionIterator};
 use opusorus::mapping_matrix as mm;
 use opusorus::mlp;

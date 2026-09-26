@@ -17,6 +17,10 @@ publish = false
 qext = ["opusorus/qext"]
 # `opus_demo -enable_osce_bwe` (libopus `ENABLE_OSCE_BWE`).
 osce = ["opusorus/osce"]
+# Fixed-point build of `opusorus` (docs/FIXED_POINT.md). The tools need the full float codec API,
+# so they are compiled out (the binaries only report that) until the fixed-point port is done.
+fixed-point = ["opusorus/fixed-point"]
+fixed-res24 = ["fixed-point", "opusorus/fixed-res24"]
 
 [dependencies]
 # `internals` exposes `opusorus::celt::mini_kfft` and `opusorus::math`; `std` selects the platform

@@ -2,6 +2,11 @@
 //! FFT / MDCT state types from `celt/modes.h`, `celt/kiss_fft.h`, `celt/mdct.h`.
 //!
 //! Generated from the C header by a script (see git history); values are copied verbatim.
+//!
+//! The types are shared by the float and fixed-point builds (their scalar types follow
+//! `crate::celt::arch`). The float-typed tables and modes are float-only; in fixed-point builds
+//! (feature `fixed-point`) they come from [`super::static_modes_fixed`] (re-exported here) and the
+//! integer tables below (`eBands`, allocation, logN, pulse caches, FFT bit-reversal) are shared.
 
 #![allow(
     missing_docs,
@@ -10,24 +15,50 @@
 
 use alloc::borrow::Cow;
 
+use crate::celt::arch::{CeltCoef, OpusVal16};
+
+#[cfg(feature = "fixed-point")]
+pub use super::static_modes_fixed::*;
+
 /// `MAXFACTORS`.
 pub const MAXFACTORS: usize = 8;
 
-/// `kiss_fft_cpx` (float build).
+/// `kiss_fft_scalar` (float build).
+#[cfg(not(feature = "fixed-point"))]
+pub type KissFftScalar = f32;
+/// `kiss_fft_scalar` (fixed-point build: `opus_int32`).
+#[cfg(feature = "fixed-point")]
+pub type KissFftScalar = i32;
+/// `kiss_twiddle_scalar` (`float` / `celt_coef`).
+pub type KissTwiddleScalar = CeltCoef;
+
+/// `kiss_fft_cpx`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct KissFftCpx {
-    pub r: f32,
-    pub i: f32,
+    pub r: KissFftScalar,
+    pub i: KissFftScalar,
 }
 
 /// `kiss_twiddle_cpx` (float build; same layout as [`KissFftCpx`]).
+#[cfg(not(feature = "fixed-point"))]
 pub type KissTwiddleCpx = KissFftCpx;
+
+/// `kiss_twiddle_cpx` (fixed-point build: a pair of `celt_coef`).
+#[cfg(feature = "fixed-point")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KissTwiddleCpx {
+    pub r: KissTwiddleScalar,
+    pub i: KissTwiddleScalar,
+}
 
 /// `kiss_fft_state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KissFftState {
     pub nfft: i32,
-    pub scale: f32,
+    pub scale: CeltCoef,
+    /// Fixed-point only: `scale_shift`.
+    #[cfg(feature = "fixed-point")]
+    pub scale_shift: i32,
     pub shift: i32,
     pub factors: [i16; 2 * MAXFACTORS],
     pub bitrev: Cow<'static, [i16]>,
@@ -40,7 +71,7 @@ pub struct MdctLookup {
     pub n: i32,
     pub maxshift: i32,
     pub kfft: [Cow<'static, KissFftState>; 4],
-    pub trig: Cow<'static, [f32]>,
+    pub trig: Cow<'static, [KissTwiddleScalar]>,
 }
 
 /// `PulseCache`.
@@ -59,7 +90,7 @@ pub struct CeltMode {
     pub overlap: i32,
     pub nb_ebands: i32,
     pub eff_ebands: i32,
-    pub preemph: [f32; 4],
+    pub preemph: [OpusVal16; 4],
     /// Definition for each "pseudo-critical band" (`eBands`).
     pub e_bands: Cow<'static, [i16]>,
     pub max_lm: i32,
@@ -70,13 +101,14 @@ pub struct CeltMode {
     /// Number of bits in each band for several rates (`allocVectors`).
     pub alloc_vectors: Cow<'static, [u8]>,
     pub log_n: Cow<'static, [i16]>,
-    pub window: Cow<'static, [f32]>,
+    pub window: Cow<'static, [CeltCoef]>,
     pub mdct: MdctLookup,
     pub cache: PulseCache,
     #[cfg(feature = "qext")]
     pub qext_cache: PulseCache,
 }
 
+#[cfg(not(feature = "fixed-point"))]
 #[rustfmt::skip]
 pub static WINDOW120: [f32; 120] = [
     6.7286966e-05, 0.00060551348, 0.0016815970, 0.0032947962, 0.0054439943, 0.0081276923,
@@ -177,6 +209,7 @@ pub static QEXT_CACHE_CAPS50: [u8; 112] = [
     163, 163, 163, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165,
 ];
 
+#[cfg(not(feature = "fixed-point"))]
 #[rustfmt::skip]
 pub static FFT_TWIDDLES48000_960: [KissTwiddleCpx; 480] = [
     KissTwiddleCpx {         r: 1.0000000, i: -0.0000000, },
@@ -722,6 +755,7 @@ pub static FFT_BITREV60: [i16; 60] = [
     7, 19, 31, 43, 55, 11, 23, 35, 47, 59,
 ];
 
+#[cfg(not(feature = "fixed-point"))]
 #[rustfmt::skip]
 pub static MDCT_TWIDDLES960: [f32; 1800] = [
     0.99999992, 0.99999322, 0.99997582, 0.99994771, 0.99990889, 0.99985936, 0.99979913, 0.99972818,
@@ -970,7 +1004,7 @@ pub static MDCT_TWIDDLES960: [f32; 1800] = [
     -0.99485864, -0.99716875, -0.99879546, -0.99973764,
 ];
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 #[rustfmt::skip]
 pub static WINDOW240: [f32; 240] = [
     1.6821922e-05, 0.00015139297, 0.00042051200, 0.00082413284, 0.0013621862, 0.0020345793,
@@ -1006,7 +1040,7 @@ pub static WINDOW240: [f32; 240] = [
     0.99999285, 0.99999596, 0.99999793, 0.99999907, 0.99999966, 0.99999991, 0.99999999, 1.0000000,
 ];
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 #[rustfmt::skip]
 pub static FFT_TWIDDLES96000_1920: [KissTwiddleCpx; 960] = [
     KissTwiddleCpx {         r: 1.0000000, i: -0.0000000, },
@@ -2027,7 +2061,7 @@ pub static FFT_BITREV960: [i16; 960] = [
     191, 383, 575, 767, 959,
 ];
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 #[rustfmt::skip]
 pub static MDCT_TWIDDLES1920: [f32; 3600] = [
     0.99999998, 0.99999831, 0.99999396, 0.99998693, 0.99997722, 0.99996484, 0.99994978, 0.99993204,
@@ -2540,6 +2574,7 @@ pub static BAND_ALLOCATION: [u8; 231] = [
     104,
 ];
 
+#[cfg(not(feature = "fixed-point"))]
 pub static FFT_STATE48000_960_0: KissFftState = KissFftState {
     nfft: 480,
     scale: 0.0020833334,
@@ -2549,6 +2584,7 @@ pub static FFT_STATE48000_960_0: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES48000_960),
 };
 
+#[cfg(not(feature = "fixed-point"))]
 pub static FFT_STATE48000_960_1: KissFftState = KissFftState {
     nfft: 240,
     scale: 0.0041666669,
@@ -2558,6 +2594,7 @@ pub static FFT_STATE48000_960_1: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES48000_960),
 };
 
+#[cfg(not(feature = "fixed-point"))]
 pub static FFT_STATE48000_960_2: KissFftState = KissFftState {
     nfft: 120,
     scale: 0.0083333338,
@@ -2567,6 +2604,7 @@ pub static FFT_STATE48000_960_2: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES48000_960),
 };
 
+#[cfg(not(feature = "fixed-point"))]
 pub static FFT_STATE48000_960_3: KissFftState = KissFftState {
     nfft: 60,
     scale: 0.016666668,
@@ -2576,7 +2614,7 @@ pub static FFT_STATE48000_960_3: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES48000_960),
 };
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static FFT_STATE96000_1920_0: KissFftState = KissFftState {
     nfft: 960,
     scale: 0.0010416667,
@@ -2586,7 +2624,7 @@ pub static FFT_STATE96000_1920_0: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES96000_1920),
 };
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static FFT_STATE96000_1920_1: KissFftState = KissFftState {
     nfft: 480,
     scale: 0.0020833334,
@@ -2596,7 +2634,7 @@ pub static FFT_STATE96000_1920_1: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES96000_1920),
 };
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static FFT_STATE96000_1920_2: KissFftState = KissFftState {
     nfft: 240,
     scale: 0.0041666669,
@@ -2606,7 +2644,7 @@ pub static FFT_STATE96000_1920_2: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES96000_1920),
 };
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static FFT_STATE96000_1920_3: KissFftState = KissFftState {
     nfft: 120,
     scale: 0.0083333338,
@@ -2616,6 +2654,7 @@ pub static FFT_STATE96000_1920_3: KissFftState = KissFftState {
     twiddles: Cow::Borrowed(&FFT_TWIDDLES96000_1920),
 };
 
+#[cfg(not(feature = "fixed-point"))]
 pub static MODE48000_960_120: CeltMode = CeltMode {
     fs: 48000,
     overlap: 120,
@@ -2656,7 +2695,7 @@ pub static MODE48000_960_120: CeltMode = CeltMode {
     },
 };
 
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static MODE96000_1920_240: CeltMode = CeltMode {
     fs: 96000,
     overlap: 240,
@@ -2698,8 +2737,8 @@ pub static MODE96000_1920_240: CeltMode = CeltMode {
 };
 
 /// `static_mode_list`: all statically-defined modes.
-#[cfg(not(feature = "qext"))]
+#[cfg(all(not(feature = "qext"), not(feature = "fixed-point")))]
 pub static STATIC_MODE_LIST: [&CeltMode; 1] = [&MODE48000_960_120];
 /// `static_mode_list`: all statically-defined modes.
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub static STATIC_MODE_LIST: [&CeltMode; 2] = [&MODE48000_960_120, &MODE96000_1920_240];

@@ -7,7 +7,7 @@
 //! `SMALL_FOOTPRINT`: not ported (the default build computes `U(N,K)` from the table; the
 //! `unext`/`uprev`/`ncwrs_urow` row-recurrence variant is not compiled upstream by default).
 
-use crate::celt::arch::{OpusVal32, imax, imin, mac16_16};
+use crate::celt::arch::{OpusVal16, OpusVal32, imax, imin, mac16_16};
 use crate::celt::entdec::EcDec;
 use crate::celt::entenc::EcEnc;
 
@@ -412,10 +412,23 @@ pub fn encode_pulses(y: &[i32], n: i32, k: i32, enc: &mut EcEnc<'_>) {
     enc.enc_uint(icwrs(n, y), celt_pvq_v(n, k));
 }
 
+/// The C `int` pulse value as passed to `MAC16_16` (converted to float in the float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+const fn pulse16(v: i16) -> OpusVal16 {
+    v as f32
+}
+/// The C `int` pulse value as passed to `MAC16_16` (fixed-point build: unchanged).
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn pulse16(v: i16) -> OpusVal16 {
+    v
+}
+
 /// Port of celt/cwrs.c:cwrsi: decodes codeword index `i` into the pulse vector `y` and returns
 /// its squared norm.
 fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
-    let mut yy: OpusVal32 = 0.0;
+    let mut yy = OpusVal32::default();
     let mut yi = 0usize;
     let mut p: u32;
     let mut s: i32;
@@ -456,7 +469,7 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
             val = ((k0 - k + s) ^ s) as i16;
             y[yi] = i32::from(val);
             yi += 1;
-            yy = mac16_16(yy, f32::from(val), f32::from(val));
+            yy = mac16_16(yy, pulse16(val), pulse16(val));
         }
         // Lots of dimensions case:
         else {
@@ -484,7 +497,7 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
                 val = ((k0 - k + s) ^ s) as i16;
                 y[yi] = i32::from(val);
                 yi += 1;
-                yy = mac16_16(yy, f32::from(val), f32::from(val));
+                yy = mac16_16(yy, pulse16(val), pulse16(val));
             }
         }
         n -= 1;
@@ -501,12 +514,12 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
     val = ((k0 - k + s) ^ s) as i16;
     y[yi] = i32::from(val);
     yi += 1;
-    yy = mac16_16(yy, f32::from(val), f32::from(val));
+    yy = mac16_16(yy, pulse16(val), pulse16(val));
     // _n==1
     s = -(i as i32);
     val = ((k + s) ^ s) as i16;
     y[yi] = i32::from(val);
-    yy = mac16_16(yy, f32::from(val), f32::from(val));
+    yy = mac16_16(yy, pulse16(val), pulse16(val));
     yy
 }
 

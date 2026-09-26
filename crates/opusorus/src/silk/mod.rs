@@ -1,12 +1,19 @@
 //! SILK layer (port of `silk/`).
+//!
+//! The SILK decoder and the encoder's shared integer code are identical in the float and
+//! fixed-point builds of libopus. Only the encoder analysis differs: `silk/float/*` (+ the float
+//! encoder super-struct/API in `encoder.rs`) in the float build, `silk/fixed/*` in the
+//! fixed-point build (feature `fixed-point`, not ported yet — see `docs/FIXED_POINT.md`).
 
 pub mod cng;
 pub mod coding;
 pub mod decoder;
 pub mod define;
+#[cfg(not(feature = "fixed-point"))]
 pub mod encoder;
 pub mod encoder_common;
 pub mod errors;
+#[cfg(not(feature = "fixed-point"))]
 pub mod float;
 pub mod macros;
 pub mod nlsf;

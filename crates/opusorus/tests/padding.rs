@@ -1,6 +1,9 @@
 //! Port of libopus `tests/test_opus_padding.c`: checks for overflow in reading the padding
 //! length (<http://lists.xiph.org/pipermail/opus/2012-November/001834.html>).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

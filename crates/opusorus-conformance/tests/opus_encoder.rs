@@ -19,6 +19,9 @@
 //! `OPUSORUS_OE_DUP=1` runs every single-stream test against the dumpable C copy, which
 //! reports the first diverging state field (debugging aid).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::too_many_arguments,
     clippy::needless_range_loop,

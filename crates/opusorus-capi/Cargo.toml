@@ -29,6 +29,10 @@ custom-modes = ["opus/custom-modes", "opus/internals"]
 deep-plc = ["opus/deep-plc"]
 dred = ["opus/dred"]
 osce = ["opus/osce"]
+# Fixed-point build of `opusorus` (docs/FIXED_POINT.md). The C ABI is compiled out (empty
+# library) until the fixed-point port is complete.
+fixed-point = ["opus/fixed-point"]
+fixed-res24 = ["fixed-point", "opus/fixed-res24"]
 # Also exports the libopus-internal helpers that upstream's `test_opus_extensions.c` links
 # against (`opus_packet_parse_impl`, `opus_repacketizer_out_range_impl`,
 # `opus_packet_extensions_*`). Not part of the libopus ABI; used by `tests/c_suite.rs`.

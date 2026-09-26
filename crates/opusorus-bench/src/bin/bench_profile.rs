@@ -6,18 +6,24 @@
 //! (a count with an `i` suffix runs exactly that many iterations, for deterministic instruction
 //! counts). `bench_profile list` prints the group names. Prints iterations and ns per iteration.
 
+#[cfg(not(feature = "fixed-point"))]
 use std::error::Error;
+#[cfg(not(feature = "fixed-point"))]
 use std::io::{self, Write};
+#[cfg(not(feature = "fixed-point"))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(feature = "fixed-point"))]
 use opusorus_bench::{Impl, report_rows, runner_for_group};
 
+#[cfg(not(feature = "fixed-point"))]
 /// How long to run.
 enum Budget {
     Time(Duration),
     Iterations(u64),
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = io::stdout();
@@ -70,4 +76,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         imp.id()
     )?;
     Ok(())
+}
+
+/// Fixed-point builds of `opusorus` have no codec API yet (docs/FIXED_POINT.md).
+#[cfg(feature = "fixed-point")]
+fn main() -> std::io::Result<()> {
+    use std::io::Write;
+    writeln!(
+        std::io::stderr(),
+        "not available in fixed-point builds yet (docs/FIXED_POINT.md)"
+    )
 }

@@ -3,6 +3,9 @@
 //! C oracle, bit-exact on PCM output, return codes, control struct, range decoder state and the
 //! complete decoder state after every call.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

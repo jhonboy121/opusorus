@@ -8,6 +8,10 @@
 //! The C oracle uses its compiled-in model tables; the Rust side parses weight blobs that the
 //! oracle serializes from those same tables (write_lpcnet_weights.c format), and every parsed
 //! array and every bound layer is compared with the C one.
+
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![cfg(any(feature = "deep-plc", feature = "dred", feature = "osce"))]
 #![allow(
     clippy::unwrap_used,

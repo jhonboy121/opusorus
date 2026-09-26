@@ -14,6 +14,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | silk/macros.rs | silk/macros.h, SigProc_FIX.h, Inlines.h, typedef.h | ✅ | unit tests (64/32-bit form equivalence) |
 | silk/define.rs, tuning_parameters.rs, errors.rs | silk/define.h, tuning_parameters.h, errors.h | ✅ | generated |
 | math.rs, error.rs, constants.rs | — | ✅ | unit tests |
+| celt/arch/fixed.rs, celt/mathops/fixed.rs, celt/static_modes_fixed.rs (+ shared types in static_modes.rs, arch.rs, mathops.rs) | celt/arch.h + fixed_generic.h (fixed), mathops.h/.c (fixed), float_cast.h (fixed), static_modes_fixed.h | ✅ | fixed_foundation.rs (unit `fixed_foundation`, features fixed-point / fixed-res24 × qext): 95 macros/conversions (+ both `OPUS_FAST_INT64` forms of the 8 32-bit multiplies), 27 fixed mathops fns, float API, constants, static modes field-by-field, range coder/CWRS/Laplace — bit-exact |
 
 ## Units
 
@@ -34,6 +35,17 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | C | `silk_encoder_flp` | `silk/float.rs`<br>`silk/encoder.rs` | silk/float/*.c, silk/float/*.h (may add submodules under silk/float/)<br>silk/{enc_API,init_encoder,control_codec}.c | ✅ | silk_encoder_flp.rs: silk_Encode all rates/internal bw/packet sizes/complexity/CBR-VBR/FEC/DTX/stereo — bytes + rng bit-exact |
 | D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ✅ | opus_decoder.rs: 180 C-encoded streams all apps/rates/frame sizes/transitions, FEC/PLC/DTX, garbage, extensions, multistream 0/1/255, projection 2/3, RFC 8251 vectors all rates bit-exact + opus_compare pass, Opus HD vectors (qext) — bit-exact; release ≈0.86–0.94× C time |
 | D | `opus_encoder` | `encoder.rs`<br>`ms_encoder.rs`<br>`projection_encoder.rs` | src/opus_encoder.c<br>src/opus_multistream_encoder.c<br>src/opus_projection_encoder.c | ✅ | opus_encoder.rs: long streams over all apps/rates/bitrates/VBR modes/complexity/frame durations/FEC/DTX/ctl switches, multistream+surround, projection, qext — bytes+rng bit-exact |
+
+## Fixed-point units (docs/FIXED_POINT.md)
+
+| Layer | Unit | Status |
+|---|---|---|
+| FX0 | `fixed_foundation` (arch/fixed_generic macros, fixed mathops, static modes, gating, fixed oracle) | ✅ |
+| FX1 | `fixed_fft`, `fixed_modes`, `fixed_pitch_lpc`, `fixed_silk_shared`, `fixed_packet` | ⬜ |
+| FX2 | `fixed_bands`, `fixed_silk_encoder`, `fixed_analysis` | ⬜ |
+| FX3 | `fixed_celt_decoder`, `fixed_celt_encoder` | ⬜ |
+| FX4 | `fixed_opus_decoder`, `fixed_opus_encoder` | ⬜ |
+| FX5 | `fixed_integration` (API, tools, C ABI, vectors, benches) | ⬜ |
 
 ## DNN units
 

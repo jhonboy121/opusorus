@@ -36,7 +36,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 |---|---|---|---|---|
 | O1 | QEXT: Opus HD / scalable quality extension (96 kHz, extra precision in extensions) | `--enable-qext` | `qext` | ✅ |
 | O2 | Opus Custom modes (non-48k-family rates, custom frame sizes, opus_custom API) | `--enable-custom-modes` | `custom-modes` | ✅ |
-| O3 | Fixed-point build (+ RES24) | `--enable-fixed-point` | `fixed-point` | ⬜ |
+| O3 | Fixed-point build (+ RES24) — not additive, replaces float (docs/FIXED_POINT.md) | `--enable-fixed-point` (+ `ENABLE_RES24`) | `fixed-point`, `fixed-res24` | 🟨 foundation |
 | O4 | Deep PLC (LPCNet/FARGAN-based concealment) | `--enable-deep-plc` | `deep-plc` | ✅ |
 | O5 | DRED: Deep REDundancy (encoder + decoder, `opus_dred_*` API) | `--enable-dred` | `dred` | ✅ |
 | O6 | OSCE: SILK speech enhancement (LACE/NoLACE) + BWE | `--enable-osce` | `osce` | ✅ |

@@ -1364,3 +1364,47 @@ Design and deviations (all documented in the module docs):
   - crates/opusorus-conformance/tests/opus_decoder.rs
 - The oracle shim copies the OpusDecoder struct definition verbatim, with the same #ifdefs, to dump its state. It also exposes the per-stream decoder of the multistream and projection decoders. Its safe wrappers include `opus_projection_decode24`, which the shared api.rs lacks.
 - **Commit:** the message is plain with no trailers, as CLAUDE.md requires; that takes precedence over the attribution reminder. The worktree is clean.
+
+## `fixed_foundation`
+
+Feature `fixed-point` (+ `fixed-res24`, `qext`); see `docs/FIXED_POINT.md` for the gating scheme,
+typing rules and the conversion plan.
+
+- `celt::arch` is now `celt/arch.rs` (shared: `CELT_SIG_SCALE`, `DB_SHIFT`, `GLOBAL_STACK_SIZE`,
+  `OPUS_FAST_INT64`, `imin`, `imax`, `imul32`, `uadd32`, `usub32`) + `celt/arch/float.rs` (the
+  former float file, unchanged) or `celt/arch/fixed.rs`, re-exported under the same names.
+  Fixed: `OpusVal16 = i16`, `OpusVal32 = CeltSig = CeltNorm = CeltEner = CeltGlog = i32`,
+  `OpusVal64 = i64`, `OpusRes = i16` (`i32` with `fixed-res24`), `CeltCoef = i16` (`i32` with
+  `qext`); constants `Q15ONE`, `Q31ONE`, `COEF_ONE`, `SIG_SHIFT`, `SIG_SAT`, `NORM_SHIFT`,
+  `NORM_SCALING`, `RES_SHIFT`, `MAX_ENCODING_DEPTH`, `EPSILON`, `VERY_SMALL`, `VERY_LARGE16`,
+  `Q15_ONE`. Macros take `impl Into<i32>` and return the C expression type (`i32`, or `i16` where
+  the macro casts); `min16`/`max16`/`min32`/`max32`/`ming`/`maxg`/`fmin`/`fmax` are generic
+  over one `T: PartialOrd`. `arch::int64::*` / `arch::int32::*` are the two `OPUS_FAST_INT64`
+  forms of `MULT16_32_Q16/P16/Q15`, `MULT32_32_Q16/Q31/P31/P31_ovflw/Q32`; the plain names
+  dispatch per target. Conversions: `sig2res`, `res2int16`, `res2int24`, `res2float`,
+  `int16tores`, `int24tores`, `add_res`, `float2res`, `res2sig`, `mult16_res_q15` (returns
+  `OpusRes`, as every C use stores it in one), `res2val16`, `int16tosig`, `int24tosig`,
+  `float2sig`, `sig2word16`, `sat16`; coefficients: `mult_coef_32`, `mac_coef_32_arm`,
+  `mult_coef`, `mult_coef_taps`, `coef2val16`.
+- `celt::mathops` is `celt/mathops.rs` (shared: `PI`, `frac_mul16`, `isqrt32`, `fast_atan2f`,
+  `celt_cos_norm2`, `celt_ilog2`, `celt_zlog2`, `float2int`, `float2int16`, `float2int24`,
+  `celt_float2int16`, `opus_limit2_checkwithin1`) + `mathops/float.rs` or `mathops/fixed.rs`.
+  Fixed signatures follow C: `celt_rsqrt_norm(i32) -> i16`, `celt_rsqrt_norm32(i32) -> i32`,
+  `celt_sqrt(i32) -> i32`, `celt_sqrt32`, `celt_cos_norm(i32) -> i16`, `celt_cos_norm32`,
+  `celt_log2(i32) -> i16`, `celt_exp2_frac(i16) -> i32`, `celt_exp2(i16) -> i32`,
+  `celt_log2_db`, `celt_exp2_db_frac`, `celt_exp2_db` (i32, QEXT and non-QEXT forms),
+  `celt_rcp(i32) -> i32`, `celt_rcp_norm16(i16) -> i16`, `celt_rcp_norm32`, `celt_div`,
+  `frac_div32_q29`, `frac_div32`, `celt_atan_norm`, `celt_atan2p_norm` (Q30), `celt_atan01(i16)`,
+  `celt_atan2p(i16, i16) -> i16`, `celt_maxabs16(&[i16]) -> i32`,
+  `celt_maxabs_res(&[OpusRes])`, `celt_maxabs32(&[i32])`. Float-only: `celt_rsqrt`, `celt_sin`,
+  `celt_log`, `celt_exp`.
+- `celt::static_modes`: `KissFftScalar` (`f32`/`i32`), `KissTwiddleScalar = CeltCoef`,
+  `KissFftCpx { r, i: KissFftScalar }`, `KissTwiddleCpx` (alias of `KissFftCpx` in float; own
+  `CeltCoef` pair in fixed), `KissFftState::scale: CeltCoef` + fixed-only `scale_shift`,
+  `MdctLookup::trig: [KissTwiddleScalar]`, `CeltMode::{preemph: [OpusVal16; 4], window:
+  [CeltCoef]}`. Fixed builds re-export `celt::static_modes_fixed::*` (modes, windows, twiddles,
+  FFT states, `STATIC_MODE_LIST`) from `static_modes`; the integer tables are shared.
+- `celt::cwrs::decode_pulses` returns `OpusVal32` in both builds (`i32` squared norm in fixed).
+- Oracle: `opusorus_oracle::fixed_foundation` (ids `id1`/`id2`/`id3`/`mid1`/`mid2`/`mode_arr`,
+  `op1/op2/op2_int32/op3/math1/math2`, `mode_scalars/mode_array/mode_fft`, `cwrs_roundtrip`,
+  `laplace_roundtrip`, float API helpers). Shims mark their builds with `// oracle-build:`.

@@ -12,24 +12,51 @@ pub mod sys;
 
 pub mod foundation;
 
-pub mod analysis;
-pub mod celt_bands;
-pub mod celt_decoder;
-pub mod celt_encoder;
-pub mod celt_fft;
-pub mod celt_modes;
-pub mod celt_pitch_lpc;
-pub mod dnn_core;
-pub mod dnn_dred;
-pub mod dnn_integration;
-pub mod dnn_osce;
-pub mod dnn_plc;
-pub mod opus_decoder;
-pub mod opus_encoder;
-pub mod opus_packet;
+// Fixed-point oracle (features `fixed-point` / `fixed-res24`, docs/FIXED_POINT.md).
+#[cfg(feature = "fixed-point")]
+pub mod fixed_foundation;
+
+// Integer units whose shims compile in both oracles (`// oracle-build: any`).
 pub mod silk_common;
-pub mod silk_decoder;
-pub mod silk_encoder_common;
-pub mod silk_encoder_flp;
 pub mod silk_resampler;
+
+// Float-only units: their shims (no `// oracle-build:` marker) are not compiled into a fixed-point
+// oracle. A unit converted to fixed point marks its shim `any`/`fixed` and lifts the cfg here.
+#[cfg(not(feature = "fixed-point"))]
+pub mod analysis;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_bands;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_decoder;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_encoder;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_fft;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_modes;
+#[cfg(not(feature = "fixed-point"))]
+pub mod celt_pitch_lpc;
+#[cfg(not(feature = "fixed-point"))]
+pub mod dnn_core;
+#[cfg(not(feature = "fixed-point"))]
+pub mod dnn_dred;
+#[cfg(not(feature = "fixed-point"))]
+pub mod dnn_integration;
+#[cfg(not(feature = "fixed-point"))]
+pub mod dnn_osce;
+#[cfg(not(feature = "fixed-point"))]
+pub mod dnn_plc;
+#[cfg(not(feature = "fixed-point"))]
+pub mod opus_decoder;
+#[cfg(not(feature = "fixed-point"))]
+pub mod opus_encoder;
+#[cfg(not(feature = "fixed-point"))]
+pub mod opus_packet;
+#[cfg(not(feature = "fixed-point"))]
+pub mod silk_decoder;
+#[cfg(not(feature = "fixed-point"))]
+pub mod silk_encoder_common;
+#[cfg(not(feature = "fixed-point"))]
+pub mod silk_encoder_flp;
+#[cfg(not(feature = "fixed-point"))]
 pub mod tools_compare;

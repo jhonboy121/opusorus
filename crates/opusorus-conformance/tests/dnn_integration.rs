@@ -15,6 +15,9 @@
 //!
 //! Run with `--features deep-plc,dred,osce` (or any subset containing `deep-plc`).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![cfg(feature = "deep-plc")]
 #![allow(
     clippy::unwrap_used,

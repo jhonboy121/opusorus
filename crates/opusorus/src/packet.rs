@@ -10,7 +10,9 @@
 //! unconditionally (undefined behaviour for an empty packet), the Rust functions return
 //! [`Error::BadArg`] for an empty slice instead.
 
-use crate::celt::arch::{abs16, max16, min16};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::abs16;
+use crate::celt::arch::{max16, min16};
 use crate::celt::mathops::opus_limit2_checkwithin1;
 use crate::{Bandwidth, Error, Result};
 
@@ -497,6 +499,14 @@ pub fn pcm_soft_clip(pcm: &mut [f32], frame_size: usize, channels: usize, declip
     let n = frame_size.min(i32::MAX as usize) as i32;
     let c = channels.min(i32::MAX as usize) as i32;
     opus_pcm_soft_clip_impl(pcm, n, c, declip_mem);
+}
+
+/// `ABS16` on a float in the fixed-point build (the float API is kept there): the
+/// `arch.h` ternary `((x) < 0 ? (-(x)) : (x))` instead of the float build's `fabs`.
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn abs16(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
 }
 
 /// Port of `src/opus.c:opus_pcm_soft_clip_impl` (the `arch` argument is dropped).

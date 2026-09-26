@@ -1,6 +1,9 @@
 //! Differential tests for unit `celt_bands`: celt/vq.c, celt/quant_bands.c, celt/bands.c and
 //! celt/celt.c vs the C oracle (bit-exact).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::too_many_arguments,
     reason = "test runners mirror the flat oracle shim signatures"

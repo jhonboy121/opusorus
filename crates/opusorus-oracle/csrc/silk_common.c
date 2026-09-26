@@ -1,5 +1,6 @@
 /* Oracle shims for unit silk_common: SILK tables, structs, signal-processing helpers, NLSF code
    and entropy-coding helpers. Every shim takes flat arrays + ints. */
+// oracle-build: any
 #include <string.h>
 #include "main.h"
 #include "tables.h"

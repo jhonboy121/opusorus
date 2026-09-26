@@ -2,6 +2,10 @@
 //! (`modes.c`), Laplace coding (`laplace.c`), PVQ codeword coding (`cwrs.c`) and the bit
 //! allocation (`rate.c`) vs the C oracle.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opusorus::celt::entcode::EcCoder;
 use opusorus::celt::entdec::EcDec;
 use opusorus::celt::entenc::EcEnc;

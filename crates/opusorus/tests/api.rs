@@ -17,6 +17,9 @@
 //! * The integer applications (`OPUS_AUTO`, `OPUS_UNIMPLEMENTED`) passed as `application`:
 //!   [`Application::from_raw`] rejects them with `BadArg` before an encoder can be created.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

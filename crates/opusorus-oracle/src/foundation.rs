@@ -1,4 +1,7 @@
 //! Oracle bindings for the foundation unit: range coder and float mathops.
+//!
+//! The range coder and `isqrt32` / `float2int*` bindings are available in every oracle build;
+//! the float mathops ones only in the float build (fixed-point: [`crate::fixed_foundation`]).
 
 use core::ffi::c_int;
 
@@ -21,6 +24,10 @@ unsafe extern "C" {
         tells: *mut c_int,
         rng_out: *mut u32,
     ) -> c_int;
+}
+
+#[cfg(not(feature = "fixed-point"))]
+unsafe extern "C" {
     fn oracle_celt_log2(x: f32) -> f32;
     fn oracle_celt_exp2(x: f32) -> f32;
     fn oracle_celt_cos_norm(x: f32) -> f32;
@@ -30,6 +37,9 @@ unsafe extern "C" {
     fn oracle_celt_atan2p_norm(y: f32, x: f32) -> f32;
     fn oracle_celt_sqrt(x: f32) -> f32;
     fn oracle_celt_rsqrt(x: f32) -> f32;
+}
+
+unsafe extern "C" {
     fn oracle_isqrt32(x: u32) -> u32;
     fn oracle_float2int(x: f32) -> c_int;
     fn oracle_float2int16(x: f32) -> i16;
@@ -117,6 +127,7 @@ pub fn ec_decode_ops(ops: &[[u32; 2]], data: &[u8]) -> DecOut {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 macro_rules! f1 {
     ($($name:ident => $c:ident),+ $(,)?) => {$(
         /// C oracle for the same-named libopus function/macro.
@@ -127,6 +138,7 @@ macro_rules! f1 {
         }
     )+};
 }
+#[cfg(not(feature = "fixed-point"))]
 f1!(
     celt_log2 => oracle_celt_log2,
     celt_exp2 => oracle_celt_exp2,
@@ -138,12 +150,14 @@ f1!(
 );
 
 /// C `fast_atan2f`.
+#[cfg(not(feature = "fixed-point"))]
 #[must_use]
 pub fn fast_atan2f(y: f32, x: f32) -> f32 {
     // SAFETY: pure function.
     unsafe { oracle_fast_atan2f(y, x) }
 }
 /// C `celt_atan2p_norm`.
+#[cfg(not(feature = "fixed-point"))]
 #[must_use]
 pub fn celt_atan2p_norm(y: f32, x: f32) -> f32 {
     // SAFETY: pure function.

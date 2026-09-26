@@ -4,8 +4,11 @@
 use opusorus::celt::entcode::EcState;
 use opusorus::celt::entdec::EcDec;
 use opusorus::celt::entenc::EcEnc;
+#[cfg(not(feature = "fixed-point"))]
 use opusorus::celt::mathops;
-use opusorus_conformance::{Rng, assert_slice_eq};
+use opusorus_conformance::Rng;
+#[cfg(not(feature = "fixed-point"))]
+use opusorus_conformance::assert_slice_eq;
 use opusorus_oracle::foundation as c;
 
 /// Generates a random but valid op sequence for the encoder, plus the matching decoder ops.
@@ -179,6 +182,8 @@ fn shrink_and_patch_match_oracle() {
     }
 }
 
+// Float mathops: fixed-point builds test their mathops in fixed_foundation.rs.
+#[cfg(not(feature = "fixed-point"))]
 #[test]
 fn mathops_match_oracle() {
     let mut rng = Rng::new(11);

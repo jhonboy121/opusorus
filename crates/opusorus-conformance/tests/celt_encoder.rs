@@ -13,6 +13,9 @@
 //!   CELT encoder (CELT-only, hybrid, redundancy, prefill, QEXT). Each call is replayed in Rust
 //!   from the recorded C state and every output is compared.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::too_many_arguments,
     clippy::needless_range_loop,

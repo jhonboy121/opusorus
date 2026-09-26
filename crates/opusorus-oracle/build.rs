@@ -5,6 +5,12 @@
 //! * `-ffp-contract=off` so the C compiler does not fuse multiply-adds.
 //!
 //! Both are required for the Rust port to be bit-exact with the oracle.
+//!
+//! Features `fixed-point` / `fixed-res24` build the fixed-point library instead (`FIXED_POINT`,
+//! `silk/fixed` sources and include path, `ENABLE_RES24`), keeping the float API on as upstream
+//! does by default (so `src/analysis.c` + `src/mlp*.c` are still compiled, as in upstream's
+//! Makefile.am/meson/CMake). Shims in `csrc/` declare which builds they support with a marker
+//! line `// oracle-build: float|fixed|any` (no marker = float only, see docs/FIXED_POINT.md).
 
 use std::path::{Path, PathBuf};
 
@@ -33,10 +39,30 @@ fn mk_sources(root: &Path, mk: &str, var: &str) -> Vec<PathBuf> {
     out
 }
 
+/// The oracle configurations a shim compiles in: the value of its `// oracle-build: <x>` marker
+/// line (`float`, `fixed` or `any`); shims without a marker are float-only.
+fn shim_build(path: &Path) -> String {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    for line in text.lines() {
+        if let Some(v) = line.trim().strip_prefix("// oracle-build:") {
+            let v = v.trim();
+            assert!(
+                matches!(v, "float" | "fixed" | "any"),
+                "{}: bad oracle-build marker {v:?}",
+                path.display()
+            );
+            return v.to_string();
+        }
+    }
+    "float".to_string()
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let root = manifest.join("../../vendor/libopus");
-    let fixed = false; // fixed-point oracle arrives with the fixed-point phase (PLAN D-011)
+    let fixed = std::env::var_os("CARGO_FEATURE_FIXED_POINT").is_some();
+    let res24 = std::env::var_os("CARGO_FEATURE_FIXED_RES24").is_some();
     let qext = std::env::var_os("CARGO_FEATURE_QEXT").is_some();
     let custom = std::env::var_os("CARGO_FEATURE_CUSTOM_MODES").is_some();
     // DNN features mirror upstream configure: --enable-dred and --enable-osce both imply the
@@ -44,16 +70,24 @@ fn main() {
     let dred = std::env::var_os("CARGO_FEATURE_DRED").is_some();
     let osce = std::env::var_os("CARGO_FEATURE_OSCE").is_some();
     let deep_plc = std::env::var_os("CARGO_FEATURE_DEEP_PLC").is_some() || dred || osce;
+    // Upstream configure refuses this combination too.
+    assert!(
+        !(fixed && deep_plc),
+        "--enable-fixed-point cannot be used with --enable-deep-plc, --enable-dred, and \
+         --enable-osce (features fixed-point + deep-plc/dred/osce)"
+    );
 
     let mut srcs = mk_sources(&root, "celt_sources.mk", "CELT_SOURCES");
     srcs.extend(mk_sources(&root, "silk_sources.mk", "SILK_SOURCES"));
     srcs.extend(mk_sources(&root, "opus_sources.mk", "OPUS_SOURCES"));
+    // Upstream: SILK_SOURCES_FIXED or SILK_SOURCES_FLOAT by FIXED_POINT; OPUS_SOURCES_FLOAT
+    // (analysis + MLP) whenever the float API is enabled, which is the default in both builds.
     if fixed {
         srcs.extend(mk_sources(&root, "silk_sources.mk", "SILK_SOURCES_FIXED"));
     } else {
         srcs.extend(mk_sources(&root, "silk_sources.mk", "SILK_SOURCES_FLOAT"));
-        srcs.extend(mk_sources(&root, "opus_sources.mk", "OPUS_SOURCES_FLOAT"));
     }
+    srcs.extend(mk_sources(&root, "opus_sources.mk", "OPUS_SOURCES_FLOAT"));
     if qext {
         srcs.push(root.join("celt/mini_kfft.c"));
     }
@@ -104,8 +138,10 @@ fn main() {
         .flag_if_supported("-fvisibility=default")
         .warnings(false);
     if fixed {
-        b.define("FIXED_POINT", "1")
-            .define("DISABLE_FLOAT_API", None);
+        b.define("FIXED_POINT", "1");
+    }
+    if res24 {
+        b.define("ENABLE_RES24", None);
     }
     if qext {
         b.define("ENABLE_QEXT", None);
@@ -135,10 +171,15 @@ fn main() {
     }
     // Per-unit C shims exposing internal functions with flat, FFI-friendly signatures.
     let csrc = manifest.join("csrc");
+    let wanted = if fixed { "fixed" } else { "float" };
     let mut shims: Vec<PathBuf> = std::fs::read_dir(&csrc)
         .expect("csrc dir exists")
         .map(|e| e.expect("readable dir entry").path())
         .filter(|p| p.extension().is_some_and(|e| e == "c"))
+        .filter(|p| {
+            let build = shim_build(p);
+            build == "any" || build == wanted
+        })
         .collect();
     shims.sort();
     b.files(&shims).include(&csrc);

@@ -9,6 +9,9 @@
 //! (96 kHz and 48 kHz extension payloads) and custom modes (`opus_custom_decode*`) run with
 //! their features.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

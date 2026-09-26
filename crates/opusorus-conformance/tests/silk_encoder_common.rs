@@ -3,6 +3,10 @@
 //! HP_variable_cutoff, control_SNR, control_audio_bandwidth and check_control_input vs the C
 //! oracle (bit-exact, including the evolution of every state over many consecutive frames).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opusorus::celt::entenc::EcEnc;
 use opusorus::silk::coding::silk_decode_pitch;
 use opusorus::silk::define::*;

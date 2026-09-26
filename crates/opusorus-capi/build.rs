@@ -8,6 +8,12 @@ use std::path::PathBuf;
 const TRAMPOLINE_ARCHS: &[&str] = &["x86_64", "x86", "aarch64", "arm", "riscv64"];
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-changed=build.rs");
+    // Fixed-point builds of `opusorus` do not provide the codec API yet: the library is empty
+    // (src/lib.rs) and has no ctl glue.
+    if std::env::var_os("CARGO_FEATURE_FIXED_POINT").is_some() {
+        return Ok(());
+    }
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH")?;
     let mut b = cc::Build::new();
@@ -21,7 +27,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         b.define("OPUSORUS_CUSTOM_MODES", None);
     }
     b.try_compile("opusorus_ctl")?;
-    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed=include");
     Ok(())

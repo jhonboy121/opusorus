@@ -12,6 +12,9 @@
 //!   metric (`qext_compare` binary). It needs the QEXT-only `opusorus::celt::mini_kfft` port, so
 //!   it is behind this crate's `qext` feature (which enables `opusorus/qext`).
 //!
+//! With the `fixed-point` feature (a fixed-point build of `opusorus`, docs/FIXED_POINT.md) only
+//! `opus_compare` is available for now; `opus_demo` and `qext_compare` report that and fail.
+//!
 //! The computations are bit-exact with the C tools (same float operation order, same libm), and
 //! the `*_main` functions reproduce the C command-line parsing and the exact text the C tools
 //! print on stderr, so the binaries are drop-in replacements.
@@ -24,4 +27,22 @@
 )]
 
 pub mod compare;
+// `opus_demo` needs the full codec API, which the in-progress fixed-point build of `opusorus`
+// does not provide yet (docs/FIXED_POINT.md).
+#[cfg(not(feature = "fixed-point"))]
 pub mod demo;
+
+/// Stand-in `main` body for the tools that need parts of `opusorus` a fixed-point build does not
+/// provide yet: reports it on stderr and fails.
+///
+/// # Errors
+/// Writing to stderr failed.
+#[cfg(feature = "fixed-point")]
+pub fn fixed_point_unavailable(tool: &str) -> std::io::Result<std::process::ExitCode> {
+    use std::io::Write;
+    writeln!(
+        std::io::stderr().lock(),
+        "{tool}: not available in fixed-point builds of opusorus yet (see docs/FIXED_POINT.md)"
+    )?;
+    Ok(std::process::ExitCode::FAILURE)
+}

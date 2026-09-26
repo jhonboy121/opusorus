@@ -64,8 +64,10 @@ The foundation (already done, reuse it):
 * `celt_assert` → `debug_assert!`. `celt_sig_assert` → `debug_assert!`. Hardening checks that
   return errors in C must return errors in Rust.
 * `#ifdef ENABLE_QEXT` → `#[cfg(feature = "qext")]` (port these blocks in the same pass).
-  `#ifdef CUSTOM_MODES` → `#[cfg(feature = "custom-modes")]`. `#ifdef FIXED_POINT` → skip the
-  fixed branch, keep a `// FIXED_POINT: not ported (float build)` marker. `ENABLE_DEEP_PLC`,
+  `#ifdef CUSTOM_MODES` → `#[cfg(feature = "custom-modes")]`. `#ifdef FIXED_POINT` →
+  `#[cfg(feature = "fixed-point")]` when a fixed-point unit converts the file (see
+  `docs/FIXED_POINT.md` for the typing rules and gating); until then the branch keeps its
+  `// FIXED_POINT: not ported (float build)` marker. `ENABLE_DEEP_PLC`,
   `ENABLE_DRED`, `ENABLE_OSCE`, `ENABLE_OSCE_BWE` → skip with `// DNN: <feature> not ported yet`
   marker (they are a later phase). `OPUS_ARM_*`, `OPUS_X86_*`, `arch` params → drop.
 * `arch` arguments disappear. `RESTORE_STACK`/`SAVE_STACK` disappear.
@@ -93,8 +95,10 @@ The foundation (already done, reuse it):
    960, NULL)` in a shim.
 2. Tests must run in < ~30 s in the `test` profile (opt-level 2).
 3. `cargo test -p opusorus-conformance --test <unit>` and the same with `--features qext`
-   (if your unit has QEXT code) must pass. `cargo clippy --workspace --all-targets
-   --all-features -- -D warnings` and `cargo fmt --all -- --check` must be clean for your files.
+   (if your unit has QEXT code) must pass (fixed-point units: with `--features fixed-point`,
+   `fixed-res24` and their `qext` combinations). `just clippy` (float and fixed-point feature
+   sets; `--all-features` is not a valid configuration since `fixed-point` is not additive, see
+   `docs/FIXED_POINT.md`) and `cargo fmt --all -- --check` must be clean for your files.
 4. Build must still pass for `cargo build -p opusorus --no-default-features` (no_std).
 
 See `crates/opusorus-conformance/tests/foundation.rs` + `crates/opusorus-oracle/csrc/foundation.c`

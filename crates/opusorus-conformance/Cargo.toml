@@ -13,6 +13,15 @@ custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
 deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc"]
 dred = ["opusorus/dred", "opusorus-oracle/dred", "deep-plc"]
 osce = ["opusorus/osce", "opusorus-oracle/osce", "deep-plc", "opusorus-tools/osce"]
+# Fixed-point port vs a fixed-point oracle (docs/FIXED_POINT.md). Float-only test files are
+# compiled out; run e.g. `cargo test -p opusorus-conformance --features fixed-point`.
+fixed-point = ["opusorus/fixed-point", "opusorus-oracle/fixed-point", "opusorus-tools/fixed-point"]
+fixed-res24 = [
+    "fixed-point",
+    "opusorus/fixed-res24",
+    "opusorus-oracle/fixed-res24",
+    "opusorus-tools/fixed-res24",
+]
 
 [dependencies]
 opusorus = { workspace = true, features = ["internals", "std"] }

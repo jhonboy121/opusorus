@@ -7,6 +7,9 @@
 //! Adaptation: the decode output buffer holds `MAX_FRAME_SAMPLES` (the `frame_size` argument)
 //! rather than `BUFFER_SIZE` samples per channel, see `test_encode_decode`.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

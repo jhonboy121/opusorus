@@ -12,8 +12,11 @@ links = "opus"
 [features]
 # Mirrors opusorus features so oracle and port are always built in the same configuration.
 qext = []
-# NOTE: a `fixed-point` oracle build is added in the fixed-point phase (docs/PLAN.md D-011).
 custom-modes = []
+# Fixed-point libopus (`FIXED_POINT`, SILK `silk/fixed`, float API kept on as upstream's default)
+# and its 24-bit internal resolution variant (`ENABLE_RES24`). Replaces the float oracle.
+fixed-point = []
+fixed-res24 = ["fixed-point"]
 # DNN features: build libopus with the matching --enable-* defines and the model data from
 # scripts/fetch_dnn_models.sh.
 deep-plc = []

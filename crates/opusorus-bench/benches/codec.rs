@@ -5,16 +5,23 @@
 //! `opusorus_bench::codec_configs` and the 5.1 surround configuration. `scripts/bench_report.sh`
 //! turns the results into a markdown table.
 
-#![expect(
-    clippy::expect_used,
-    reason = "benchmark harness: a failing setup or frame aborts the run with a message"
+#![cfg_attr(
+    not(feature = "fixed-point"),
+    expect(
+        clippy::expect_used,
+        reason = "benchmark harness: a failing setup or frame aborts the run with a message"
+    )
 )]
 
+#[cfg(not(feature = "fixed-point"))]
 use core::time::Duration;
 
+#[cfg(not(feature = "fixed-point"))]
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(not(feature = "fixed-point"))]
 use opusorus_bench::{CodecBench, Impl};
 
+#[cfg(not(feature = "fixed-point"))]
 fn codec(c: &mut Criterion) {
     for bench in CodecBench::all() {
         let mut g = c.benchmark_group(bench.group());
@@ -26,6 +33,7 @@ fn codec(c: &mut Criterion) {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -34,4 +42,9 @@ criterion_group! {
         .sample_size(50);
     targets = codec
 }
+#[cfg(not(feature = "fixed-point"))]
 criterion_main!(benches);
+
+/// Fixed-point builds of `opusorus` have no codec API yet (docs/FIXED_POINT.md).
+#[cfg(feature = "fixed-point")]
+fn main() {}

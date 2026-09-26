@@ -2,6 +2,9 @@
 //! with QEXT, the mini kiss FFT (celt/mini_kfft.c) vs the C oracle. All comparisons are
 //! bit-exact.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

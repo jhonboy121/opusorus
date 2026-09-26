@@ -8,6 +8,10 @@
 //! oracle serializes from those same tables (pitch DNN + PLC + FARGAN, the models
 //! `lpcnet_plc_load_model` binds). Features come from the (bit-exact) Rust LPCNet feature
 //! extractor run on speech-like and other 16 kHz signals.
+
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![cfg(any(feature = "deep-plc", feature = "dred", feature = "osce"))]
 #![allow(
     clippy::unwrap_used,

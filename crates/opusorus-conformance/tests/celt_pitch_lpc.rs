@@ -1,6 +1,10 @@
 //! Differential tests for unit `celt_pitch_lpc` (celt/pitch.c, celt/celt_lpc.c) vs the C oracle.
 //! Every comparison is bit-exact (`to_bits`).
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opusorus::celt::{celt_lpc as rl, pitch as rp};
 use opusorus_conformance::{Rng, assert_bits_eq_f32, signals};
 use opusorus_oracle::celt_pitch_lpc as c;

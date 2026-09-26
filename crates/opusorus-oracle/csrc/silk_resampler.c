@@ -1,4 +1,5 @@
 /* Oracle C shims for unit silk_resampler (silk/resampler*.c). */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 #include "opus_types.h"

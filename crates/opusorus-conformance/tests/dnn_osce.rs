@@ -16,6 +16,10 @@
 //!
 //! The C oracle uses its compiled-in model tables; the Rust side loads a weight blob the oracle
 //! serializes from those same tables.
+
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![cfg(feature = "osce")]
 #![allow(
     clippy::unwrap_used,

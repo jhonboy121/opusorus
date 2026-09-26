@@ -14,6 +14,9 @@
 //! * The C test copies decoders with `memcpy`; the Rust decoder is `Clone`.
 //! * `t=rand()&3` uses the C library `rand()`, reproduced with glibc's generator.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

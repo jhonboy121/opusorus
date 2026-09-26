@@ -6,6 +6,10 @@
 //!   resampler) and near-identical float kernel results.
 //! * Every configuration really runs in the intended coding mode.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opus_sys_optimized::{Micro, Resampler, Variant};
 use opusorus::celt::kiss_fft::opus_fft;
 use opusorus::celt::mdct::{clt_mdct_backward, clt_mdct_forward};

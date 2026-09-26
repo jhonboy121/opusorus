@@ -20,6 +20,9 @@
 //!   `opus_limit2_checkwithin1`; opusorus has only the C implementation, checked once per
 //!   `use_ref_impl` value.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -1,4 +1,7 @@
 /* Oracle shims for the foundation unit (range coder, mathops). */
+// oracle-build: any
+/* The range coder shims are shared by the float and fixed-point oracles; the float mathops shims
+   are float-only (fixed-point mathops: fixed_foundation.c). */
 #include <string.h>
 #include "entenc.h"
 #include "entdec.h"
@@ -65,6 +68,7 @@ int oracle_ec_decode_ops(const unsigned *ops, int nops, unsigned char *buf, int 
   return dec.error;
 }
 
+#ifndef FIXED_POINT
 float oracle_celt_log2(float x) { return celt_log2(x); }
 float oracle_celt_exp2(float x) { return celt_exp2(x); }
 float oracle_celt_cos_norm(float x) { return celt_cos_norm(x); }
@@ -74,6 +78,7 @@ float oracle_fast_atan2f(float y, float x) { return fast_atan2f(y, x); }
 float oracle_celt_atan2p_norm(float y, float x) { return celt_atan2p_norm(y, x); }
 float oracle_celt_sqrt(float x) { return celt_sqrt(x); }
 float oracle_celt_rsqrt(float x) { return celt_rsqrt(x); }
+#endif
 unsigned oracle_isqrt32(unsigned x) { return isqrt32(x); }
 int oracle_float2int(float x) { return float2int(x); }
 short oracle_float2int16(float x) { return FLOAT2INT16(x); }

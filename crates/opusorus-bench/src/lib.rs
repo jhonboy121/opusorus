@@ -13,6 +13,11 @@
 //!
 //! Every codec workload works on 20 ms frames of deterministic synthetic audio
 //! (`opusorus_conformance::signals`) so one benchmark iteration is one 20 ms frame.
+//!
+//! With the `fixed-point` features (the in-progress fixed-point build of `opusorus`,
+//! docs/FIXED_POINT.md) this crate is empty and the benchmarks are no-ops.
+
+#![cfg(not(feature = "fixed-point"))]
 
 use core::fmt;
 

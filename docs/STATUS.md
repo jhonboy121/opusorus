@@ -21,7 +21,7 @@ opus_demo, DNN integration) in progress. Remaining after that: fixed-point build
 | QEXT (Opus HD) | ✅ bit-exact, Opus HD vectors pass |
 | Custom modes | ✅ bit-exact |
 | DNN: deep PLC / DRED / OSCE+BWE | ✅ integrated, bit-exact vs C built with the same features (weights via runtime blob) |
-| Fixed-point build | ⬜ planned (phase F) |
+| Fixed-point build | 🟨 foundation done (fixed macros/mathops/static modes bit-exact vs a fixed oracle, gating in place); codec conversion planned in docs/FIXED_POINT.md |
 | Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |
 | Fuzzing | ✅ 11 cargo-fuzz targets (differential vs C + invariants), ~7.5M execs default+QEXT, 0 crashes/divergences |
 | Benchmarks | ✅ see below (Rust ≈ scalar C; SILK decode 1.39×) |

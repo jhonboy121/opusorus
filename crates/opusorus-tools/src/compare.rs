@@ -19,9 +19,10 @@ pub use opus::{
     OpusCompareResult, opus_compare, opus_compare_main,
 };
 
-#[cfg(feature = "qext")]
+// `qext_compare` needs `opusorus::celt::mini_kfft`, not compiled in fixed-point builds yet.
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 mod qext;
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 pub use qext::{
     BANDS as QEXT_COMPARE_BANDS, NBANDS as QEXT_COMPARE_NBANDS, QextCompareOptions,
     QextCompareResult, qext_compare, qext_compare_main,

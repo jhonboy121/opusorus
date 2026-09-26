@@ -16,6 +16,9 @@
 //!   bit pattern) after every call. The payloads are also decoded with the Rust and C SILK
 //!   decoders as a sanity check.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

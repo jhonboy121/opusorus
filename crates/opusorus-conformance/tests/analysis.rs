@@ -4,6 +4,10 @@
 //! Every function is compared bit-for-bit, including the complete `TonalityAnalysisState` after
 //! stateful calls.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
+
 use opusorus::analysis::{
     self as a, AnalysisInfo, DETECT_SIZE, DownmixFunc, TonalityAnalysisState,
 };

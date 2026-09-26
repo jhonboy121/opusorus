@@ -22,6 +22,9 @@
 //!   the port draws them left to right.
 //! * The C test copies the encoder with `memcpy`; the Rust encoder is `Clone`.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

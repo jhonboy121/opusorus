@@ -32,6 +32,13 @@
 //! * The private `CELT_GET_MODE` request is not supported (`OPUS_UNIMPLEMENTED`).
 //! * DRED (`opus_dred_*`) behaves like a libopus build without `ENABLE_DRED` (see [`dred`]).
 //! * `opus_get_version_string` reports `"libopus 1.6.1 (opusorus)"`.
+//!
+//! ## Fixed-point
+//!
+//! With the `fixed-point` / `fixed-res24` features (a fixed-point build of `opusorus`, which is
+//! still being ported, see `docs/FIXED_POINT.md`) the library is currently **empty**.
+
+#![cfg(not(feature = "fixed-point"))]
 
 pub mod ctl;
 pub mod decoder;

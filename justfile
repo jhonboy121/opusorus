@@ -2,12 +2,19 @@
 
 targets := "wasm32-unknown-unknown wasm32-wasip1 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-unknown-linux-gnu"
 
+# `--all-features` is not a valid configuration: `fixed-point` replaces the float codec (not
+# additive) and upstream refuses fixed-point together with the DNN features. These lists are the
+# two "everything on" configurations (docs/FIXED_POINT.md).
+float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/deep-plc,opusorus-capi/dred,opusorus-capi/osce,opusorus-capi/internal-api,opusorus-bench/qext,opusorus-tools/qext,opusorus-tools/osce"
+fixed_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-bench/fixed-res24,opusorus-bench/qext,opusorus-tools/qext"
+
 default:
     @just --list
 
 # Type-check the whole workspace.
 check:
-    cargo check --workspace --all-targets --all-features
+    cargo check --workspace --all-targets --features {{float_all}}
+    cargo check --workspace --all-targets --features {{fixed_all}}
 
 # Format check.
 fmt:
@@ -15,13 +22,19 @@ fmt:
 
 # Clippy, warnings are errors.
 clippy:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --features {{float_all}} -- -D warnings
+    cargo clippy --workspace --all-targets --features {{fixed_all}} -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/fixed-point -- -D warnings
     cargo clippy -p opusorus --no-default-features -- -D warnings
+    cargo clippy -p opusorus --no-default-features --features fixed-point -- -D warnings
 
-# All tests (unit + differential vs C oracle + vectors), default and qext configs.
+# All tests (unit + differential vs C oracle + vectors): default, every float feature, and the
+# fixed-point builds (16- and 24-bit resolution; only the converted modules are tested).
 test:
     cargo test --workspace
-    cargo test --workspace --all-features
+    cargo test --workspace --features {{float_all}}
+    cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-point
+    cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-res24,opusorus-conformance/qext
 
 # Build the library for every supported platform (+ no_std bare-metal).
 cross:
@@ -32,6 +45,10 @@ cross:
     done
     echo "== thumbv7em-none-eabihf (no_std)"; cargo build -q -p opusorus --release --no-default-features --target thumbv7em-none-eabihf
     echo "== wasm32-unknown-unknown (no_std)"; cargo build -q -p opusorus --release --no-default-features --target wasm32-unknown-unknown
+    # Fixed-point build (reduced crate while being ported): a 32-bit target (OPUS_FAST_INT64 = 0
+    # forms) and no_std.
+    echo "== armv7-linux-androideabi (fixed-res24)"; cargo build -q -p opusorus --release --features fixed-res24 --target armv7-linux-androideabi
+    echo "== thumbv7em-none-eabihf (no_std, fixed-point)"; cargo build -q -p opusorus --release --no-default-features --features fixed-point --target thumbv7em-none-eabihf
 
 # Build the C-ABI static library for every mobile/desktop target. The C glue for variadic ctls is
 # compiled with host clang in freestanding mode; final shared-library linking needs the platform

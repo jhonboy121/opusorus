@@ -8,15 +8,22 @@
 //! factor (20 ms / time; how many times faster than realtime, single core) and the ratios
 //! Rust / C-scalar and Rust / C-optimized (below 1.00 = Rust faster).
 
+#[cfg(not(feature = "fixed-point"))]
 use std::error::Error;
+#[cfg(not(feature = "fixed-point"))]
 use std::io::{self, Write};
+#[cfg(not(feature = "fixed-point"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(not(feature = "fixed-point"))]
 use opus_sys_optimized::{Micro, Variant};
+#[cfg(not(feature = "fixed-point"))]
 use opusorus_bench::{Impl, report_rows};
 
+#[cfg(not(feature = "fixed-point"))]
 type BoxResult<T> = Result<T, Box<dyn Error>>;
 
+#[cfg(not(feature = "fixed-point"))]
 /// Point estimate (ns per iteration) Criterion reports: the linear-regression slope when it
 /// was computed, otherwise the mean.
 fn estimate(dir: &Path, group: &str, imp: Impl) -> BoxResult<Option<f64>> {
@@ -33,6 +40,7 @@ fn estimate(dir: &Path, group: &str, imp: Impl) -> BoxResult<Option<f64>> {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn default_dir() -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR") {
         Some(t) => PathBuf::from(t).join("criterion"),
@@ -40,6 +48,7 @@ fn default_dir() -> PathBuf {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn fmt_ns(ns: Option<f64>) -> String {
     match ns {
         Some(ns) if ns >= 1e6 => format!("{:.2} ms", ns / 1e6),
@@ -50,6 +59,7 @@ fn fmt_ns(ns: Option<f64>) -> String {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn fmt_rtf(ns: Option<f64>, per_frame: bool) -> String {
     match ns {
         Some(ns) if per_frame => format!("{:.0}×", 20e6 / ns),
@@ -57,6 +67,7 @@ fn fmt_rtf(ns: Option<f64>, per_frame: bool) -> String {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn fmt_ratio(a: Option<f64>, b: Option<f64>) -> String {
     match (a, b) {
         (Some(a), Some(b)) => {
@@ -72,6 +83,7 @@ fn fmt_ratio(a: Option<f64>, b: Option<f64>) -> String {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn cpu_model() -> BoxResult<String> {
     let info = match std::fs::read_to_string("/proc/cpuinfo") {
         Ok(s) => s,
@@ -89,6 +101,7 @@ fn cpu_model() -> BoxResult<String> {
     })
 }
 
+#[cfg(not(feature = "fixed-point"))]
 fn main() -> BoxResult<()> {
     let dir = match std::env::args_os().nth(1) {
         Some(d) => PathBuf::from(d),
@@ -162,4 +175,14 @@ fn main() -> BoxResult<()> {
         )?;
     }
     Ok(())
+}
+
+/// Fixed-point builds of `opusorus` have no codec API yet (docs/FIXED_POINT.md).
+#[cfg(feature = "fixed-point")]
+fn main() -> std::io::Result<()> {
+    use std::io::Write;
+    writeln!(
+        std::io::stderr(),
+        "not available in fixed-point builds yet (docs/FIXED_POINT.md)"
+    )
 }

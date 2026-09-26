@@ -24,6 +24,16 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
 | Fixed-point build | `fixed-point`, `fixed-res24` | in progress, see [docs/FIXED_POINT.md](docs/FIXED_POINT.md) |
 | `std` platform libm (bit-exact with C on the same platform) | `std` (default) | without it: pure-Rust `libm`, `no_std` |
 
+> **`fixed-point` / `fixed-res24` are NOT additive.** They *replace* the float implementation
+> with the integer one (bit-exact with a fixed-point libopus build), exactly like libopus'
+> configure switch, and cannot be combined with the DNN features (as upstream). Enabling them
+> anywhere in a dependency graph switches every user of `opusorus` in that build. The fixed-point
+> port is **in progress**: for now these features compile a reduced crate without the
+> encoder/decoder API. See [`docs/FIXED_POINT.md`](docs/FIXED_POINT.md).
+
+Because of that, `--all-features` is not a valid configuration of this workspace; `just check`,
+`just clippy` and `just test` run the float and fixed-point "everything on" feature sets.
+
 ## Usage
 
 ```rust

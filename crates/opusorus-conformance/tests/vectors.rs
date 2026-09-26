@@ -23,6 +23,9 @@
 //! comparison is skipped (with a note) without a C compiler, and with the DNN features, whose
 //! decoder integration (DRED decoding in particular) is not in the Rust `opus_demo` yet.
 
+// Float-only: not compiled in fixed-point builds until this unit is converted
+// (docs/FIXED_POINT.md).
+#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

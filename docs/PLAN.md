@@ -14,7 +14,7 @@ library, with conformance vectors, fuzzing, benchmarks and size comparisons.
 | C Codecs | CELT decoder, CELT encoder, SILK FLP encoder + enc_API | same |
 | D Opus API | Opus decoder/encoder, multistream, projection | encode bytes + decode samples bit-exact across configs |
 | E Hardening | RFC vectors + opus_compare, ported libopus test suite, C ABI crate (+ run C tests against it), fuzzing, benches, size report, cross-platform CI | all green |
-| F Optional features | QEXT (done alongside A–D), custom modes, fixed-point build, DNN (deep PLC, DRED, OSCE/BWE) | differential tests vs oracle built with the same options |
+| F Optional features | QEXT (done alongside A–D), custom modes, fixed-point build (layers FX0–FX5, docs/FIXED_POINT.md), DNN (deep PLC, DRED, OSCE/BWE) | differential tests vs oracle built with the same options |
 
 ## Decisions
 
@@ -39,3 +39,7 @@ library, with conformance vectors, fuzzing, benchmarks and size comparisons.
 | D-017 | 2026-09-26 | C ABI: opaque handles are registry-backed (memcpy-safe) Rust objects; variadic `*_ctl` entry points are C glue (`csrc/ctl.c`) jumping via naked-function trampolines into non-variadic Rust exports. | Stable Rust cannot define C-variadic functions; glue keeps the exact `opus.h` ABI. |
 | D-018 | 2026-09-26 | DNN weights are runtime blobs (like upstream `USE_WEIGHTS_FILE`); tests serialize the oracle's compiled-in weights to a blob. `osce` implies `deep-plc` (upstream coupling). | See D-015; keeps the crate small and compile times sane. |
 | D-019 | 2026-09-26 | Cross builds of the C ABI crate use host clang (freestanding) for the ctl glue; only static libraries are verified without platform SDKs. | NDK/Xcode are not available on the build host; the Rust core is pure Rust and needs no C compiler. |
+| D-020 | 2026-09-26 | Fixed point: cargo features `fixed-point` and `fixed-res24` (implies `fixed-point`) on `opusorus`, the oracle and the test/tool crates; **not additive** (replaces float, like upstream), incompatible with the DNN features (upstream configure refuses it: `compile_error!`). Float API kept on. `--all-features` is no longer a valid configuration: `just` uses explicit `float_all` / `fixed_all` feature lists. | Mirrors libopus; a runtime switch would double the code and could not be bit-exact with either build. |
+| D-021 | 2026-09-26 | Fixed-point port is done incrementally: unconverted modules are `#[cfg(not(feature = "fixed-point"))]`-gated (reduced crate), shared code keeps one Rust name per C macro/function with per-build definitions (`arch/{float,fixed}.rs`, `mathops/{float,fixed}.rs`); shims declare `// oracle-build: float|fixed|any`. See docs/FIXED_POINT.md. | Lets FX units proceed in parallel without breaking either build. |
+| D-022 | 2026-09-26 | Fixed macros mirror the *release* `fixed_generic.h` expansion exactly (arguments `impl Into<i32>` with C's casts, C result types, plain arithmetic where C overflow is UB), not `fixed_debug.h`'s narrower types. | Bit-exactness first; explicit `extract16` marks every implicit C narrowing. |
+| D-023 | 2026-09-26 | `OPUS_FAST_INT64` follows the C per-target selection (64-bit forms on x86_64/64-bit/MIPS, 32-bit partial-product forms elsewhere); both forms are tested against C on the host. | `MULT32_32_Q31/P31/Q32` differ between the forms; matching libopus on each target is the contract. |
