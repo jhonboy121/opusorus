@@ -177,7 +177,7 @@ macro_rules! const_unless_fixed_debug {
         $(#[$m])* $v fn $name $($rest)*
     };
 }
-//!
+
 // libopus assertion macros (`celt_assert!`, `celt_sig_assert!`, `silk_assert!`); must precede the
 // modules that use them.
 #[macro_use]
