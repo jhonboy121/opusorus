@@ -4,10 +4,14 @@
 //!    its default CMake `Release` build (`-O3`, intrinsics on, RTCD where the platform uses it,
 //!    hardening on), plus the micro shims in `csrc/bench_shim.c` compiled with the same flags.
 //! 2. **C-scalar** (`libopus_scalar.a`, prefix `scalopus_`): the same sources and flags as
-//!    `crates/opusorus-oracle/build.rs` (float, no intrinsics, `-O2 -ffp-contract=off`,
-//!    hardening), plus the shims. The codec-level scalar benchmarks use the oracle crate
-//!    itself; this identical copy only exists so the shims do not depend on how the linker
-//!    orders the oracle's archive relative to this crate's (with LTO it may come first).
+//!    `crates/opusorus-oracle/build.rs` (no intrinsics, `-O2 -ffp-contract=off`, hardening),
+//!    plus the shims. The codec-level scalar benchmarks use the oracle crate itself; this
+//!    identical copy only exists so the shims do not depend on how the linker orders the
+//!    oracle's archive relative to this crate's (with LTO it may come first).
+//!
+//! With the `fixed-point` feature both are fixed-point builds (CMake `OPUS_FIXED_POINT=ON`; the
+//! oracle's `FIXED_POINT` sources and defines), with `fixed-res24` also `ENABLE_RES24`. On
+//! AArch64 the fixed CMake build needs one workaround (see `build_optimized`).
 //!
 //! Each library and its shim objects are archived together, then every defined global symbol
 //! is renamed `<prefix><name>` with `objcopy --redefine-syms`, so both link next to the
@@ -137,22 +141,52 @@ fn archive_prefixed(out: &Path, name: &str, base: Option<&Path>, objs: &[PathBuf
     println!("cargo:rustc-link-lib=static={name}");
 }
 
-fn build_optimized(root: &Path, out: &Path, csrc: &Path, qext: bool) {
+/// Build options shared by both C variants (cargo features of this crate).
+#[derive(Debug, Clone, Copy)]
+struct Config {
+    qext: bool,
+    fixed: bool,
+    res24: bool,
+}
+
+fn build_optimized(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
     let build = out.join("cmake-build");
     let cmake = tool("CMAKE", "cmake");
-    let mut cfg = Command::new(&cmake);
-    cfg.arg("-S")
+    let mut cmd = Command::new(&cmake);
+    cmd.arg("-S")
         .arg(root)
         .arg("-B")
         .arg(&build)
         .arg("-DCMAKE_BUILD_TYPE=Release")
         .arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
         .arg("-DOPUS_INSTALL_PKG_CONFIG_MODULE=OFF")
-        .arg("-DOPUS_INSTALL_CMAKE_CONFIG_MODULE=OFF");
-    // Upstream CMake has no QEXT option; configure's --enable-qext only defines ENABLE_QEXT.
-    let cflags = if qext { "-DENABLE_QEXT" } else { "" };
-    cfg.arg(format!("-DCMAKE_C_FLAGS={cflags}"));
-    run(&mut cfg);
+        .arg("-DOPUS_INSTALL_CMAKE_CONFIG_MODULE=OFF")
+        .arg(format!(
+            "-DOPUS_FIXED_POINT={}",
+            if cfg.fixed { "ON" } else { "OFF" }
+        ));
+    // Upstream CMake has no QEXT or RES24 option; configure's --enable-qext only defines
+    // ENABLE_QEXT, and ENABLE_RES24 is a plain define too.
+    let mut cflags = Vec::new();
+    if cfg.qext {
+        cflags.push("-DENABLE_QEXT");
+    }
+    if cfg.res24 {
+        cflags.push("-DENABLE_RES24");
+    }
+    // On AArch64, upstream CMake defines the ARMv7 *assembly* switches OPUS_ARM_MAY_HAVE_NEON /
+    // OPUS_ARM_PRESUME_NEON next to the intrinsics ones, but builds no assembly there. The
+    // fixed-point `celt_pitch_xcorr` then resolves to `celt_pitch_xcorr_neon`, which only
+    // exists in the ARMv7 `celt_pitch_xcorr_arm.s`, and the library does not link. autotools
+    // and meson only define the `*_NEON_INTR` switches on AArch64; undo the two assembly
+    // defines the same way (the flags come after CMake's -D options on the command line), so
+    // the build keeps every NEON intrinsics kernel (`xcorr_kernel_neon_fixed`, the SILK NEON
+    // kernels, ...).
+    if cfg.fixed && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
+        cflags.extend(["-UOPUS_ARM_MAY_HAVE_NEON", "-UOPUS_ARM_PRESUME_NEON"]);
+    }
+    cmd.arg(format!("-DCMAKE_C_FLAGS={}", cflags.join(" ")));
+    run(&mut cmd);
     let jobs = tool("NUM_JOBS", "4");
     run(Command::new(&cmake)
         .arg("--build")
@@ -183,11 +217,21 @@ fn build_optimized(root: &Path, out: &Path, csrc: &Path, qext: bool) {
 
 /// Scalar copy: same sources, defines and flags as `crates/opusorus-oracle/build.rs` (without
 /// its test shims and DNN code).
-fn build_scalar(root: &Path, out: &Path, csrc: &Path, qext: bool) {
+fn build_scalar(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
     let mut srcs = mk_sources(root, "celt_sources.mk", "CELT_SOURCES");
     srcs.extend(mk_sources(root, "silk_sources.mk", "SILK_SOURCES"));
     srcs.extend(mk_sources(root, "opus_sources.mk", "OPUS_SOURCES"));
-    srcs.extend(mk_sources(root, "silk_sources.mk", "SILK_SOURCES_FLOAT"));
+    // As the oracle: SILK_SOURCES_FIXED or SILK_SOURCES_FLOAT; OPUS_SOURCES_FLOAT (analysis)
+    // in both, since the float API is on.
+    srcs.extend(mk_sources(
+        root,
+        "silk_sources.mk",
+        if cfg.fixed {
+            "SILK_SOURCES_FIXED"
+        } else {
+            "SILK_SOURCES_FLOAT"
+        },
+    ));
     srcs.extend(mk_sources(root, "opus_sources.mk", "OPUS_SOURCES_FLOAT"));
     srcs.push(csrc.join("bench_shim.c"));
 
@@ -197,7 +241,11 @@ fn build_scalar(root: &Path, out: &Path, csrc: &Path, qext: bool) {
         .include(root.join("celt"))
         .include(root.join("silk"))
         .include(root.join("src"))
-        .include(root.join("silk/float"))
+        .include(root.join(if cfg.fixed {
+            "silk/fixed"
+        } else {
+            "silk/float"
+        }))
         .define("OPUS_BUILD", None)
         .define("VAR_ARRAYS", None)
         .define("HAVE_LRINT", None)
@@ -209,8 +257,14 @@ fn build_scalar(root: &Path, out: &Path, csrc: &Path, qext: bool) {
         .flag_if_supported("-fvisibility=default")
         .warnings(false)
         .cargo_metadata(false);
-    if qext {
+    if cfg.qext {
         b.define("ENABLE_QEXT", None);
+    }
+    if cfg.fixed {
+        b.define("FIXED_POINT", "1");
+    }
+    if cfg.res24 {
+        b.define("ENABLE_RES24", None);
     }
     let objs = b.compile_intermediates();
     archive_prefixed(out, "opus_scalar", None, &objs, "scalopus_");
@@ -224,10 +278,15 @@ fn main() {
         .canonicalize()
         .expect("vendor/libopus exists");
     let csrc = manifest.join("csrc");
-    let qext = std::env::var_os("CARGO_FEATURE_QEXT").is_some();
+    let feature = |f: &str| std::env::var_os(format!("CARGO_FEATURE_{f}")).is_some();
+    let cfg = Config {
+        qext: feature("QEXT"),
+        fixed: feature("FIXED_POINT"),
+        res24: feature("FIXED_RES24"),
+    };
 
-    build_optimized(&root, &out, &csrc, qext);
-    build_scalar(&root, &out, &csrc, qext);
+    build_optimized(&root, &out, &csrc, cfg);
+    build_scalar(&root, &out, &csrc, cfg);
 
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rerun-if-changed=build.rs");

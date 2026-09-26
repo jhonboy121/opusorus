@@ -148,10 +148,10 @@ static int opusorus_ctl_dispatch(void *st, int kind, int request, va_list ap)
       opus_int32 size = va_arg(ap, opus_int32);
       return opusorus_ctl_ptr(st, kind, request, matrix, size);
    }
-   /* (opus_val16 *mask): float in the float build. */
+   /* (celt_glog *mask): float in the float build, Q24 opus_int32 in fixed builds. */
    case OPUSORUS_SET_ENERGY_MASK_REQUEST:
    {
-      float *mask = va_arg(ap, float *);
+      void *mask = va_arg(ap, void *);
       return opusorus_ctl_ptr(st, kind, request, mask, -1);
    }
    /* (opus_int32 stream_id, OpusEncoder ** / OpusDecoder **) */

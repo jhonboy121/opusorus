@@ -12,6 +12,13 @@ links = "opus_opt"
 [features]
 # Builds both C libraries with ENABLE_QEXT.
 qext = []
+# Builds both C libraries as fixed-point libopus: the optimized one with upstream CMake's
+# `OPUS_FIXED_POINT=ON` (NEON/SSE intrinsics and RTCD as in the float build, plus the fixed-only
+# `silk/fixed` NEON kernels), the scalar one with the oracle's fixed configuration.
+fixed-point = []
+# 24-bit `opus_res` (`ENABLE_RES24`, autotools' default for fixed-point; CMake never sets it, so
+# it is passed in `CMAKE_C_FLAGS` like `ENABLE_QEXT`).
+fixed-res24 = ["fixed-point"]
 
 [build-dependencies]
 cc = { version = "1", features = ["parallel"] }

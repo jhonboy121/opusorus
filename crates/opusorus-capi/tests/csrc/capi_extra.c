@@ -2,8 +2,9 @@
  *
  * Covers what upstream's tests only touch indirectly: byte copies of state blocks (clone and
  * move), multistream stream handles, NULL / wrong-type handles, the repacketizer writing over
- * its own input, projection matrices, the DRED API (stubs without ENABLE_DRED), and (with
- * CUSTOM_MODES) a non-48 kHz custom mode. */
+ * its own input, projection matrices, the DRED API (stubs without ENABLE_DRED), the build
+ * configuration (version string, the celt_glog type of OPUS_SET_ENERGY_MASK: float, or Q24
+ * opus_int32 with FIXED_POINT), and (with CUSTOM_MODES) a non-48 kHz custom mode. */
 
 /* Public-API view of the headers (declares opus_custom_*_get_size/init). */
 #undef OPUS_BUILD
@@ -375,8 +376,117 @@ static void test_custom_16k(void)
 }
 #endif
 
+/* The private OPUS_SET_ENERGY_MASK request (celt/celt.h) takes a celt_glog pointer: float in
+   the float build, Q24 opus_int32 in fixed-point builds. */
+#define ENERGY_MASK_REQUEST 10026
+#ifdef FIXED_POINT
+typedef opus_int32 glog_t;
+#define GLOG(x) ((opus_int32)((x)*(1<<24)))
+#else
+typedef float glog_t;
+#define GLOG(x) ((float)(x))
+#endif
+
+/* Encodes 10 mono CELT frames with the given masking curve (NULL: none); returns the sum of
+   the final ranges and packet lengths as a fingerprint. */
+static opus_uint32 masked_encode(const glog_t *mask)
+{
+   int err, k;
+   opus_uint32 fp = 0, rng;
+   opus_int16 pcm[FRAME];
+   unsigned char packet[MAXP];
+   OpusEncoder *enc = opus_encoder_create(FS, 1, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &err);
+   CHECK(err == OPUS_OK && enc != NULL);
+   CHECK(opus_encoder_ctl(enc, OPUS_SET_BITRATE(48000)) == OPUS_OK);
+   CHECK(opus_encoder_ctl(enc, ENERGY_MASK_REQUEST, mask) == OPUS_OK);
+   for (k = 0; k < 10; k++) {
+      int len;
+      sine(pcm, FRAME, 1, k);
+      len = opus_encode(enc, pcm, FRAME, packet, MAXP);
+      CHECK(len > 0);
+      CHECK(opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE(&rng)) == OPUS_OK);
+      fp = fp*31 + rng + (opus_uint32)len;
+   }
+   opus_encoder_destroy(enc);
+   return fp;
+}
+
+/* An invalid frame size fails with OPUS_BAD_ARG in every opus_encode* entry point, but only
+   the one whose input is already opus_res (passed to opus_encode_native unconverted) resets the
+   final range first: opus_encode_float in the float build, opus_encode (16-bit fixed) or
+   opus_encode24 (24-bit fixed); the converting ones return before touching the state. */
+static void test_bad_frame_size_range(void)
+{
+   int err, which;
+   opus_uint32 rng;
+   opus_int16 pcm[FRAME];
+   opus_int32 pcm24[FRAME];
+   float pcmf[FRAME];
+   unsigned char packet[MAXP];
+   OpusEncoder *enc = opus_encoder_create(FS, 1, OPUS_APPLICATION_AUDIO, &err);
+   CHECK(err == OPUS_OK && enc != NULL);
+   memset(pcm24, 0, sizeof(pcm24));
+   memset(pcmf, 0, sizeof(pcmf));
+   for (which = 0; which < 3; which++) {
+      int passthrough, ret;
+      sine(pcm, FRAME, 1, which);
+      CHECK(opus_encode(enc, pcm, FRAME, packet, MAXP) > 0);
+      CHECK(opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE(&rng)) == OPUS_OK && rng != 0);
+      if (which == 0) {
+         ret = opus_encode(enc, pcm, 17, packet, MAXP);
+#if defined(FIXED_POINT) && !defined(ENABLE_RES24)
+         passthrough = 1;
+#else
+         passthrough = 0;
+#endif
+      } else if (which == 1) {
+         ret = opus_encode24(enc, pcm24, 17, packet, MAXP);
+#if defined(FIXED_POINT) && defined(ENABLE_RES24)
+         passthrough = 1;
+#else
+         passthrough = 0;
+#endif
+      } else {
+         ret = opus_encode_float(enc, pcmf, 17, packet, MAXP);
+#ifdef FIXED_POINT
+         passthrough = 0;
+#else
+         passthrough = 1;
+#endif
+      }
+      CHECK(ret == OPUS_BAD_ARG);
+      CHECK(opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE(&rng)) == OPUS_OK);
+      CHECK(passthrough ? rng == 0 : rng != 0);
+   }
+   opus_encoder_destroy(enc);
+}
+
+static void test_build_config(void)
+{
+   int i;
+   test_bad_frame_size_range();
+   glog_t zero[21], high[21];
+   const char *version = opus_get_version_string();
+   CHECK(strncmp(version, "libopus ", 8) == 0);
+#ifdef FIXED_POINT
+   CHECK(strstr(version, "-fixed") != NULL);
+#else
+   CHECK(strstr(version, "-fixed") == NULL);
+#endif
+   for (i = 0; i < 21; i++) {
+      zero[i] = GLOG(0);
+      high[i] = GLOG(i < 10 ? 2.0 : -3.0);
+   }
+   /* A non-trivial curve changes the bitstream (it would be ignored as ~0 if Q24 integers were
+      read as floats); the same curve is deterministic. */
+   CHECK(masked_encode(high) != masked_encode(zero));
+   CHECK(masked_encode(high) == masked_encode(high));
+   CHECK(masked_encode(NULL) == masked_encode(NULL));
+}
+
 int main(void)
 {
+   test_build_config();
    test_state_copies();
    test_bad_handles();
    test_stream_handles();

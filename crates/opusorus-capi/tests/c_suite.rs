@@ -21,12 +21,13 @@
 //! with `scripts/gen_dnn_blob.sh` (which needs `scripts/fetch_dnn_models.sh` first).
 //! `test_opus_dred` (upstream's DRED parser fuzz test) runs with the `dred` feature.
 //!
+//! With `fixed-point` (`fixed-res24`) the library is the fixed-point build and the C programs
+//! are compiled with `-DFIXED_POINT` (`-DENABLE_RES24`), as upstream's `make check` of a
+//! fixed-point configuration.
+//!
 //! The seed of the randomized C tests is fixed (`SEED=42`) unless `OPUSORUS_C_SUITE_SEED` is
 //! set.
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -54,6 +55,13 @@ fn vendor() -> PathBuf {
 fn config() -> (Vec<&'static str>, String) {
     let mut features = vec!["internal-api"];
     let mut name = String::from("base");
+    if cfg!(feature = "fixed-res24") {
+        features.push("fixed-res24");
+        name = String::from("fixed-res24");
+    } else if cfg!(feature = "fixed-point") {
+        features.push("fixed-point");
+        name = String::from("fixed");
+    }
     if cfg!(feature = "qext") {
         features.push("qext");
         name.push_str("-qext");
@@ -177,6 +185,12 @@ fn config_defines() -> Vec<&'static str> {
         "-DHAVE_LRINTF",
         "-DVAR_ARRAYS",
     ];
+    if cfg!(feature = "fixed-point") {
+        d.push("-DFIXED_POINT");
+    }
+    if cfg!(feature = "fixed-res24") {
+        d.push("-DENABLE_RES24");
+    }
     if cfg!(feature = "qext") {
         d.push("-DENABLE_QEXT");
     }

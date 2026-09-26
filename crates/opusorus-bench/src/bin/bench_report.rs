@@ -1,29 +1,27 @@
 //! Prints a markdown table from the Criterion results of `cargo bench -p opusorus-bench`.
 //!
-//! Usage: `bench_report [CRITERION_DIR]` (default: `$CARGO_TARGET_DIR/criterion`, else the
-//! workspace `target/criterion`). Run it through `scripts/bench_report.sh`, which runs the
-//! benchmarks first.
+//! Usage: `bench_report [CRITERION_DIR...]` (default: `$CARGO_TARGET_DIR/criterion`, else the
+//! workspace `target/criterion`). With several directories (snapshots of repeated runs, see
+//! `scripts/bench_report.sh --runs`), each cell is the fastest of the runs' estimates, which
+//! filters out runs slowed down by other load on the machine. Run it through
+//! `scripts/bench_report.sh`, which runs the benchmarks first.
 //!
 //! Columns: time per 20 ms frame (per call for kernels) of each implementation, realtime
 //! factor (20 ms / time; how many times faster than realtime, single core) and the ratios
 //! Rust / C-scalar and Rust / C-optimized (below 1.00 = Rust faster).
+//!
+//! Built with `fixed-point` / `fixed-res24`, it reports the fixed-point benchmark groups
+//! (`fixed_*` / `fixed24_*`) of that build.
 
-#[cfg(not(feature = "fixed-point"))]
 use std::error::Error;
-#[cfg(not(feature = "fixed-point"))]
 use std::io::{self, Write};
-#[cfg(not(feature = "fixed-point"))]
 use std::path::{Path, PathBuf};
 
-#[cfg(not(feature = "fixed-point"))]
 use opus_sys_optimized::{Micro, Variant};
-#[cfg(not(feature = "fixed-point"))]
-use opusorus_bench::{Impl, report_rows};
+use opusorus_bench::{BUILD, Impl, report_rows};
 
-#[cfg(not(feature = "fixed-point"))]
 type BoxResult<T> = Result<T, Box<dyn Error>>;
 
-#[cfg(not(feature = "fixed-point"))]
 /// Point estimate (ns per iteration) Criterion reports: the linear-regression slope when it
 /// was computed, otherwise the mean.
 fn estimate(dir: &Path, group: &str, imp: Impl) -> BoxResult<Option<f64>> {
@@ -40,7 +38,6 @@ fn estimate(dir: &Path, group: &str, imp: Impl) -> BoxResult<Option<f64>> {
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn default_dir() -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR") {
         Some(t) => PathBuf::from(t).join("criterion"),
@@ -48,7 +45,6 @@ fn default_dir() -> PathBuf {
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn fmt_ns(ns: Option<f64>) -> String {
     match ns {
         Some(ns) if ns >= 1e6 => format!("{:.2} ms", ns / 1e6),
@@ -59,7 +55,6 @@ fn fmt_ns(ns: Option<f64>) -> String {
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn fmt_rtf(ns: Option<f64>, per_frame: bool) -> String {
     match ns {
         Some(ns) if per_frame => format!("{:.0}×", 20e6 / ns),
@@ -67,7 +62,6 @@ fn fmt_rtf(ns: Option<f64>, per_frame: bool) -> String {
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn fmt_ratio(a: Option<f64>, b: Option<f64>) -> String {
     match (a, b) {
         (Some(a), Some(b)) => {
@@ -83,7 +77,6 @@ fn fmt_ratio(a: Option<f64>, b: Option<f64>) -> String {
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn cpu_model() -> BoxResult<String> {
     let info = match std::fs::read_to_string("/proc/cpuinfo") {
         Ok(s) => s,
@@ -101,16 +94,31 @@ fn cpu_model() -> BoxResult<String> {
     })
 }
 
-#[cfg(not(feature = "fixed-point"))]
+/// Fastest estimate of `group`/`imp` over the result directories `dirs` (`None` if no
+/// directory has one).
+fn best_estimate(dirs: &[PathBuf], group: &str, imp: Impl) -> BoxResult<Option<f64>> {
+    let mut best: Option<f64> = None;
+    for dir in dirs {
+        if let Some(ns) = estimate(dir, group, imp)? {
+            best = Some(best.map_or(ns, |b| b.min(ns)));
+        }
+    }
+    Ok(best)
+}
+
 fn main() -> BoxResult<()> {
-    let dir = match std::env::args_os().nth(1) {
-        Some(d) => PathBuf::from(d),
-        None => default_dir(),
-    };
+    let mut dirs: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if dirs.is_empty() {
+        dirs.push(default_dir());
+    }
     let out = io::stdout();
     let mut w = out.lock();
 
-    writeln!(w, "## opusorus benchmarks\n")?;
+    if cfg!(feature = "fixed-point") {
+        writeln!(w, "## opusorus benchmarks ({BUILD} build)\n")?;
+    } else {
+        writeln!(w, "## opusorus benchmarks\n")?;
+    }
     writeln!(
         w,
         "- host: {} {}, {}",
@@ -118,25 +126,68 @@ fn main() -> BoxResult<()> {
         std::env::consts::OS,
         cpu_model()?
     )?;
+    let arch = Micro::new(Variant::Optimized).arch();
+    if cfg!(feature = "fixed-point") {
+        let (res, api, defines) = if cfg!(feature = "fixed-res24") {
+            (
+                "24-bit opus_res",
+                "opus_encode24/opus_decode24",
+                "FIXED_POINT ENABLE_RES24",
+            )
+        } else {
+            ("16-bit opus_res", "opus_encode/opus_decode", "FIXED_POINT")
+        };
+        writeln!(
+            w,
+            "- c_scalar: opusorus-oracle (libopus 1.6.1 {defines}, -O2 -ffp-contract=off, no \
+             intrinsics)"
+        )?;
+        writeln!(
+            w,
+            "- c_opt: libopus 1.6.1, CMake Release with OPUS_FIXED_POINT=ON{} (-O3, NEON/SSE \
+             intrinsics, RTCD arch index {arch})",
+            if cfg!(feature = "fixed-res24") {
+                " + -DENABLE_RES24"
+            } else {
+                ""
+            }
+        )?;
+        writeln!(
+            w,
+            "- rust: opusorus feature {BUILD} ({res}), release profile (lto=fat, \
+             codegen-units=1), feature qext: {}",
+            cfg!(feature = "qext")
+        )?;
+        writeln!(
+            w,
+            "- codec I/O: {api} (the build's native PCM API); kernels on i32 kiss_fft_scalar"
+        )?;
+    } else {
+        writeln!(
+            w,
+            "- c_scalar: opusorus-oracle (libopus 1.6.1, -O2 -ffp-contract=off, no intrinsics)"
+        )?;
+        writeln!(
+            w,
+            "- c_opt: libopus 1.6.1, default CMake Release (-O3, intrinsics, RTCD arch index \
+             {arch})"
+        )?;
+        writeln!(
+            w,
+            "- rust: opusorus, release profile (lto=fat, codegen-units=1), feature qext: {}",
+            cfg!(feature = "qext")
+        )?;
+    }
     writeln!(
         w,
-        "- c_scalar: opusorus-oracle (libopus 1.6.1, -O2 -ffp-contract=off, no intrinsics)"
-    )?;
-    writeln!(
-        w,
-        "- c_opt: libopus 1.6.1, default CMake Release (-O3, intrinsics, RTCD arch index {})",
-        Micro::new(Variant::Optimized).arch()
-    )?;
-    writeln!(
-        w,
-        "- rust: opusorus, release profile (lto=fat, codegen-units=1), feature qext: {}",
-        cfg!(feature = "qext")
-    )?;
-    writeln!(
-        w,
-        "- time = Criterion slope estimate per iteration (one 20 ms frame; kernels: one call); \
+        "- time = Criterion slope estimate per iteration{} (one 20 ms frame; kernels: one call); \
          RTF = 20 ms / time (single core); ratio < 1 means Rust is faster; **bold** = Rust \
-         more than 10 % slower\n"
+         more than 10 % slower\n",
+        if dirs.len() > 1 {
+            format!(" (fastest of {} runs)", dirs.len())
+        } else {
+            String::new()
+        }
     )?;
     writeln!(
         w,
@@ -146,9 +197,9 @@ fn main() -> BoxResult<()> {
     writeln!(w, "|---|---:|---:|---:|---:|---:|---:|---:|---:|")?;
     let mut missing = 0usize;
     for row in report_rows() {
-        let r = estimate(&dir, &row.group, Impl::Rust)?;
-        let s = estimate(&dir, &row.group, Impl::CScalar)?;
-        let o = estimate(&dir, &row.group, Impl::COpt)?;
+        let r = best_estimate(&dirs, &row.group, Impl::Rust)?;
+        let s = best_estimate(&dirs, &row.group, Impl::CScalar)?;
+        let o = best_estimate(&dirs, &row.group, Impl::COpt)?;
         if r.is_none() && s.is_none() && o.is_none() {
             missing += 1;
             continue;
@@ -171,18 +222,8 @@ fn main() -> BoxResult<()> {
         writeln!(
             w,
             "\n({missing} benchmark group(s) have no results in {}; run the benches first)",
-            dir.display()
+            dirs[0].display()
         )?;
     }
     Ok(())
-}
-
-/// Fixed-point builds of `opusorus` have no codec API yet (docs/FIXED_POINT.md).
-#[cfg(feature = "fixed-point")]
-fn main() -> std::io::Result<()> {
-    use std::io::Write;
-    writeln!(
-        std::io::stderr(),
-        "not available in fixed-point builds yet (docs/FIXED_POINT.md)"
-    )
 }

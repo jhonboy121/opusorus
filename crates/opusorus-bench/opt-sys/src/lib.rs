@@ -15,12 +15,23 @@
 //!
 //! The micro entry points ([`Micro`], [`Resampler`]) expose the MDCT, FFT, range coder and
 //! SILK resampler of either build with allocation-free calls.
+//!
+//! With the `fixed-point` / `fixed-res24` features both builds are fixed-point libopus (see
+//! `build.rs`); the MDCT/FFT data is then [`KissFftScalar`] = `i32`. The codec wrappers expose
+//! the 16-bit, 24-bit and float entry points in every configuration, as libopus does.
 
 use core::ffi::{c_int, c_uint, c_void};
 use core::ptr::NonNull;
 
 /// C error code (`OPUS_BAD_ARG`, ...) as returned by libopus.
 pub type CResult<T> = Result<T, i32>;
+
+/// `kiss_fft_scalar` of the C builds: MDCT/FFT sample type of the micro shims.
+#[cfg(not(feature = "fixed-point"))]
+pub type KissFftScalar = f32;
+/// `kiss_fft_scalar` of the C builds: MDCT/FFT sample type of the micro shims.
+#[cfg(feature = "fixed-point")]
+pub type KissFftScalar = i32;
 
 /// Opaque C `OpusEncoder`.
 #[repr(C)]
@@ -63,6 +74,20 @@ unsafe extern "C" {
         data: *mut u8,
         max_data_bytes: i32,
     ) -> i32;
+    fn optopus_opus_encode(
+        st: *mut OpusEncoder,
+        pcm: *const i16,
+        frame_size: c_int,
+        data: *mut u8,
+        max_data_bytes: i32,
+    ) -> i32;
+    fn optopus_opus_encode24(
+        st: *mut OpusEncoder,
+        pcm: *const i32,
+        frame_size: c_int,
+        data: *mut u8,
+        max_data_bytes: i32,
+    ) -> i32;
 
     fn optopus_opus_decoder_create(fs: i32, channels: c_int, error: *mut c_int)
     -> *mut OpusDecoder;
@@ -73,6 +98,22 @@ unsafe extern "C" {
         data: *const u8,
         len: i32,
         pcm: *mut f32,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+    fn optopus_opus_decode(
+        st: *mut OpusDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+    fn optopus_opus_decode24(
+        st: *mut OpusDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i32,
         frame_size: c_int,
         decode_fec: c_int,
     ) -> c_int;
@@ -96,6 +137,20 @@ unsafe extern "C" {
         data: *mut u8,
         max_data_bytes: i32,
     ) -> c_int;
+    fn optopus_opus_multistream_encode(
+        st: *mut OpusMsEncoder,
+        pcm: *const i16,
+        frame_size: c_int,
+        data: *mut u8,
+        max_data_bytes: i32,
+    ) -> c_int;
+    fn optopus_opus_multistream_encode24(
+        st: *mut OpusMsEncoder,
+        pcm: *const i32,
+        frame_size: c_int,
+        data: *mut u8,
+        max_data_bytes: i32,
+    ) -> c_int;
 
     fn optopus_opus_multistream_decoder_create(
         fs: i32,
@@ -114,6 +169,71 @@ unsafe extern "C" {
         frame_size: c_int,
         decode_fec: c_int,
     ) -> c_int;
+    fn optopus_opus_multistream_decode(
+        st: *mut OpusMsDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+    fn optopus_opus_multistream_decode24(
+        st: *mut OpusMsDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i32,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+}
+
+/// Defines one `encode*` method per `(name, sample type, C function)` over the wrapper's `ptr`
+/// and `channels` fields.
+macro_rules! encode_methods {
+    ($($(#[$m:meta])* $name:ident: $t:ty => $cfn:ident;)*) => {$(
+        $(#[$m])*
+        ///
+        /// # Errors
+        /// The C error code.
+        ///
+        /// # Panics
+        /// If `pcm` holds fewer than `frame_size * channels` samples.
+        pub fn $name(&mut self, pcm: &[$t], frame_size: usize, out: &mut [u8]) -> CResult<usize> {
+            assert!(pcm.len() >= frame_size * self.channels);
+            let (fs, max) = (len_i32(frame_size)?, len_i32(out.len())?);
+            // SAFETY: buffers are valid for the lengths passed.
+            check(unsafe { $cfn(self.ptr.as_ptr(), pcm.as_ptr(), fs, out.as_mut_ptr(), max) })
+        }
+    )*};
+}
+
+/// Defines one `decode*` method per `(name, sample type, C function)` over the wrapper's `ptr`
+/// and `channels` fields; `data = None` requests PLC.
+macro_rules! decode_methods {
+    ($($(#[$m:meta])* $name:ident: $t:ty => $cfn:ident;)*) => {$(
+        $(#[$m])*
+        ///
+        /// # Errors
+        /// The C error code.
+        ///
+        /// # Panics
+        /// If `pcm` holds fewer than `frame_size * channels` samples.
+        pub fn $name(
+            &mut self,
+            data: Option<&[u8]>,
+            pcm: &mut [$t],
+            frame_size: usize,
+            fec: bool,
+        ) -> CResult<usize> {
+            assert!(pcm.len() >= frame_size * self.channels);
+            let (d, l) = data_ptr(data)?;
+            let fs = len_i32(frame_size)?;
+            // SAFETY: buffers valid for the lengths passed; null data means PLC.
+            check(unsafe {
+                $cfn(self.ptr.as_ptr(), d, l, pcm.as_mut_ptr(), fs, c_int::from(fec))
+            })
+        }
+    )*};
 }
 
 /// Declares the micro shim entry points once per variant (`scalopus_bench_*` /
@@ -123,25 +243,30 @@ macro_rules! shim_decls {
      $mdct_bwd:ident, $fft_nfft:ident, $fft:ident, $ec:ident, $rs_new:ident, $rs_run:ident,
      $rs_free:ident) => {
         mod $m {
-            use super::{c_int, c_uint, c_void};
+            use super::{KissFftScalar, c_int, c_uint, c_void};
             unsafe extern "C" {
                 pub(crate) fn $arch() -> c_int;
                 pub(crate) fn $mdct_n() -> c_int;
                 pub(crate) fn $mdct_overlap() -> c_int;
                 pub(crate) fn $mdct_fwd(
-                    input: *const f32,
-                    out: *mut f32,
+                    input: *const KissFftScalar,
+                    out: *mut KissFftScalar,
                     shift: c_int,
                     arch: c_int,
                 );
                 pub(crate) fn $mdct_bwd(
-                    input: *const f32,
-                    out: *mut f32,
+                    input: *const KissFftScalar,
+                    out: *mut KissFftScalar,
                     shift: c_int,
                     arch: c_int,
                 );
                 pub(crate) fn $fft_nfft(idx: c_int) -> c_int;
-                pub(crate) fn $fft(idx: c_int, fin: *const f32, fout: *mut f32, arch: c_int);
+                pub(crate) fn $fft(
+                    idx: c_int,
+                    fin: *const KissFftScalar,
+                    fout: *mut KissFftScalar,
+                    arch: c_int,
+                );
                 pub(crate) fn $ec(
                     ops: *const c_uint,
                     nops: c_int,
@@ -210,10 +335,10 @@ struct Shim {
     arch: unsafe extern "C" fn() -> c_int,
     mdct_n: unsafe extern "C" fn() -> c_int,
     mdct_overlap: unsafe extern "C" fn() -> c_int,
-    mdct_forward: unsafe extern "C" fn(*const f32, *mut f32, c_int, c_int),
-    mdct_backward: unsafe extern "C" fn(*const f32, *mut f32, c_int, c_int),
+    mdct_forward: unsafe extern "C" fn(*const KissFftScalar, *mut KissFftScalar, c_int, c_int),
+    mdct_backward: unsafe extern "C" fn(*const KissFftScalar, *mut KissFftScalar, c_int, c_int),
     fft_nfft: unsafe extern "C" fn(c_int) -> c_int,
-    fft: unsafe extern "C" fn(c_int, *const f32, *mut f32, c_int),
+    fft: unsafe extern "C" fn(c_int, *const KissFftScalar, *mut KissFftScalar, c_int),
     ec_roundtrip: unsafe extern "C" fn(*const c_uint, c_int, *mut u8, c_int) -> c_uint,
     resampler_new: unsafe extern "C" fn(c_int, c_int, c_int) -> *mut c_void,
     resampler_run: unsafe extern "C" fn(*mut c_void, *mut i16, *const i16, c_int),
@@ -286,7 +411,7 @@ impl Micro {
     /// # Panics
     /// If `input` is shorter than `N/2 + overlap` or `out` shorter than `N/2`
     /// (`N = 1920 >> shift`), or `shift > 3`.
-    pub fn mdct_forward(&self, input: &[f32], out: &mut [f32], shift: usize) {
+    pub fn mdct_forward(&self, input: &[KissFftScalar], out: &mut [KissFftScalar], shift: usize) {
         assert!(shift <= 3);
         let n2 = (self.mdct_n >> shift) / 2;
         assert!(input.len() >= n2 + self.overlap && out.len() >= n2);
@@ -300,7 +425,7 @@ impl Micro {
     ///
     /// # Panics
     /// If `input` is shorter than `N/2` or `out` shorter than `N/2 + overlap`, or `shift > 3`.
-    pub fn mdct_backward(&self, input: &[f32], out: &mut [f32], shift: usize) {
+    pub fn mdct_backward(&self, input: &[KissFftScalar], out: &mut [KissFftScalar], shift: usize) {
         assert!(shift <= 3);
         let n2 = (self.mdct_n >> shift) / 2;
         assert!(input.len() >= n2 && out.len() >= n2 + self.overlap);
@@ -324,8 +449,8 @@ impl Micro {
     /// Scaled forward FFT (`opus_fft`) with FFT state `idx`; interleaved complex buffers.
     ///
     /// # Panics
-    /// If a buffer holds fewer than `2 * nfft` floats or `idx > 3`.
-    pub fn fft(&self, idx: usize, fin: &[f32], fout: &mut [f32]) {
+    /// If a buffer holds fewer than `2 * nfft` scalars or `idx > 3`.
+    pub fn fft(&self, idx: usize, fin: &[KissFftScalar], fout: &mut [KissFftScalar]) {
         let n = self.fft_nfft(idx);
         assert!(fin.len() >= 2 * n && fout.len() >= 2 * n);
         // SAFETY: both buffers hold nfft complex values as checked.
@@ -453,25 +578,13 @@ impl Encoder {
         Ok(v)
     }
 
-    /// `opus_encode_float`.
-    ///
-    /// # Errors
-    /// The C error code.
-    ///
-    /// # Panics
-    /// If `pcm` holds fewer than `frame_size * channels` samples.
-    pub fn encode_float(
-        &mut self,
-        pcm: &[f32],
-        frame_size: usize,
-        out: &mut [u8],
-    ) -> CResult<usize> {
-        assert!(pcm.len() >= frame_size * self.channels);
-        let (fs, max) = (len_i32(frame_size)?, len_i32(out.len())?);
-        // SAFETY: buffers are valid for the lengths passed.
-        check(unsafe {
-            optopus_opus_encode_float(self.ptr.as_ptr(), pcm.as_ptr(), fs, out.as_mut_ptr(), max)
-        })
+    encode_methods! {
+        /// `opus_encode_float`.
+        encode_float: f32 => optopus_opus_encode_float;
+        /// `opus_encode` (16-bit PCM).
+        encode: i16 => optopus_opus_encode;
+        /// `opus_encode24` (24-bit PCM in `i32`).
+        encode24: i32 => optopus_opus_encode24;
     }
 }
 
@@ -520,34 +633,13 @@ impl Decoder {
         Ok(v)
     }
 
-    /// `opus_decode_float`; `data = None` requests PLC. Returns samples per channel.
-    ///
-    /// # Errors
-    /// The C error code.
-    ///
-    /// # Panics
-    /// If `pcm` holds fewer than `frame_size * channels` samples.
-    pub fn decode_float(
-        &mut self,
-        data: Option<&[u8]>,
-        pcm: &mut [f32],
-        frame_size: usize,
-        fec: bool,
-    ) -> CResult<usize> {
-        assert!(pcm.len() >= frame_size * self.channels);
-        let (d, l) = data_ptr(data)?;
-        let fs = len_i32(frame_size)?;
-        // SAFETY: buffers valid for the lengths passed; null data means PLC.
-        check(unsafe {
-            optopus_opus_decode_float(
-                self.ptr.as_ptr(),
-                d,
-                l,
-                pcm.as_mut_ptr(),
-                fs,
-                c_int::from(fec),
-            )
-        })
+    decode_methods! {
+        /// `opus_decode_float`. Returns samples per channel.
+        decode_float: f32 => optopus_opus_decode_float;
+        /// `opus_decode` (16-bit PCM). Returns samples per channel.
+        decode: i16 => optopus_opus_decode;
+        /// `opus_decode24` (24-bit PCM in `i32`). Returns samples per channel.
+        decode24: i32 => optopus_opus_decode24;
     }
 }
 
@@ -617,31 +709,13 @@ impl MsEncoder {
             .map(|_| ())
     }
 
-    /// `opus_multistream_encode_float`.
-    ///
-    /// # Errors
-    /// The C error code.
-    ///
-    /// # Panics
-    /// If `pcm` holds fewer than `frame_size * channels` samples.
-    pub fn encode_float(
-        &mut self,
-        pcm: &[f32],
-        frame_size: usize,
-        out: &mut [u8],
-    ) -> CResult<usize> {
-        assert!(pcm.len() >= frame_size * self.channels);
-        let (fs, max) = (len_i32(frame_size)?, len_i32(out.len())?);
-        // SAFETY: buffers are valid for the lengths passed.
-        check(unsafe {
-            optopus_opus_multistream_encode_float(
-                self.ptr.as_ptr(),
-                pcm.as_ptr(),
-                fs,
-                out.as_mut_ptr(),
-                max,
-            )
-        })
+    encode_methods! {
+        /// `opus_multistream_encode_float`.
+        encode_float: f32 => optopus_opus_multistream_encode_float;
+        /// `opus_multistream_encode` (16-bit PCM).
+        encode: i16 => optopus_opus_multistream_encode;
+        /// `opus_multistream_encode24` (24-bit PCM in `i32`).
+        encode24: i32 => optopus_opus_multistream_encode24;
     }
 }
 
@@ -698,34 +772,13 @@ impl MsDecoder {
         })
     }
 
-    /// `opus_multistream_decode_float`.
-    ///
-    /// # Errors
-    /// The C error code.
-    ///
-    /// # Panics
-    /// If `pcm` holds fewer than `frame_size * channels` samples.
-    pub fn decode_float(
-        &mut self,
-        data: Option<&[u8]>,
-        pcm: &mut [f32],
-        frame_size: usize,
-        fec: bool,
-    ) -> CResult<usize> {
-        assert!(pcm.len() >= frame_size * self.channels);
-        let (d, l) = data_ptr(data)?;
-        let fs = len_i32(frame_size)?;
-        // SAFETY: buffers valid for the lengths passed.
-        check(unsafe {
-            optopus_opus_multistream_decode_float(
-                self.ptr.as_ptr(),
-                d,
-                l,
-                pcm.as_mut_ptr(),
-                fs,
-                c_int::from(fec),
-            )
-        })
+    decode_methods! {
+        /// `opus_multistream_decode_float`. Returns samples per channel.
+        decode_float: f32 => optopus_opus_multistream_decode_float;
+        /// `opus_multistream_decode` (16-bit PCM). Returns samples per channel.
+        decode: i16 => optopus_opus_multistream_decode;
+        /// `opus_multistream_decode24` (24-bit PCM in `i32`). Returns samples per channel.
+        decode24: i32 => optopus_opus_multistream_decode24;
     }
 }
 

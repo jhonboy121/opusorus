@@ -26,6 +26,15 @@ use crate::util::{
     slice, slice_mut,
 };
 
+/// `celt_glog`, the element type of the `OPUS_SET_ENERGY_MASK` array: `float` in the float
+/// build.
+#[cfg(not(feature = "fixed-point"))]
+type EnergyMask = f32;
+/// `celt_glog`, the element type of the `OPUS_SET_ENERGY_MASK` array: a Q24 `opus_int32` in
+/// fixed-point builds.
+#[cfg(feature = "fixed-point")]
+type EnergyMask = i32;
+
 /// The API kind passed by `csrc/ctl.c`.
 fn api_kind(kind: c_int) -> CResult<Kind> {
     Kind::from_ctl(kind).ok_or(OPUS_BAD_ARG)
@@ -178,7 +187,8 @@ unsafe fn blob<'a>(data: *const c_void, len: i32) -> CResult<&'a [u8]> {
 
 /// `opus_*_ctl` for requests taking a buffer: `OPUS_SET_DNN_BLOB` (`ptr`, `len`),
 /// `OPUS_PROJECTION_GET_DEMIXING_MATRIX` (`ptr`, `len`) and the private
-/// `OPUS_SET_ENERGY_MASK` (`ptr` to `21 * channels` floats, `len` unused).
+/// `OPUS_SET_ENERGY_MASK` (`ptr` to `21 * channels` `celt_glog` values: floats, or Q24
+/// `opus_int32` in fixed-point builds; `len` unused).
 ///
 /// # Safety
 /// `st` is a state of the given kind (or NULL); `ptr` is valid for the access the request
@@ -202,7 +212,7 @@ pub unsafe extern "C" fn opusorus_ctl_ptr(
                 } else {
                     let n = 21 * enc.channels() as usize;
                     // SAFETY: caller contract (C reads `21 * channels` values).
-                    let mask = unsafe { slice(ptr.cast::<f32>(), n) }?;
+                    let mask = unsafe { slice(ptr.cast::<EnergyMask>(), n) }?;
                     enc.set_energy_mask(Some(mask));
                 }
                 Ok(OPUS_OK)

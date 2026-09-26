@@ -76,13 +76,21 @@ pub(crate) unsafe fn packet_out<'a>(data: *mut u8, max_data_bytes: i32) -> CResu
     unsafe { slice_mut(data, n) }
 }
 
-/// Validated input length of `opus_encode*` for this encoder.
+/// Validated input length of `opus_encode*` for this encoder: `frame_size`, or 0 for a frame
+/// size the encoder rejects. The call then goes to the Rust encoder with no input, so it fails
+/// with `OPUS_BAD_ARG` exactly where C does: the entry points that pass their input to
+/// `opus_encode_native` unconverted (`opus_encode_float` in the float build, `opus_encode` /
+/// `opus_encode24` in 16/24-bit fixed-point builds) reset the final range first, the
+/// converting ones return before touching the state.
 fn encoder_frames(enc: &Encoder, frame_size: c_int) -> CResult<c_int> {
     let app = enc.ctl_get(OPUS_GET_APPLICATION_REQUEST).map_err(code)?;
     let vd = enc
         .ctl_get(OPUS_GET_EXPERT_FRAME_DURATION_REQUEST)
         .map_err(code)?;
-    checked_frames(app, frame_size, vd, enc.sample_rate())
+    if frame_size_select(app, frame_size, vd, enc.sample_rate()) <= 0 {
+        return Ok(0);
+    }
+    Ok(frame_size)
 }
 
 /// Gets the size of an `OpusEncoder` structure (`opus_encoder_get_size`): 0 for an invalid

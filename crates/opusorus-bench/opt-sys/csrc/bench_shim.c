@@ -9,6 +9,7 @@
  *
  * The shims only touch struct fields whose layout does not depend on the build configuration
  * (CELTMode up to `mdct`, mdct_lookup, kiss_fft_state, ec_ctx, silk_resampler_state_struct).
+ * MDCT/FFT data is `kiss_fft_scalar`: float, or opus_int32 in fixed-point builds.
  */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -36,17 +37,17 @@ int bench_mdct_overlap(void) { return bench_mode48()->overlap; }
 
 /* Forward MDCT of the 48 kHz static mode: `in` holds N/2 + overlap samples, `out` N/2
    (N = 1920 >> shift), stride 1, the mode window. */
-void bench_mdct_forward(const float *in, float *out, int shift, int arch) {
+void bench_mdct_forward(const kiss_fft_scalar *in, kiss_fft_scalar *out, int shift, int arch) {
   const CELTMode *m = bench_mode48();
-  clt_mdct_forward(&m->mdct, (float *)in, out, m->window, m->overlap, shift, 1, arch);
+  clt_mdct_forward(&m->mdct, (kiss_fft_scalar *)in, out, m->window, m->overlap, shift, 1, arch);
   (void)arch;
 }
 
 /* Backward MDCT of the 48 kHz static mode: `in` holds N/2 coefficients, `out` N/2 + overlap
    samples (the first overlap/2 are read as the previous overlap). */
-void bench_mdct_backward(const float *in, float *out, int shift, int arch) {
+void bench_mdct_backward(const kiss_fft_scalar *in, kiss_fft_scalar *out, int shift, int arch) {
   const CELTMode *m = bench_mode48();
-  clt_mdct_backward(&m->mdct, (float *)in, out, m->window, m->overlap, shift, 1, arch);
+  clt_mdct_backward(&m->mdct, (kiss_fft_scalar *)in, out, m->window, m->overlap, shift, 1, arch);
   (void)arch;
 }
 
@@ -54,7 +55,7 @@ void bench_mdct_backward(const float *in, float *out, int shift, int arch) {
 int bench_fft_nfft(int idx) { return bench_mode48()->mdct.kfft[idx]->nfft; }
 
 /* Scaled forward FFT (opus_fft) with kfft[idx]; `fin`/`fout` interleaved complex. */
-void bench_fft(int idx, const float *fin, float *fout, int arch) {
+void bench_fft(int idx, const kiss_fft_scalar *fin, kiss_fft_scalar *fout, int arch) {
   const CELTMode *m = bench_mode48();
   opus_fft(m->mdct.kfft[idx], (const kiss_fft_cpx *)fin, (kiss_fft_cpx *)fout, arch);
   (void)arch;

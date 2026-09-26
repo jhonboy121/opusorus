@@ -18,7 +18,21 @@ Features: `qext` (Opus HD, 96 kHz), `custom-modes` (`opus_custom.h`), `deep-plc`
 and DRED decoders, like libopus `USE_WEIGHTS_FILE`), `dnn-weights-embedded` (compiled-in
 weights: `OPUSORUS_DNN_BLOB=/abs/path/weights_blob.bin`, see `scripts/gen_dnn_blob.sh`),
 `internal-api` (also exports the libopus-internal functions used by upstream's
-`test_opus_extensions.c`).
+`test_opus_extensions.c`), `fixed-point` / `fixed-res24` (see below).
+
+## Fixed-point builds
+
+`--features fixed-point` (`fixed-res24`) backs the library with the fixed-point build of
+`opusorus` and makes it behave like libopus configured with `--enable-fixed-point`
+(`ENABLE_RES24`): same exports and headers; `opus_encode`/`opus_decode` (`opus_encode24`/
+`opus_decode24` with `fixed-res24`) are the native `opus_res` paths, the other PCM entry
+points convert (`opus_decode_float` is `RES2FLOAT` without soft clipping, `opus_encode_float`
+is `FLOAT2RES`); `OPUS_SET_ENERGY_MASK` takes Q24 `opus_int32` values (`celt_glog`);
+`opus_get_version_string` contains `-fixed`; the float-only helper `opus_pcm_soft_clip` stays
+available as in C. The DNN features cannot be combined with fixed-point (as upstream), so the
+DRED API answers `OPUS_UNIMPLEMENTED`. C code using the private headers or
+`opus_multistream`/`opus_projection` internals must be compiled with `-DFIXED_POINT`
+(`-DENABLE_RES24`), as for a fixed-point libopus.
 
 ## How it works
 
@@ -52,8 +66,9 @@ weights: `OPUSORUS_DNN_BLOB=/abs/path/weights_blob.bin`, see `scripts/gen_dnn_bl
 
 ## Tests
 
-`cargo test -p opusorus-capi [--features qext,custom-modes]` builds the library (nested
-`cargo build`) and runs upstream's C programs against it: `test_opus_api`, `test_opus_decode`,
+`cargo test -p opusorus-capi [--features qext,custom-modes]` (and with `fixed-point` or
+`fixed-res24`, which compile the C programs with `-DFIXED_POINT` / `-DENABLE_RES24`) builds the
+library (nested `cargo build`) and runs upstream's C programs against it: `test_opus_api`, `test_opus_decode`,
 `test_opus_encode` (+ `opus_encode_regressions.c`), `test_opus_padding`, `test_opus_projection`,
 `test_opus_extensions`, `test_opus_custom`, plus `tests/csrc/capi_extra.c`, a static-link run,
 and the RFC 8251 vectors through upstream `opus_demo` / `opus_compare` at 8/12/16/24/48 kHz,

@@ -4,6 +4,10 @@
 //! Each kernel call corresponds to the work done once per 20 ms frame per channel in the codec
 //! (one 1920-point MDCT, one 480-point FFT, one frame of resampling), except the range coder,
 //! whose op list ([`ec_ops`]) is a fixed mix of about one high-rate frame's worth of symbols.
+//!
+//! In fixed-point builds the MDCT/FFT data is `i32` (`kiss_fft_scalar`, `celt_sig` scale
+//! `SIG_SHIFT` = 12: full scale ±2^27); the range coder and resampler are the same code in
+//! every build.
 
 use opus_sys_optimized::{self as copt, Micro, Variant};
 use opusorus::celt::entdec::EcDec;
@@ -12,11 +16,27 @@ use opusorus::celt::kiss_fft::opus_fft;
 use opusorus::celt::laplace::{ec_laplace_decode, ec_laplace_encode};
 use opusorus::celt::mdct::{clt_mdct_backward, clt_mdct_forward};
 use opusorus::celt::modes::opus_custom_mode_create;
-use opusorus::celt::static_modes::{CeltMode, KissFftCpx};
+use opusorus::celt::static_modes::{CeltMode, KissFftCpx, KissFftScalar};
 use opusorus::silk::resampler::{SilkResamplerState, silk_resampler};
 use opusorus_conformance::{Rng, signals};
 
-use crate::{BenchError, Impl, Result, Runner};
+use crate::{BenchError, GROUP_PREFIX, Impl, Result, Runner};
+
+/// Converts a float kernel sample (nominal range ±1) to `kiss_fft_scalar`: unchanged in the
+/// float build.
+#[cfg(not(feature = "fixed-point"))]
+#[must_use]
+pub const fn to_kfft(v: f32) -> KissFftScalar {
+    v
+}
+
+/// Converts a float kernel sample (nominal range ±1) to `kiss_fft_scalar`: `celt_sig` Q27
+/// (`SIG_SHIFT` 12 on top of 16-bit full scale) in fixed-point builds.
+#[cfg(feature = "fixed-point")]
+#[must_use]
+pub fn to_kfft(v: f32) -> KissFftScalar {
+    (f64::from(v) * f64::from(1u32 << 27)).round() as i32
+}
 
 /// The 48 kHz static CELT mode.
 ///
@@ -129,16 +149,17 @@ impl MicroBench {
         Self::Resample48To16,
     ];
 
-    /// Criterion group name.
+    /// Criterion group name (with the build's [`GROUP_PREFIX`]).
     #[must_use]
-    pub const fn group(self) -> &'static str {
-        match self {
+    pub fn group(self) -> String {
+        let name = match self {
             Self::MdctForward => "micro_mdct_forward_1920",
             Self::MdctBackward => "micro_mdct_backward_1920",
             Self::Fft480 => "micro_fft_480",
             Self::RangeCoder => "micro_range_coder_1000ops",
             Self::Resample48To16 => "micro_resampler_48k_to_16k",
-        }
+        };
+        format!("{GROUP_PREFIX}{name}")
     }
 
     /// Report label.
@@ -200,10 +221,13 @@ impl MicroBench {
     }
 }
 
-/// Input for the MDCT/FFT kernels: 8 blocks of music-like samples to cycle through.
-fn kernel_input(len: usize) -> Vec<Vec<f32>> {
+/// Input for the MDCT/FFT kernels: 8 blocks of music-like samples, times `scale`, to cycle
+/// through.
+fn kernel_input(len: usize, scale: f32) -> Vec<Vec<KissFftScalar>> {
     let x = signals::music_like(len * 8, 1, 48000, 0x3D17);
-    x.chunks_exact(len).map(<[f32]>::to_vec).collect()
+    x.chunks_exact(len)
+        .map(|b| b.iter().map(|&v| to_kfft(v * scale)).collect())
+        .collect()
 }
 
 fn mdct_runner(kind: MicroBench, variant: Option<Variant>) -> Result<Runner> {
@@ -215,11 +239,8 @@ fn mdct_runner(kind: MicroBench, variant: Option<Variant>) -> Result<Runner> {
     // in, N/2 + overlap samples out (scaled like real MDCT coefficients).
     let in_len = if forward { n2 + overlap } else { n2 };
     let scale = if forward { 1.0 } else { 0.05 };
-    let inputs: Vec<Vec<f32>> = kernel_input(in_len)
-        .into_iter()
-        .map(|b| b.into_iter().map(|v| v * scale).collect())
-        .collect();
-    let mut out = vec![0f32; n2 + overlap];
+    let inputs = kernel_input(in_len, scale);
+    let mut out = vec![KissFftScalar::default(); n2 + overlap];
     let mut i = 0;
     Ok(match variant {
         None => Box::new(move || {
@@ -254,7 +275,7 @@ fn fft_runner(variant: Option<Variant>) -> Result<Runner> {
     let mode = mode48()?;
     let st = &*mode.mdct.kfft[0];
     let nfft = st.nfft as usize;
-    let inputs = kernel_input(2 * nfft);
+    let inputs = kernel_input(2 * nfft, 1.0);
     let mut i = 0;
     Ok(match variant {
         None => {
@@ -279,7 +300,7 @@ fn fft_runner(variant: Option<Variant>) -> Result<Runner> {
         }
         Some(v) => {
             let m = Micro::new(v);
-            let mut out = vec![0f32; 2 * nfft];
+            let mut out = vec![KissFftScalar::default(); 2 * nfft];
             Box::new(move || {
                 let x = core::hint::black_box(&inputs[i]);
                 i = (i + 1) % inputs.len();

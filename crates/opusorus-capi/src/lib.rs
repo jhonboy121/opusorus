@@ -35,14 +35,19 @@
 //!   `OPUS_SET_DNN_BLOB` (`USE_WEIGHTS_FILE`), or compiled in with `dnn-weights-embedded`
 //!   (see [`dred`]). `OPUS_SET_DNN_BLOB` is accepted in both cases (libopus with compiled-in
 //!   weights answers `OPUS_UNIMPLEMENTED`).
-//! * `opus_get_version_string` reports `"libopus 1.6.1 (opusorus)"`.
+//! * `opus_get_version_string` reports `"libopus 1.6.1 (opusorus)"` (`"libopus
+//!   1.6.1-fixed (opusorus)"` in fixed-point builds).
 //!
 //! ## Fixed-point
 //!
-//! With the `fixed-point` / `fixed-res24` features (a fixed-point build of `opusorus`, which is
-//! still being ported, see `docs/FIXED_POINT.md`) the library is currently **empty**.
-
-#![cfg(not(feature = "fixed-point"))]
+//! With the `fixed-point` / `fixed-res24` features the library is backed by the fixed-point
+//! build of `opusorus` (docs/FIXED_POINT.md) and behaves like libopus configured with
+//! `--enable-fixed-point` (`--enable-fixed-res24` / `ENABLE_RES24`): the same exports, with
+//! the fixed-point `opus_res` semantics (`opus_encode`/`opus_decode` are the native 16-bit
+//! paths, or `opus_encode24`/`opus_decode24` with `fixed-res24`; the float API converts with
+//! `FLOAT2RES`/`RES2FLOAT`, and `opus_decode_float` does not soft-clip), `OPUS_SET_ENERGY_MASK`
+//! takes Q24 `opus_int32` values, and the DRED API answers `OPUS_UNIMPLEMENTED` (the DNN
+//! features cannot be combined with fixed-point, as upstream).
 
 pub mod ctl;
 pub mod decoder;
@@ -84,8 +89,13 @@ pub const extern "C" fn opus_strerror(error: c_int) -> *const c_char {
 }
 
 /// The library version string (`opus_get_version_string`). Starts with `"libopus "` like
-/// upstream, which applications use to detect the library.
+/// upstream, which applications use to detect the library, and contains `"-fixed"` in
+/// fixed-point builds (upstream: "applications may rely on the presence of this substring").
 #[unsafe(no_mangle)]
 pub const extern "C" fn opus_get_version_string() -> *const c_char {
-    c"libopus 1.6.1 (opusorus)".as_ptr()
+    #[cfg(feature = "fixed-point")]
+    let s = c"libopus 1.6.1-fixed (opusorus)";
+    #[cfg(not(feature = "fixed-point"))]
+    let s = c"libopus 1.6.1 (opusorus)";
+    s.as_ptr()
 }

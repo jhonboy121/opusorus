@@ -14,10 +14,16 @@
 //! Every codec workload works on 20 ms frames of deterministic synthetic audio
 //! (`opusorus_conformance::signals`) so one benchmark iteration is one 20 ms frame.
 //!
-//! With the `fixed-point` features (the in-progress fixed-point build of `opusorus`,
-//! docs/FIXED_POINT.md) this crate is empty and the benchmarks are no-ops.
-
-#![cfg(not(feature = "fixed-point"))]
+//! ## Fixed-point builds
+//!
+//! With the `fixed-point` (`fixed-res24`) feature all three implementations are fixed-point
+//! libopus builds: opusorus with `fixed-point`, the oracle built `FIXED_POINT`, and the
+//! optimized C with upstream CMake's `OPUS_FIXED_POINT=ON` (+ `ENABLE_RES24`). The codec
+//! workloads then use the build's native PCM API ([`Sample`]: `opus_encode`/`opus_decode` on
+//! `i16`, or `opus_encode24`/`opus_decode24` on 24-bit `i32` samples with `fixed-res24`)
+//! instead of the float API, the MDCT/FFT kernels run on `i32` data, and every Criterion group
+//! name carries the [`GROUP_PREFIX`] of the build so float and fixed results can live side by
+//! side in `target/criterion`.
 
 use core::fmt;
 
@@ -26,6 +32,80 @@ use opusorus_conformance::signals;
 use opusorus_oracle::{api as cscalar, sys};
 
 pub mod micro;
+
+/// PCM sample type of the codec workloads: the native I/O of the build (`opus_res`).
+#[cfg(not(feature = "fixed-point"))]
+pub type Sample = f32;
+/// PCM sample type of the codec workloads: the native I/O of the build (`opus_res`).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type Sample = i16;
+/// PCM sample type of the codec workloads: the native I/O of the build (`opus_res`).
+#[cfg(feature = "fixed-res24")]
+pub type Sample = i32;
+
+/// Name of the codec build being benchmarked (`float`, `fixed-point` or `fixed-res24`).
+pub const BUILD: &str = if cfg!(feature = "fixed-res24") {
+    "fixed-res24"
+} else if cfg!(feature = "fixed-point") {
+    "fixed-point"
+} else {
+    "float"
+};
+
+/// Prefix of every Criterion group name in this build (empty for float, so the float results
+/// keep their names).
+pub const GROUP_PREFIX: &str = if cfg!(feature = "fixed-res24") {
+    "fixed24_"
+} else if cfg!(feature = "fixed-point") {
+    "fixed_"
+} else {
+    ""
+};
+
+/// Converts float PCM (nominal range ±1) to [`Sample`]s: unchanged in the float build,
+/// rounded and clipped to 16 bits (`fixed-point`) or 24 bits (`fixed-res24`).
+#[must_use]
+pub fn to_samples(x: &[f32]) -> Vec<Sample> {
+    #[cfg(not(feature = "fixed-point"))]
+    {
+        x.to_vec()
+    }
+    #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+    {
+        signals::to_i16(x)
+    }
+    #[cfg(feature = "fixed-res24")]
+    {
+        x.iter()
+            .map(|&v| (v * 8_388_608.0).round().clamp(-8_388_608.0, 8_388_607.0) as i32)
+            .collect()
+    }
+}
+
+/// Calls the native-PCM entry point of the build on an encoder or decoder of any
+/// implementation: `obj.float_fn | int16_fn | int24_fn (args)`.
+#[cfg(not(feature = "fixed-point"))]
+macro_rules! native {
+    ($obj:ident . $float:ident | $i16:ident | $i24:ident ($($a:expr),*)) => {
+        $obj.$float($($a),*)
+    };
+}
+/// Calls the native-PCM entry point of the build on an encoder or decoder of any
+/// implementation: `obj.float_fn | int16_fn | int24_fn (args)`.
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+macro_rules! native {
+    ($obj:ident . $float:ident | $i16:ident | $i24:ident ($($a:expr),*)) => {
+        $obj.$i16($($a),*)
+    };
+}
+/// Calls the native-PCM entry point of the build on an encoder or decoder of any
+/// implementation: `obj.float_fn | int16_fn | int24_fn (args)`.
+#[cfg(feature = "fixed-res24")]
+macro_rules! native {
+    ($obj:ident . $float:ident | $i16:ident | $i24:ident ($($a:expr),*)) => {
+        $obj.$i24($($a),*)
+    };
+}
 
 /// Frame duration of every codec workload, in milliseconds.
 pub const FRAME_MS: usize = 20;
@@ -170,6 +250,12 @@ impl CodecConfig {
             Signal::Speech => signals::speech_like(n, ch, fs, 0x5EEC_4000),
         }
     }
+
+    /// [`CodecConfig::input`] as [`Sample`]s.
+    #[must_use]
+    pub fn samples(&self) -> Vec<Sample> {
+        to_samples(&self.input())
+    }
 }
 
 /// The single-stream configurations benchmarked (the QEXT one only with feature `qext`).
@@ -297,20 +383,18 @@ impl AnyEncoder {
         }
     }
 
-    /// Encodes one frame of float PCM; returns the packet length.
+    /// Encodes one frame of PCM with the build's native API (`opus_encode_float`,
+    /// `opus_encode` or `opus_encode24`); returns the packet length.
     ///
     /// # Errors
     /// If encoding fails.
-    pub fn encode(&mut self, pcm: &[f32], frame_size: usize, out: &mut [u8]) -> Result<usize> {
+    pub fn encode(&mut self, pcm: &[Sample], frame_size: usize, out: &mut [u8]) -> Result<usize> {
         match self {
-            Self::Rust(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::Rust(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| rust_err("encode", x)),
-            Self::CScalar(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::CScalar(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| c_err("c_scalar", "encode", x)),
-            Self::COpt(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::COpt(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| c_err("c_opt", "encode", x)),
         }
     }
@@ -346,20 +430,26 @@ impl AnyDecoder {
         })
     }
 
-    /// Decodes one packet to float PCM; returns samples per channel.
+    /// Decodes one packet to PCM with the build's native API (`opus_decode_float`,
+    /// `opus_decode` or `opus_decode24`); returns samples per channel.
     ///
     /// # Errors
     /// If decoding fails.
-    pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32], frame_size: usize) -> Result<usize> {
+    pub fn decode(
+        &mut self,
+        packet: &[u8],
+        pcm: &mut [Sample],
+        frame_size: usize,
+    ) -> Result<usize> {
+        let p = Some(packet);
         match self {
-            Self::Rust(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
+            Self::Rust(d) => native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
                 .map_err(|x| rust_err("decode", x)),
-            Self::CScalar(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
-                .map_err(|x| c_err("c_scalar", "decode", x)),
-            Self::COpt(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
+            Self::CScalar(d) => {
+                native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
+                    .map_err(|x| c_err("c_scalar", "decode", x))
+            }
+            Self::COpt(d) => native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
                 .map_err(|x| c_err("c_opt", "decode", x)),
         }
     }
@@ -371,7 +461,7 @@ impl AnyDecoder {
 /// If encoding fails.
 pub fn encode_all(imp: Impl, cfg: &CodecConfig, complexity: i32) -> Result<Vec<Vec<u8>>> {
     let mut enc = AnyEncoder::new(imp, cfg, complexity)?;
-    let input = cfg.input();
+    let input = cfg.samples();
     let n = cfg.frame_size() * cfg.channels as usize;
     let mut out = vec![0u8; MAX_PACKET];
     input
@@ -429,6 +519,12 @@ impl SurroundConfig {
             self.fs as u32,
             0x51,
         )
+    }
+
+    /// [`SurroundConfig::input`] as [`Sample`]s.
+    #[must_use]
+    pub fn samples(&self) -> Vec<Sample> {
+        to_samples(&self.input())
     }
 }
 
@@ -497,20 +593,17 @@ impl AnyMsEncoder {
         }
     }
 
-    /// Encodes one frame; returns the packet length.
+    /// Encodes one frame with the build's native PCM API; returns the packet length.
     ///
     /// # Errors
     /// If encoding fails.
-    pub fn encode(&mut self, pcm: &[f32], frame_size: usize, out: &mut [u8]) -> Result<usize> {
+    pub fn encode(&mut self, pcm: &[Sample], frame_size: usize, out: &mut [u8]) -> Result<usize> {
         match self {
-            Self::Rust(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::Rust(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| rust_err("ms encode", x)),
-            Self::CScalar(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::CScalar(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| c_err("c_scalar", "ms encode", x)),
-            Self::COpt(e) => e
-                .encode_float(pcm, frame_size, out)
+            Self::COpt(e) => native!(e.encode_float | encode | encode24(pcm, frame_size, out))
                 .map_err(|x| c_err("c_opt", "ms encode", x)),
         }
     }
@@ -550,20 +643,25 @@ impl AnyMsDecoder {
         })
     }
 
-    /// Decodes one packet; returns samples per channel.
+    /// Decodes one packet with the build's native PCM API; returns samples per channel.
     ///
     /// # Errors
     /// If decoding fails.
-    pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32], frame_size: usize) -> Result<usize> {
+    pub fn decode(
+        &mut self,
+        packet: &[u8],
+        pcm: &mut [Sample],
+        frame_size: usize,
+    ) -> Result<usize> {
+        let p = Some(packet);
         match self {
-            Self::Rust(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
+            Self::Rust(d) => native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
                 .map_err(|x| rust_err("ms decode", x)),
-            Self::CScalar(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
-                .map_err(|x| c_err("c_scalar", "ms decode", x)),
-            Self::COpt(d) => d
-                .decode_float(Some(packet), pcm, frame_size, false)
+            Self::CScalar(d) => {
+                native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
+                    .map_err(|x| c_err("c_scalar", "ms decode", x))
+            }
+            Self::COpt(d) => native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
                 .map_err(|x| c_err("c_opt", "ms decode", x)),
         }
     }
@@ -580,7 +678,7 @@ pub fn surround_encode_all(
     complexity: i32,
 ) -> Result<(Layout, Vec<Vec<u8>>)> {
     let mut enc = AnyMsEncoder::new(imp, cfg, complexity)?;
-    let input = cfg.input();
+    let input = cfg.samples();
     let n = cfg.frame_size() * cfg.channels as usize;
     let mut out = vec![0u8; MAX_PACKET * 4];
     let packets = input
@@ -616,7 +714,7 @@ pub fn report_rows() -> Vec<ReportRow> {
         })
         .collect();
     rows.extend(micro::MicroBench::ALL.iter().map(|m| ReportRow {
-        group: m.group().to_owned(),
+        group: m.group(),
         label: m.label().to_owned(),
         per_frame: m.per_frame(),
     }));
@@ -676,14 +774,16 @@ impl CodecBench {
         v
     }
 
-    /// Criterion group name, e.g. `decode_celt_48k_stereo_128k`, `encode_c10_...`.
+    /// Criterion group name, e.g. `decode_celt_48k_stereo_128k`, `encode_c10_...` (with the
+    /// build's [`GROUP_PREFIX`]).
     #[must_use]
     pub fn group(&self) -> String {
+        let p = GROUP_PREFIX;
         match self {
-            Self::Decode(c) => format!("decode_{}", c.id),
-            Self::Encode(c, cx) => format!("encode_c{cx}_{}", c.id),
-            Self::SurroundDecode => format!("decode_{}", SURROUND.id),
-            Self::SurroundEncode(cx) => format!("encode_c{cx}_{}", SURROUND.id),
+            Self::Decode(c) => format!("{p}decode_{}", c.id),
+            Self::Encode(c, cx) => format!("{p}encode_c{cx}_{}", c.id),
+            Self::SurroundDecode => format!("{p}decode_{}", SURROUND.id),
+            Self::SurroundEncode(cx) => format!("{p}encode_c{cx}_{}", SURROUND.id),
         }
     }
 
@@ -708,7 +808,7 @@ impl CodecBench {
                 let packets = decode_packets(&cfg)?;
                 let mut dec = AnyDecoder::new(imp, cfg.fs, cfg.channels)?;
                 let fsz = cfg.frame_size();
-                let mut pcm = vec![0f32; fsz * cfg.channels as usize];
+                let mut pcm: Vec<Sample> = vec![Sample::default(); fsz * cfg.channels as usize];
                 let mut i = 0;
                 Ok(Box::new(move || {
                     let p = &packets[i];
@@ -719,7 +819,7 @@ impl CodecBench {
                 }))
             }
             Self::Encode(cfg, cx) => {
-                let input = cfg.input();
+                let input = cfg.samples();
                 let mut enc = AnyEncoder::new(imp, &cfg, cx)?;
                 let fsz = cfg.frame_size();
                 let n = fsz * cfg.channels as usize;
@@ -737,7 +837,8 @@ impl CodecBench {
                 let (layout, packets) = surround_encode_all(Impl::Rust, &SURROUND, 10)?;
                 let mut dec = AnyMsDecoder::new(imp, &SURROUND, &layout)?;
                 let fsz = SURROUND.frame_size();
-                let mut pcm = vec![0f32; fsz * SURROUND.channels as usize];
+                let mut pcm: Vec<Sample> =
+                    vec![Sample::default(); fsz * SURROUND.channels as usize];
                 let mut i = 0;
                 Ok(Box::new(move || {
                     let p = &packets[i];
@@ -748,7 +849,7 @@ impl CodecBench {
                 }))
             }
             Self::SurroundEncode(cx) => {
-                let input = SURROUND.input();
+                let input = SURROUND.samples();
                 let mut enc = AnyMsEncoder::new(imp, &SURROUND, cx)?;
                 let fsz = SURROUND.frame_size();
                 let n = fsz * SURROUND.channels as usize;
