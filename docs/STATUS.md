@@ -5,9 +5,9 @@ _Last updated: 2026-09-26 (after FX5)_
 ## Summary
 The complete float codec is ported and verified bit-exact against libopus 1.6.1: CELT, SILK, hybrid,
 Opus encoder/decoder, multistream, projection (ambisonics), repacketizer, extensions, analysis,
-QEXT (Opus HD, 96 kHz) and custom modes. DNN modules (deep PLC/FARGAN, DRED, OSCE/BWE) are ported
-and bit-exact standalone; wiring them into the codec is in progress. The RFC 8251 and Opus HD
-conformance vectors decode bit-identically to C and pass opus_compare/qext_compare.
+QEXT (Opus HD, 96 kHz), custom modes and the DNN features (deep PLC/FARGAN, DRED, OSCE/BWE). The
+RFC 8251 and Opus HD conformance vectors decode bit-identically to C and pass
+opus_compare/qext_compare. Remaining: phase G (the last optional upstream build switches, PLAN D-026).
 
 The fixed-point build (`fixed-point`, `fixed-res24`, libopus `--enable-fixed-point`) is complete:
 the whole codec and the tools, bit-exact with a fixed-point libopus 1.6.1 in 16- and 24-bit
@@ -26,14 +26,14 @@ resolution, with and without QEXT and custom modes; its decoder passes the RFC 8
 | Fixed-point build (`fixed-point`, `fixed-res24`, × `qext`, `custom-modes`) | ✅ bit-exact vs a fixed-point libopus oracle: all differential suites, libopus test-suite port (host + wasmtime), opus_demo vs the fixed C opus_demo, RFC 8251 vectors pass opus_compare (48 kHz quality 97.15/98.68 % 16-bit, 97.36/98.88 % 24-bit), Opus HD vectors pass qext_compare with `fixed-res24` |
 | Debug-build overflow hardening (public API) | ✅ C-UB overflows reachable from the API wrap like C (stereo LFE `stereo_itheta`; res24 decoder gain `MULT32_32_Q16`; CELT `alloc_trim_analysis`); public-API sweep 101 200 cases × 6 builds vs C and 40 000 Rust-only cases × 6 builds under wasmtime, 0 panics |
 | Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |
-| Fuzzing | ✅ 11 cargo-fuzz targets (differential vs C + invariants), ~7.5M execs default+QEXT, 0 crashes/divergences |
-| Benchmarks | ✅ see below (Rust ≈ scalar C; SILK decode 1.39×) |
-| Shared library size | ✅ measured (Rust 773–1029 KiB vs C 323–578 KiB) |
-| C ABI (`libopusorus` .so/.a, opus.h compatible) | ✅ upstream C test suite passes |
+| Fuzzing | ✅ 13 cargo-fuzz targets (differential vs C incl. DNN + Opus Custom, invariants): ~7.5M execs float/QEXT, ~11M execs fixed-point/res24; 1 port bug found+fixed (debug-assert in custom 96 kHz QEXT mode); upstream C bugs in docs/UPSTREAM_ISSUES.md |
+| Benchmarks | ✅ Rust float 0.70–0.90× scalar C / 0.88–1.10× NEON C; fixed 0.68–0.94× / 0.89–1.10× |
+| Shared library size | measured (information only: Rust-ecosystem use, PLAN D-025) |
+| C ABI verification harness (`libopusorus`) | ✅ upstream C test suite passes, float + fixed-point (6 configs) |
 | opus_demo port | ✅ byte-identical to C over 102–133 invocations (float and fixed-point C opus_demo) |
 | Cross-platform build (wasm32 ×2, Android ×3, iOS ×3, linux x86_64/aarch64, thumbv7em no_std) | ✅ |
 | wasm32-wasip1 tests under wasmtime | ✅ |
-| clippy `-D warnings`, rustfmt | ✅ |
+| clippy `-D warnings`, rustfmt, rustdoc `-D warnings` | ✅ |
 
 ## Environment
 Host: aarch64 Linux, rustc 1.98.1, clang 21 / gcc (oracle via `cc`).
@@ -96,7 +96,7 @@ loaded, a DNN build's decoder is 59 KB / 73 KB (48 kHz). Remaining gap without D
 `quant_all_bands` scratch (≈12 KB, C stack) and the 20 ms `out` buffer of the int16 API.
 
 
-### Fixed-point build
+## Benchmarks (fixed-point build)
 
 `scripts/bench_report.sh --qext --fixed` / `--fixed-res24` (Rust fixed vs the fixed C oracle
 (scalar) vs upstream CMake `OPUS_FIXED_POINT=ON` with NEON). Rust output is bit-exact with the
