@@ -1,6 +1,6 @@
 # Internal API notes
 
-Collected from each unit's port report: signatures and conventions later units must use, plus deviations from C. Source of truth is the code; this is a map.
+Collected from each unit's port report at the time it was merged: signatures and conventions later units used, plus deviations from C. Entries are historical snapshots ("not ported yet"/"TODO" notes inside them were resolved by later units, see docs/TRACKER.md); the code is the source of truth.
 
 ## `celt_pitch_lpc`
 

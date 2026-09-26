@@ -884,7 +884,7 @@ pub fn silk_init_encoder(ps_enc: &mut SilkEncoderStateFxx) -> i32 {
     // Initialize Silk VAD
     ret += silk_vad_init(&mut ps_enc.s_cmn.s_vad);
 
-    // DNN: ENABLE_DRED (init_encoder.c only includes dred_encoder.h) not ported yet.
+    // DNN: ENABLE_DRED only adds an include of dred_encoder.h to init_encoder.c (nothing to port).
     ret
 }
 

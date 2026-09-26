@@ -106,8 +106,9 @@ pub struct SilkDecControlStruct {
     pub prev_pitch_lag: i32,
     /// I: enable Deep PLC.
     pub enable_deep_plc: i32,
-    // DNN: ENABLE_OSCE (osce_method) / ENABLE_OSCE_BWE (enable_osce_bwe, osce_extended_mode,
-    // prev_osce_extended_mode) not ported yet.
+    // DNN: the ENABLE_OSCE (osce_method) / ENABLE_OSCE_BWE (enable_osce_bwe, osce_extended_mode,
+    // prev_osce_extended_mode) controls live in `crate::silk::decoder::SilkOsceControl`
+    // (feature `osce`).
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -506,7 +507,8 @@ impl Default for SilkEncoderState {
     }
 }
 
-// DNN: ENABLE_OSCE (silk_OSCE_struct, silk_OSCE_BWE_struct) not ported yet.
+// DNN: ENABLE_OSCE (silk_OSCE_struct, silk_OSCE_BWE_struct) are `crate::dnn::osce` types held by
+// `crate::silk::decoder::SilkDecoder` (feature `osce`), next to these per-channel states.
 
 /// `silk_PLC_struct`: struct for packet loss concealment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -567,8 +569,9 @@ impl Default for SilkCngStruct {
 /// `silk_decoder_state`: decoder state.
 #[derive(Debug, Clone)]
 pub struct SilkDecoderState {
-    // DNN: ENABLE_OSCE (osce) / ENABLE_OSCE_BWE (osce_bwe) not ported yet. In C these fields
-    // precede `SILK_DECODER_STATE_RESET_START` (= `prev_gain_Q16`) and survive `reset()`.
+    // DNN: ENABLE_OSCE (osce) / ENABLE_OSCE_BWE (osce_bwe): held per channel by
+    // `crate::silk::decoder::SilkDecoder` (feature `osce`). In C these fields precede
+    // `SILK_DECODER_STATE_RESET_START` (= `prev_gain_Q16`) and survive `reset()`.
     pub prev_gain_q16: i32,
     pub exc_q14: [i32; MFL],
     pub s_lpc_q14_buf: [i32; MLPC],

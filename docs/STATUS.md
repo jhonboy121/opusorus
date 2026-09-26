@@ -1,13 +1,14 @@
 # Status
 
-_Last updated: 2026-09-26 (after FX5)_
+_Last updated: 2026-09-26 (after phase G: all features)_
 
 ## Summary
 The complete float codec is ported and verified bit-exact against libopus 1.6.1: CELT, SILK, hybrid,
 Opus encoder/decoder, multistream, projection (ambisonics), repacketizer, extensions, analysis,
 QEXT (Opus HD, 96 kHz), custom modes and the DNN features (deep PLC/FARGAN, DRED, OSCE/BWE). The
 RFC 8251 and Opus HD conformance vectors decode bit-identically to C and pass
-opus_compare/qext_compare. Remaining: phase G (the last optional upstream build switches, PLAN D-026).
+opus_compare/qext_compare. Every user-selectable upstream build option is available as a cargo
+feature (phase G, PLAN D-026..D-030); see docs/FEATURES.md.
 
 The fixed-point build (`fixed-point`, `fixed-res24`, libopus `--enable-fixed-point`) is complete:
 the whole codec and the tools, bit-exact with a fixed-point libopus 1.6.1 in 16- and 24-bit
