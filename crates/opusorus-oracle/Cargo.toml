@@ -18,7 +18,7 @@ custom-modes = []
 # scripts/fetch_dnn_models.sh.
 deep-plc = []
 dred = ["deep-plc"]
-osce = []
+osce = ["deep-plc"]
 
 [build-dependencies]
 cc = "1"

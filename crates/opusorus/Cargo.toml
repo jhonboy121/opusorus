@@ -25,7 +25,7 @@ deep-plc = []
 # Deep REDundancy (libopus `--enable-dred`); implies deep PLC as upstream does.
 dred = ["deep-plc"]
 # SILK speech enhancement + bandwidth extension (libopus `--enable-osce`).
-osce = []
+osce = ["deep-plc"]
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

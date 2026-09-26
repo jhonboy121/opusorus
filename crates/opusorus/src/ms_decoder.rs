@@ -297,10 +297,6 @@ impl MsDecoder {
         let fs = self.fs;
         frame_size = imin(frame_size, fs / 25 * 3);
         let nb_channels = self.layout.nb_channels as usize;
-        // Rust-only guard: C would write past the caller's buffer.
-        if pcm.len() < frame_size as usize * nb_channels {
-            return Err(Error::BadArg);
-        }
         let Self {
             layout,
             decoders,
@@ -317,11 +313,22 @@ impl MsDecoder {
         if !do_plc && (data.len() as i64) < 2 * layout.nb_streams as i64 - 1 {
             return Err(Error::InvalidPacket);
         }
+        // Samples per channel C will write: the packet duration when decoding a packet normally,
+        // otherwise (PLC / FEC) the full frame_size.
+        let mut out_samples = frame_size;
         if !do_plc {
             let ret = opus_multistream_packet_validate(data, layout.nb_streams, fs)?;
             if ret > frame_size {
                 return Err(Error::BufferTooSmall);
             }
+            if decode_fec == 0 {
+                out_samples = ret;
+            }
+        }
+        // Rust-only guard (checked after validation, like the output size C actually writes):
+        // C would write past the caller's buffer.
+        if pcm.len() < out_samples as usize * nb_channels {
+            return Err(Error::BadArg);
         }
         for (s, dec) in decoders.iter_mut().enumerate() {
             let s = s as i32;

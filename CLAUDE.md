@@ -6,7 +6,7 @@ C libopus is the **oracle**: every ported component must be verified against it.
 ## Hard rules
 - **Git commits: plain messages. NO `Co-Authored-By`, no Claude/session trailers.**
 - Edition 2024. `unsafe_code = "forbid"` in every crate except `opusorus-oracle` (test-only FFI) and
-  `opusorus-capi` (C ABI shim); unsafe there must be minimal and each block commented `// SAFETY:`.
+  `opusorus-capi` (C ABI shim) and `crates/opusorus-bench/opt-sys` (benchmark FFI to optimized libopus); unsafe there must be minimal and each block commented `// SAFETY:`.
 - No error swallowing: never `unwrap_or(..)`, `unwrap_or_default()`, `unwrap_or_else(..)`, `.ok()` to
   discard errors, or `let _ =` on a `Result`. Propagate with `?` / typed `Error`.
 - `unwrap()`/`expect()` only with `#[expect(clippy::unwrap_used/expect_used, reason = "...")]` or an
