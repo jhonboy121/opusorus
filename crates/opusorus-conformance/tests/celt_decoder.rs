@@ -1503,12 +1503,20 @@ fn qext_streams() {
     cfg.fs = 96000;
     cfg.qext = true;
     let pkts = gen_packets(&cfg, 20, 5);
-    assert!(pkts.iter().all(|p| p.1.is_some()));
+    // With `fuzzing` the C encoder makes random decisions, so some frames carry no QEXT payload;
+    // those are decoded without one (both sides get the same input either way).
+    if cfg!(feature = "fuzzing") {
+        assert!(pkts.iter().any(|p| p.1.is_some()));
+    } else {
+        assert!(pkts.iter().all(|p| p.1.is_some()));
+    }
     let mut rng = Rng::new(3);
     let mut p = Pair::new(96000, 2);
     for (i, (m, e)) in pkts.iter().enumerate() {
-        let mut e = e.clone().unwrap();
-        if i % 2 == 1 {
+        let mut e = e.clone();
+        if let Some(e) = e.as_mut()
+            && i % 2 == 1
+        {
             let l = rng.range_i32(0, e.len() as i32) as usize;
             e.truncate(l);
             rng.fill_bytes(&mut e[l / 2..]);
@@ -1518,7 +1526,7 @@ fn qext_streams() {
             m.len() as i32,
             1920,
             false,
-            Some(&e),
+            e.as_deref(),
             &mut rng,
             "qext corrupt",
         );
