@@ -1623,6 +1623,26 @@ impl MsEncoder {
         Ok(&mut self.encoders[stream_id as usize])
     }
 
+    /// Loads the DRED encoder models into every stream encoder ([`Encoder::set_dnn_blob`]).
+    ///
+    /// Rust extension: C `opus_multistream_encoder_ctl` does not forward `OPUS_SET_DNN_BLOB`
+    /// or `OPUS_SET_DRED_DURATION` (per-stream DRED goes through
+    /// `OPUS_MULTISTREAM_GET_ENCODER_STATE`, i.e. [`MsEncoder::encoder_state`]). Every stream
+    /// is attempted.
+    ///
+    /// # Errors
+    /// [`Error::BadArg`] if the models fail to load in any stream.
+    #[cfg(feature = "dred")]
+    pub fn set_dnn_blob(&mut self, data: &[u8]) -> Result<()> {
+        let mut ret = Ok(());
+        for e in &mut self.encoders {
+            if let Err(err) = e.set_dnn_blob(data) {
+                ret = Err(err);
+            }
+        }
+        ret
+    }
+
     /// `OPUS_RESET_STATE`: resets every stream encoder and the surround analysis memories.
     pub fn reset(&mut self) {
         if self.mapping_type == MappingType::Surround {

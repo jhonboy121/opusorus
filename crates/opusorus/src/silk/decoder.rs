@@ -4,9 +4,18 @@
 //! silk/decode_indices.c, silk/decode_parameters.c and silk/stereo_MS_to_LR.c (the decoder
 //! declarations of silk/API.h and silk/main.h).
 //!
-//! DNN: ENABLE_DEEP_PLC (`LPCNetPLCState`), ENABLE_OSCE (`OSCEModel`, `osce_enhance_frame`,
-//! `osce_reset`) and ENABLE_OSCE_BWE not ported yet: every function behaves as the C code
-//! compiled without them.
+//! DNN (features `deep-plc` / `osce`, C `ENABLE_DEEP_PLC` / `ENABLE_OSCE` + `ENABLE_OSCE_BWE`):
+//! * [`SilkDecoder::silk_decode_dnn`] is `silk_Decode` with the C `lpcnet` argument (the Opus
+//!   decoder's LPCNet PLC state, used by the SILK PLC of channel 0) and the OSCE fields of
+//!   `silk_DecControlStruct` (`SilkOsceControl`; `silk/structs.rs` keeps the base struct).
+//!   [`SilkDecoder::silk_decode`] is the same call with C `lpcnet == NULL` and zeroed OSCE
+//!   control fields.
+//! * The OSCE model (`silk_decoder.osce_model`) and the per-channel `silk_decoder_state.osce` /
+//!   `osce_bwe` states live in [`SilkDecoder`] (`osce_model`, `osce`, `osce_bwe`) next to
+//!   `channel_state`; `silk_init_decoder` / `silk_reset_decoder` of a channel through the super
+//!   struct reset them as C does. The OSCE model is not compiled in: [`SilkDecoder::init`]
+//!   leaves it unloaded (upstream `USE_WEIGHTS_FILE`) until
+//!   [`SilkDecoder::load_osce_models`] binds a weight blob.
 
 use crate::celt::arch::{OpusRes, int16tores};
 use crate::celt::entdec::EcDec;
@@ -49,6 +58,17 @@ use crate::silk::tables::{
     SILK_UNIFORM4_ICDF, SILK_UNIFORM6_ICDF, SILK_UNIFORM8_ICDF,
 };
 
+#[cfg(feature = "deep-plc")]
+use crate::dnn::lpcnet_plc::LpcnetPlcState;
+#[cfg(feature = "osce")]
+use crate::dnn::osce::{
+    OSCE_DEFAULT_METHOD, OSCE_MODE_HYBRID, OSCE_MODE_SILK_BBWE, OSCE_MODE_SILK_ONLY, OsceModel,
+    SilkOsceBweStruct, SilkOsceStruct, osce_bwe, osce_bwe_reset, osce_enhance_frame,
+    osce_load_models, osce_reset,
+};
+#[cfg(feature = "osce")]
+use crate::dnn::osce_features::{OsceDecInfo, osce_bwe_cross_fade_10ms};
+
 const MFL: usize = MAX_FRAME_LENGTH as usize;
 const MSFL: usize = MAX_SUB_FRAME_LENGTH as usize;
 const MLPC: usize = MAX_LPC_ORDER as usize;
@@ -78,7 +98,8 @@ pub fn silk_reset_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
     // Reset PLC state
     silk_plc_reset(ps_dec);
 
-    // DNN: ENABLE_OSCE (osce_reset) not ported yet
+    // ENABLE_OSCE: `osce_reset(&psDec->osce, OSCE_DEFAULT_METHOD)` is done by the owner of the
+    // OSCE state ([`SilkDecoder`]).
 
     0
 }
@@ -178,6 +199,10 @@ pub fn silk_decoder_set_fs(ps_dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz
 
 /// Port of silk/decode_frame.c:silk_decode_frame: decodes one frame (or conceals it) into
 /// `p_out` (`frame_length` samples) and writes the frame length to `p_n`. Returns 0.
+///
+/// DNN: `lpcnet` is the C `ENABLE_DEEP_PLC` argument (`None` = `NULL`), `osce` the
+/// `ENABLE_OSCE` model and this channel's enhancer state.
+#[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
 pub fn silk_decode_frame(
     ps_dec: &mut SilkDecoderState,
     ps_range_dec: &mut EcDec<'_>,
@@ -185,6 +210,8 @@ pub fn silk_decode_frame(
     p_n: &mut i32,
     lost_flag: i32,
     cond_coding: i32,
+    #[cfg(feature = "deep-plc")] lpcnet: Option<&mut LpcnetPlcState>,
+    #[cfg(feature = "osce")] osce: (&OsceModel, &mut SilkOsceStruct),
 ) -> i32 {
     let mut ps_dec_ctrl = SilkDecoderControl::default();
     let ret = 0;
@@ -202,7 +229,8 @@ pub fn silk_decode_frame(
     {
         // `(L + SHELL_CODEC_FRAME_LENGTH - 1) & ~(SHELL_CODEC_FRAME_LENGTH - 1)` <= MAX_FRAME_LENGTH
         let mut pulses = [0i16; MFL];
-        // DNN: ENABLE_OSCE (ec_start = ec_tell) not ported yet
+        #[cfg(feature = "osce")]
+        let ec_start = ps_range_dec.tell();
 
         // Decode quantization indices of side info
         let frame_index = ps_dec.n_frames_decoded;
@@ -226,10 +254,23 @@ pub fn silk_decode_frame(
         // Update output buffer.
         update_out_buf(ps_dec, p_out);
 
-        // DNN: ENABLE_OSCE (osce_enhance_frame) not ported yet
+        // Run SILK enhancer
+        #[cfg(feature = "osce")]
+        {
+            let info = OsceDecInfo::from_decoder(ps_dec);
+            let num_bits = ps_range_dec.tell() - ec_start;
+            osce_enhance_frame(osce.0, osce.1, info, &ps_dec_ctrl, p_out, num_bits);
+        }
 
         // Update PLC state
-        silk_plc(ps_dec, &mut ps_dec_ctrl, p_out, 0);
+        silk_plc(
+            ps_dec,
+            &mut ps_dec_ctrl,
+            p_out,
+            0,
+            #[cfg(feature = "deep-plc")]
+            lpcnet,
+        );
 
         ps_dec.loss_cnt = 0;
         ps_dec.prev_signal_type = ps_dec.indices.signal_type as i32;
@@ -239,9 +280,20 @@ pub fn silk_decode_frame(
         ps_dec.first_frame_after_reset = 0;
     } else {
         // Handle packet loss by extrapolation
-        silk_plc(ps_dec, &mut ps_dec_ctrl, p_out, 1);
+        silk_plc(
+            ps_dec,
+            &mut ps_dec_ctrl,
+            p_out,
+            1,
+            #[cfg(feature = "deep-plc")]
+            lpcnet,
+        );
 
-        // DNN: ENABLE_OSCE (osce_reset) not ported yet
+        #[cfg(feature = "osce")]
+        {
+            let method = osce.1.method;
+            osce_reset(osce.1, method);
+        }
 
         // Update output buffer.
         update_out_buf(ps_dec, p_out);
@@ -824,7 +876,30 @@ pub struct SilkDecoder {
     pub n_channels_api: i32,
     pub n_channels_internal: i32,
     pub prev_decode_only_middle: i32,
-    // DNN: ENABLE_OSCE (osce_model) not ported yet
+    /// `osce_model` (`ENABLE_OSCE`).
+    #[cfg(feature = "osce")]
+    pub osce_model: OsceModel,
+    /// `channel_state[n].osce` (`ENABLE_OSCE`; C keeps it in `silk_decoder_state`).
+    #[cfg(feature = "osce")]
+    pub osce: [SilkOsceStruct; NCH],
+    /// `channel_state[n].osce_bwe` (`ENABLE_OSCE_BWE`; C keeps it in `silk_decoder_state`).
+    #[cfg(feature = "osce")]
+    pub osce_bwe: [SilkOsceBweStruct; NCH],
+}
+
+/// The `ENABLE_OSCE` / `ENABLE_OSCE_BWE` fields of `silk_DecControlStruct` (silk/control.h),
+/// passed to [`SilkDecoder::silk_decode_dnn`] next to the base [`SilkDecControlStruct`].
+#[cfg(feature = "osce")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SilkOsceControl {
+    /// `osce_method` (I): `OSCE_METHOD_NONE` / `LACE` / `NOLACE`.
+    pub osce_method: i32,
+    /// `enable_osce_bwe` (I): set by `OPUS_SET_OSCE_BWE`.
+    pub enable_osce_bwe: i32,
+    /// `osce_extended_mode` (I): `OSCE_MODE_*` of this call.
+    pub osce_extended_mode: i32,
+    /// `prev_osce_extended_mode` (I/O).
+    pub prev_osce_extended_mode: i32,
 }
 
 impl Default for SilkDecoder {
@@ -854,16 +929,57 @@ impl SilkDecoder {
             n_channels_api: 0,
             n_channels_internal: 0,
             prev_decode_only_middle: 0,
+            #[cfg(feature = "osce")]
+            osce_model: OsceModel::default(),
+            #[cfg(feature = "osce")]
+            osce: [SilkOsceStruct::default(), SilkOsceStruct::default()],
+            #[cfg(feature = "osce")]
+            osce_bwe: [SilkOsceBweStruct::default(), SilkOsceBweStruct::default()],
         };
         d.init();
         d
     }
 
-    /// Port of silk/dec_API.c:silk_LoadOSCEModels. Without `ENABLE_OSCE` (not ported yet) this
-    /// ignores its arguments and returns `SILK_NO_ERROR`.
+    /// Port of silk/dec_API.c:silk_LoadOSCEModels. Without `ENABLE_OSCE` this ignores its
+    /// arguments and returns `SILK_NO_ERROR`.
+    #[cfg(not(feature = "osce"))]
     pub const fn load_osce_models(&mut self, _data: Option<&[u8]>) -> i32 {
-        // DNN: ENABLE_OSCE (osce_load_models) not ported yet
         SILK_NO_ERROR
+    }
+
+    /// Port of silk/dec_API.c:silk_LoadOSCEModels: binds LACE, NoLACE and BBWENet from a weight
+    /// blob and sets `osce_model.loaded` from the result. Returns 0, or -1 when a model fails
+    /// to load (always for `None`: the weights are not compiled in, as with upstream
+    /// `USE_WEIGHTS_FILE`).
+    #[cfg(feature = "osce")]
+    pub fn load_osce_models(&mut self, data: Option<&[u8]>) -> i32 {
+        let ret = osce_load_models(&mut self.osce_model, data);
+        self.osce_model.loaded = ret.is_ok();
+        match ret {
+            Ok(()) => SILK_NO_ERROR,
+            Err(_) => -1,
+        }
+    }
+
+    /// `silk_init_decoder( &channel_state[ n ] )` including the OSCE state C keeps in the
+    /// channel state (cleared, then `osce_reset(.., OSCE_DEFAULT_METHOD)`).
+    fn init_channel(&mut self, n: usize) -> i32 {
+        let ret = silk_init_decoder(&mut self.channel_state[n]);
+        #[cfg(feature = "osce")]
+        {
+            self.osce[n] = SilkOsceStruct::default();
+            self.osce_bwe[n] = SilkOsceBweStruct::default();
+            osce_reset(&mut self.osce[n], OSCE_DEFAULT_METHOD);
+        }
+        ret
+    }
+
+    /// `silk_reset_decoder( &channel_state[ n ] )` including its `osce_reset`.
+    fn reset_channel(&mut self, n: usize) -> i32 {
+        let ret = silk_reset_decoder(&mut self.channel_state[n]);
+        #[cfg(feature = "osce")]
+        osce_reset(&mut self.osce[n], OSCE_DEFAULT_METHOD);
+        ret
     }
 
     /// Port of silk/dec_API.c:silk_ResetDecoder: resets the decoder state (keeps the channel
@@ -872,7 +988,7 @@ impl SilkDecoder {
         let mut ret = SILK_NO_ERROR;
 
         for n in 0..NCH {
-            ret = silk_reset_decoder(&mut self.channel_state[n]);
+            ret = self.reset_channel(n);
         }
         self.s_stereo = StereoDecState::default();
         // Not strictly needed, but it's cleaner that way
@@ -884,12 +1000,16 @@ impl SilkDecoder {
     /// Port of silk/dec_API.c:silk_InitDecoder: initializes the decoder state.
     pub fn init(&mut self) -> i32 {
         let mut ret = SILK_NO_ERROR;
-        // DNN: ENABLE_OSCE (osce_model.loaded = 0) not ported yet
-        // load osce models (C discards the return value)
-        self.load_osce_models(None);
+        #[cfg(feature = "osce")]
+        {
+            self.osce_model.loaded = false;
+        }
+        // load osce models (C discards the return value; without compiled-in weights this
+        // leaves the model unloaded, like upstream USE_WEIGHTS_FILE)
+        c_discard(self.load_osce_models(None));
 
         for n in 0..NCH {
-            ret = silk_init_decoder(&mut self.channel_state[n]);
+            ret = self.init_channel(n);
         }
         self.s_stereo = StereoDecState::default();
         // Not strictly needed, but it's cleaner that way
@@ -908,10 +1028,6 @@ impl SilkDecoder {
     ///
     /// Returns a SILK error code (0 on success; C `int` codes from `silk/errors.h`, or the sum
     /// of the negative resampler init codes, exactly as C).
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "index arithmetic mirrors C across several arrays"
-    )]
     pub fn silk_decode(
         &mut self,
         dec_control: &mut SilkDecControlStruct,
@@ -920,6 +1036,42 @@ impl SilkDecoder {
         ps_range_dec: &mut EcDec<'_>,
         samples_out: &mut [OpusRes],
         n_samples_out: &mut i32,
+    ) -> i32 {
+        #[cfg(feature = "osce")]
+        let mut osce_ctl = SilkOsceControl::default();
+        self.silk_decode_dnn(
+            dec_control,
+            #[cfg(feature = "osce")]
+            &mut osce_ctl,
+            lost_flag,
+            new_packet_flag,
+            ps_range_dec,
+            samples_out,
+            n_samples_out,
+            #[cfg(feature = "deep-plc")]
+            None,
+        )
+    }
+
+    /// Port of silk/dec_API.c:silk_Decode with the DNN arguments: `osce_ctl` holds the
+    /// `ENABLE_OSCE` / `ENABLE_OSCE_BWE` fields of `decControl` (method, extended mode;
+    /// `prev_osce_extended_mode` is updated) and `lpcnet` is the `ENABLE_DEEP_PLC` LPCNet PLC
+    /// state (`None` = C `NULL`), used for channel 0. Otherwise as [`Self::silk_decode`].
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "index arithmetic mirrors C across several arrays"
+    )]
+    #[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
+    pub fn silk_decode_dnn(
+        &mut self,
+        dec_control: &mut SilkDecControlStruct,
+        #[cfg(feature = "osce")] osce_ctl: &mut SilkOsceControl,
+        lost_flag: i32,
+        new_packet_flag: i32,
+        ps_range_dec: &mut EcDec<'_>,
+        samples_out: &mut [OpusRes],
+        n_samples_out: &mut i32,
+        #[cfg(feature = "deep-plc")] mut lpcnet: Option<&mut LpcnetPlcState>,
     ) -> i32 {
         let mut decode_only_middle: i32 = 0;
         let mut ret = SILK_NO_ERROR;
@@ -939,7 +1091,7 @@ impl SilkDecoder {
 
         // If Mono -> Stereo transition in bitstream: init state of second channel
         if dec_control.n_channels_internal > self.n_channels_internal {
-            ret += silk_init_decoder(&mut self.channel_state[1]);
+            ret += self.init_channel(1);
         }
 
         let stereo_to_mono = dec_control.n_channels_internal == 1
@@ -1103,6 +1255,10 @@ impl SilkDecoder {
         for n in 0..nci {
             if n == 0 || has_side {
                 let frame_index = self.channel_state[0].n_frames_decoded - n as i32;
+                #[cfg(feature = "osce")]
+                if self.osce[n].method != osce_ctl.osce_method {
+                    osce_reset(&mut self.osce[n], osce_ctl.osce_method);
+                }
                 let cs = &mut self.channel_state[n];
                 // Use independent coding if no previous frame available
                 let cond_coding = if frame_index <= 0 {
@@ -1120,7 +1276,6 @@ impl SilkDecoder {
                 } else {
                     CODE_CONDITIONALLY
                 };
-                // DNN: ENABLE_OSCE (osce_reset on method change) not ported yet
                 ret += silk_decode_frame(
                     cs,
                     ps_range_dec,
@@ -1128,6 +1283,10 @@ impl SilkDecoder {
                     &mut n_samples_out_dec,
                     lost_flag,
                     cond_coding,
+                    #[cfg(feature = "deep-plc")]
+                    if n == 0 { lpcnet.as_deref_mut() } else { None },
+                    #[cfg(feature = "osce")]
+                    (&self.osce_model, &mut self.osce[n]),
                 );
             } else {
                 samples_out1_tmp[n][2..2 + n_samples_out_dec as usize].fill(0);
@@ -1166,15 +1325,71 @@ impl SilkDecoder {
         let mut samples_out2_tmp = [0i16; MAX_SAMPLES_OUT];
         let resample_out = &mut samples_out2_tmp[..];
 
-        // DNN: ENABLE_OSCE_BWE (osce_bwe, cross-fades) not ported yet
+        #[cfg(feature = "osce")]
+        let mut resamp_buffer = [0i16; 3 * MFL];
         for n in 0..silk_min(dec_control.n_channels_api, dec_control.n_channels_internal) as usize {
+            #[cfg(feature = "osce")]
+            if osce_ctl.osce_extended_mode == OSCE_MODE_SILK_BBWE {
+                // Resample or extend decoded signal to API_sampleRate
+                debug_assert!(dec_control.api_sample_rate == 48000);
+
+                if osce_ctl.prev_osce_extended_mode != OSCE_MODE_SILK_BBWE {
+                    // Reset the BWE state
+                    osce_bwe_reset(&mut self.osce_bwe[n]);
+                }
+
+                osce_bwe(
+                    &self.osce_model,
+                    &mut self.osce_bwe[n],
+                    resample_out,
+                    &samples_out1_tmp[n][1..],
+                    nsod,
+                );
+
+                if osce_ctl.prev_osce_extended_mode == OSCE_MODE_SILK_ONLY
+                    || osce_ctl.prev_osce_extended_mode == OSCE_MODE_HYBRID
+                {
+                    // cross-fade with upsampled signal (C ignores the resampler's return value)
+                    c_discard(silk_resampler(
+                        &mut self.channel_state[n].resampler_state,
+                        &mut resamp_buffer,
+                        &samples_out1_tmp[n][1..],
+                        n_samples_out_dec,
+                    ));
+                    osce_bwe_cross_fade_10ms(resample_out, &resamp_buffer, 480);
+                }
+            } else {
+                ret += silk_resampler(
+                    &mut self.channel_state[n].resampler_state,
+                    resample_out,
+                    &samples_out1_tmp[n][1..],
+                    n_samples_out_dec,
+                );
+                if osce_ctl.prev_osce_extended_mode == OSCE_MODE_SILK_BBWE
+                    && dec_control.internal_sample_rate == 16000
+                {
+                    // fade out if internal sample rate did not change
+                    osce_bwe(
+                        &self.osce_model,
+                        &mut self.osce_bwe[n],
+                        &mut resamp_buffer,
+                        &samples_out1_tmp[n][1..],
+                        nsod,
+                    );
+                    // cross-fade with upsampled signal
+                    osce_bwe_cross_fade_10ms(resample_out, &resamp_buffer, 480);
+                }
+            }
             // Resample decoded signal to API_sampleRate
-            ret += silk_resampler(
-                &mut self.channel_state[n].resampler_state,
-                resample_out,
-                &samples_out1_tmp[n][1..],
-                n_samples_out_dec,
-            );
+            #[cfg(not(feature = "osce"))]
+            {
+                ret += silk_resampler(
+                    &mut self.channel_state[n].resampler_state,
+                    resample_out,
+                    &samples_out1_tmp[n][1..],
+                    n_samples_out_dec,
+                );
+            }
 
             // Interleave if stereo output and stereo stream
             if nca == 2 {
@@ -1186,6 +1401,11 @@ impl SilkDecoder {
                     samples_out[i] = int16tores(resample_out[i]);
                 }
             }
+        }
+
+        #[cfg(feature = "osce")]
+        {
+            osce_ctl.prev_osce_extended_mode = osce_ctl.osce_extended_mode;
         }
 
         // Create two channel output from mono stream
@@ -1231,3 +1451,8 @@ impl SilkDecoder {
         ret
     }
 }
+
+/// C calls whose `int` return value is discarded (`silk_LoadOSCEModels` in `silk_InitDecoder`,
+/// the cross-fade `silk_resampler` of the BWE path).
+#[inline]
+const fn c_discard(_ret: i32) {}

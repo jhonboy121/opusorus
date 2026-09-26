@@ -49,12 +49,25 @@
 //! * `validate_opus_decoder` / `celt_assert` are `debug_assert!`s; `MUST_SUCCEED` failures return
 //!   [`Error::InternalError`] (the non-hardening C behaviour) instead of aborting.
 //!
-//! # DNN hooks
+//! # DNN features
 //!
-//! `ENABLE_DEEP_PLC` (the `lpcnet` PLC state and its init/reset/blob loading), `ENABLE_DRED`
-//! (the `OpusDRED`/`OpusDREDDecoder` API and the DRED feature feeding in `opus_decode_native`),
-//! `ENABLE_OSCE` (`osce_method` selection) and `ENABLE_OSCE_BWE` (`osce_extended_mode`) are not
-//! wired yet: their places are marked with `DNN hook` comments naming the C lines.
+//! * `deep-plc` (C `ENABLE_DEEP_PLC`): the decoder owns an LPCNet PLC state (`lpcnet`) that
+//!   the SILK and CELT decoders update on good frames and use to conceal lost frames at
+//!   complexity >= 5 ([`Decoder::set_complexity`]).
+//! * `osce` (C `ENABLE_OSCE` + `ENABLE_OSCE_BWE`): SILK speech enhancement (LACE at complexity
+//!   6, NoLACE at >= 7) and, with [`Decoder::set_osce_bwe`], the wideband → fullband extension
+//!   of 16 kHz SILK at 48 kHz output (complexity >= 4).
+//! * `dred` (C `ENABLE_DRED`): [`Decoder::dred_decode`] / [`Decoder::dred_decode24`] /
+//!   [`Decoder::dred_decode_float`] conceal with the features of a [`crate::dred::Dred`]
+//!   (`opus_decoder_dred_decode*`).
+//!
+//! The model weights are not compiled in (upstream `USE_WEIGHTS_FILE` semantics, PLAN D-015):
+//! load a libopus weight blob with [`Decoder::set_dnn_blob`] (`OPUS_SET_DNN_BLOB`). Until then
+//! the DNN paths stay off exactly as in an upstream build without loaded weights, except that
+//! the OSCE bandwidth extension is only selected with a loaded model (a `USE_WEIGHTS_FILE`
+//! build would run BBWENet without weights). Upstream's default build has the weights compiled
+//! in and therefore behaves like this decoder after `set_dnn_blob` with a blob holding all
+//! models. The blob stays loaded across [`Decoder::reset`] and [`Decoder::init`].
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -70,6 +83,19 @@ use crate::celt::celt_decoder::CeltDecoder;
 use crate::celt::entdec::EcDec;
 use crate::celt::mathops::{celt_exp2, celt_float2int16};
 use crate::celt::static_modes::CeltMode;
+#[cfg(feature = "dred")]
+use crate::dnn::dred_decoder::OpusDred;
+#[cfg(feature = "dred")]
+use crate::dnn::dred_rdovae::DRED_NUM_FEATURES;
+#[cfg(feature = "deep-plc")]
+use crate::dnn::lpcnet_plc::LpcnetPlcState;
+#[cfg(feature = "dred")]
+use crate::dnn::lpcnet_plc::{lpcnet_plc_fec_add, lpcnet_plc_fec_clear};
+#[cfg(feature = "osce")]
+use crate::dnn::osce::{
+    OSCE_METHOD_LACE, OSCE_METHOD_NOLACE, OSCE_METHOD_NONE, OSCE_MODE_CELT_ONLY, OSCE_MODE_HYBRID,
+    OSCE_MODE_SILK_BBWE, OSCE_MODE_SILK_ONLY,
+};
 #[cfg(feature = "qext")]
 use crate::extensions::ExtensionIterator;
 use crate::packet::{
@@ -77,6 +103,8 @@ use crate::packet::{
     parse_impl, toc_bandwidth, toc_mode, toc_nb_channels, toc_samples_per_frame,
 };
 use crate::silk::decoder::SilkDecoder;
+#[cfg(feature = "osce")]
+use crate::silk::decoder::SilkOsceControl;
 use crate::silk::structs::SilkDecControlStruct;
 use crate::{Bandwidth, Error, Result};
 
@@ -239,14 +267,15 @@ pub struct Decoder {
     /// Sampling rate at the API level.
     fs: i32,
     dec_control: SilkDecControlStruct,
+    /// The `ENABLE_OSCE` / `ENABLE_OSCE_BWE` fields of `DecControl`.
+    #[cfg(feature = "osce")]
+    osce_ctl: SilkOsceControl,
     decode_gain: i32,
     complexity: i32,
     ignore_extensions: i32,
-    /// DNN hook (osce-bwe): C keeps this in `DecControl.enable_osce_bwe`
-    /// (opus_decoder.c:1037-1057); moves there when the SILK OSCE fields are ported.
-    #[cfg(feature = "osce")]
-    enable_osce_bwe: i32,
-    // DNN hook (deep-plc): TODO `LPCNetPLCState lpcnet` (opus_decoder.c:74-76).
+    /// `lpcnet`: the deep PLC state (boxed, it holds the PLC/FARGAN/pitch models).
+    #[cfg(feature = "deep-plc")]
+    lpcnet: Box<LpcnetPlcState>,
 
     // Everything beyond this point gets cleared on a reset (OPUS_DECODER_RESET_START).
     stream_channels: i32,
@@ -316,18 +345,20 @@ impl Decoder {
         let f10 = (fs / 100) as usize;
         let f5 = (fs / 200) as usize;
         let max_frame = (fs / 25 * 3) as usize;
-        // DNN hook (deep-plc): TODO lpcnet_plc_init(&st->lpcnet) (opus_decoder.c:170-172).
         Ok(Self {
             celt_dec,
             silk_dec,
             channels,
             fs,
             dec_control,
+            #[cfg(feature = "osce")]
+            osce_ctl: SilkOsceControl::default(),
             decode_gain: 0,
             complexity: 0,
             ignore_extensions: 0,
-            #[cfg(feature = "osce")]
-            enable_osce_bwe: 0,
+            // lpcnet_plc_init (no model is compiled in: loaded by `set_dnn_blob`).
+            #[cfg(feature = "deep-plc")]
+            lpcnet: LpcnetPlcState::new(),
             stream_channels: channels,
             bandwidth: 0,
             mode: 0,
@@ -351,7 +382,18 @@ impl Decoder {
     /// # Errors
     /// As [`Decoder::new`].
     pub fn init(&mut self, fs: i32, channels: i32) -> Result<()> {
-        *self = Self::new(fs, channels)?;
+        #[allow(unused_mut, reason = "only mutated with DNN features")]
+        let mut new = Self::new(fs, channels)?;
+        // Keep the DNN models loaded by `set_dnn_blob` (they play the role of upstream's
+        // compiled-in weights, which `opus_decoder_init` binds again).
+        #[cfg(feature = "deep-plc")]
+        {
+            core::mem::swap(&mut new.lpcnet, &mut self.lpcnet);
+            new.lpcnet.lpcnet_plc_init();
+        }
+        #[cfg(feature = "osce")]
+        core::mem::swap(&mut new.silk_dec.osce_model, &mut self.silk_dec.osce_model);
+        *self = new;
         Ok(())
     }
 
@@ -365,6 +407,9 @@ impl Decoder {
         }
         let ch = channels as usize;
         let scratch = (480 + 240 + 5760) * ch * size_of::<OpusRes>();
+        // The deep PLC state (without the heap-allocated model weights of a loaded blob).
+        #[cfg(feature = "deep-plc")]
+        let scratch = scratch + size_of::<LpcnetPlcState>();
         size_of::<Self>()
             + size_of::<SilkDecoder>()
             + crate::celt::celt_decoder::celt_decoder_get_size(channels) as usize
@@ -549,10 +594,38 @@ impl Decoder {
                 }
             }
             self.dec_control.enable_deep_plc = i32::from(self.complexity >= 5);
-            // DNN hook (osce): TODO osce_method selection from complexity
-            // (opus_decoder.c:442-450).
-            // DNN hook (osce-bwe): TODO osce_extended_mode / prev_osce_extended_mode
-            // (opus_decoder.c:451-465), using `self.enable_osce_bwe`.
+            #[cfg(feature = "osce")]
+            {
+                self.osce_ctl.osce_method = OSCE_METHOD_NONE;
+                if self.complexity >= 6 {
+                    self.osce_ctl.osce_method = OSCE_METHOD_LACE;
+                }
+                if self.complexity >= 7 {
+                    self.osce_ctl.osce_method = OSCE_METHOD_NOLACE;
+                }
+                // Rust-only: BWE also needs a loaded model (see the module docs).
+                if self.complexity >= 4
+                    && self.osce_ctl.enable_osce_bwe != 0
+                    && self.silk_dec.osce_model.loaded
+                    && self.fs == 48000
+                    && self.dec_control.internal_sample_rate == 16000
+                    && (mode == MODE_SILK_ONLY || data.is_none())
+                {
+                    // request WB -> FB signal extension
+                    self.osce_ctl.osce_extended_mode = OSCE_MODE_SILK_BBWE;
+                } else {
+                    // at this point, mode can only be MODE_SILK_ONLY or MODE_HYBRID
+                    self.osce_ctl.osce_extended_mode = if mode == MODE_SILK_ONLY {
+                        OSCE_MODE_SILK_ONLY
+                    } else {
+                        OSCE_MODE_HYBRID
+                    };
+                }
+                if self.prev_mode == MODE_CELT_ONLY {
+                    // Update extended mode for CELT->SILK transition
+                    self.osce_ctl.prev_osce_extended_mode = OSCE_MODE_CELT_ONLY;
+                }
+            }
 
             let lost_flag = if data.is_none() {
                 1
@@ -570,14 +643,17 @@ impl Decoder {
                 // Call SILK decoder
                 let first_frame = i32::from(decoded_samples == 0);
                 let mut silk_frame_size: i32 = 0;
-                // DNN hook (deep-plc): TODO pass &st->lpcnet (opus_decoder.c:474-476).
-                let silk_ret = self.silk_dec.silk_decode(
+                let silk_ret = self.silk_dec.silk_decode_dnn(
                     &mut self.dec_control,
+                    #[cfg(feature = "osce")]
+                    &mut self.osce_ctl,
                     lost_flag,
                     first_frame,
                     &mut dec,
                     &mut pcm_ptr[off..],
                     &mut silk_frame_size,
+                    #[cfg(feature = "deep-plc")]
+                    Some(&mut self.lpcnet),
                 );
                 if silk_ret != 0 {
                     if lost_flag != 0 {
@@ -702,16 +778,31 @@ impl Decoder {
         must_succeed(self.celt_dec.set_start_band(start_band))?;
 
         let mut celt_err: Option<Error> = None;
-        // DNN hook (osce-bwe): C also skips CELT when
-        // `DecControl.osce_extended_mode == OSCE_MODE_SILK_BBWE` (opus_decoder.c:560-564).
-        if mode != MODE_SILK_ONLY {
+        #[cfg(feature = "osce")]
+        let decode_celt =
+            mode != MODE_SILK_ONLY && self.osce_ctl.osce_extended_mode != OSCE_MODE_SILK_BBWE;
+        #[cfg(not(feature = "osce"))]
+        let decode_celt = mode != MODE_SILK_ONLY;
+        if decode_celt {
             let celt_frame_size = imin(f20, frame_size);
             // Make sure to discard any previous CELT state
             if mode != self.prev_mode && self.prev_mode > 0 && !self.prev_redundancy {
                 self.celt_dec.reset();
             }
             // Decode CELT
-            // DNN hook (deep-plc): TODO pass &st->lpcnet (opus_decoder.c:573-575).
+            #[cfg(feature = "deep-plc")]
+            let r = self.celt_dec.celt_decode_with_ec_lpcnet(
+                if decode_fec != 0 { None } else { data },
+                len,
+                pcm,
+                celt_frame_size,
+                Some(&mut dec),
+                celt_accum,
+                Some(&mut self.lpcnet),
+                #[cfg(feature = "qext")]
+                ext,
+            );
+            #[cfg(not(feature = "deep-plc"))]
             let r = self.celt_dec.celt_decode_with_ec_dred(
                 if decode_fec != 0 { None } else { data },
                 len,
@@ -868,7 +959,8 @@ impl Decoder {
     ///   PLC, as in C).
     /// * `soft_clip`: apply the soft clipper (`opus_decode` int16 path).
     ///
-    /// DNN hook (dred): TODO the C `dred` / `dred_offset` arguments (opus_decoder.c:733-761).
+    /// The C `dred` / `dred_offset` arguments are `NULL` / 0 here; see
+    /// [`Decoder::dred_decode_float`].
     ///
     /// Returns the number of decoded samples per channel.
     ///
@@ -887,6 +979,33 @@ impl Decoder {
         packet_offset: Option<&mut usize>,
         soft_clip: bool,
     ) -> Result<i32> {
+        self.decode_native_impl(
+            data,
+            pcm,
+            frame_size,
+            decode_fec,
+            self_delimited,
+            packet_offset,
+            soft_clip,
+            #[cfg(feature = "dred")]
+            None,
+        )
+    }
+
+    /// `opus_decode_native` with the `ENABLE_DRED` arguments (`dred`: the processed DRED data
+    /// and the C `dred_offset`, in samples).
+    #[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
+    fn decode_native_impl(
+        &mut self,
+        data: Option<&[u8]>,
+        pcm: &mut [OpusRes],
+        frame_size: i32,
+        decode_fec: i32,
+        self_delimited: bool,
+        packet_offset: Option<&mut usize>,
+        soft_clip: bool,
+        #[cfg(feature = "dred")] dred: Option<(&OpusDred, i32)>,
+    ) -> Result<i32> {
         self.validate();
         if !(0..=1).contains(&decode_fec) {
             return Err(Error::BadArg);
@@ -899,8 +1018,12 @@ impl Decoder {
         if (decode_fec != 0 || data.is_none()) && frame_size % (self.fs / 400) != 0 {
             return Err(Error::BadArg);
         }
-        // DNN hook (dred): TODO feed DRED features to the deep PLC when
-        // `dred->process_stage == 2` (opus_decoder.c:735-761).
+        #[cfg(feature = "dred")]
+        if let Some((dred, dred_offset)) = dred
+            && dred.process_stage == 2
+        {
+            self.feed_dred(dred, dred_offset, frame_size);
+        }
         let ch = self.channels as usize;
         let Some(data) = data else {
             let mut pcm_count = 0;
@@ -1278,7 +1401,8 @@ impl Decoder {
         self.silk_dec.reset();
         self.stream_channels = self.channels;
         self.frame_size = self.fs / 400;
-        // DNN hook (deep-plc): TODO lpcnet_plc_reset(&st->lpcnet) (opus_decoder.c:1071-1073).
+        #[cfg(feature = "deep-plc")]
+        self.lpcnet.lpcnet_plc_reset();
     }
 
     /// `OPUS_GET_BANDWIDTH`: the bandwidth of the last decoded packet (`None` before the first
@@ -1317,7 +1441,7 @@ impl Decoder {
         if value < 0 || value > 1 {
             return Err(Error::BadArg);
         }
-        self.enable_osce_bwe = value;
+        self.osce_ctl.enable_osce_bwe = value;
         Ok(())
     }
 
@@ -1325,7 +1449,7 @@ impl Decoder {
     #[cfg(feature = "osce")]
     #[must_use]
     pub const fn osce_bwe(&self) -> i32 {
-        self.enable_osce_bwe
+        self.osce_ctl.enable_osce_bwe
     }
 
     /// `OPUS_GET_FINAL_RANGE`: the final state of the range coder for the last decoded packet
@@ -1404,28 +1528,50 @@ impl Decoder {
         self.ignore_extensions != 0
     }
 
-    /// `OPUS_SET_DNN_BLOB`: loads DNN weights (a libopus weight blob) for the deep PLC and
-    /// OSCE models.
-    ///
-    /// DNN hook (deep-plc): TODO `lpcnet_plc_load_model(&st->lpcnet, data, len)`
-    /// (opus_decoder.c:1181-1193). C returns `1` (not an error code) when a model fails to load;
-    /// that is reported as [`Error::BadArg`] here.
+    /// `OPUS_SET_DNN_BLOB` (upstream `USE_WEIGHTS_FILE` builds): loads the DNN weights from a
+    /// libopus weight blob (as written by upstream `write_lpcnet_weights`, i.e. a concatenation
+    /// of weight records). With `deep-plc` the blob must hold the PLC, FARGAN and pitch DNN
+    /// models; with `osce` also LACE, NoLACE and BBWENet. Every model is attempted (C:
+    /// `lpcnet_plc_load_model` then `silk_LoadOSCEModels`); the ones that bind are used.
     ///
     /// # Errors
-    /// [`Error::BadArg`] if the blob cannot be loaded.
+    /// [`Error::BadArg`] if a model cannot be loaded from the blob (C returns `1`, not an error
+    /// code, in that case).
     #[cfg(any(feature = "deep-plc", feature = "osce"))]
     pub fn set_dnn_blob(&mut self, data: &[u8]) -> Result<()> {
-        let ret = self.silk_dec.load_osce_models(Some(data));
-        if ret != 0 {
-            return Err(Error::BadArg);
+        #[cfg(feature = "deep-plc")]
+        let plc_ok = self.lpcnet.load_model(data).is_ok();
+        #[cfg(not(feature = "deep-plc"))]
+        let plc_ok = true;
+        let osce_ok = self.silk_dec.load_osce_models(Some(data)) == 0;
+        if plc_ok && osce_ok {
+            Ok(())
+        } else {
+            Err(Error::BadArg)
         }
-        Ok(())
+    }
+
+    /// Whether DNN models are loaded (C `lpcnet.loaded`, `osce_model.loaded`): the deep PLC
+    /// (`deep-plc`) and the OSCE models (`osce`; always `false` without the feature).
+    #[cfg(any(feature = "deep-plc", feature = "osce"))]
+    #[must_use]
+    pub fn dnn_loaded(&self) -> (bool, bool) {
+        #[cfg(feature = "deep-plc")]
+        let plc = self.lpcnet.loaded;
+        #[cfg(not(feature = "deep-plc"))]
+        let plc = false;
+        #[cfg(feature = "osce")]
+        let osce = self.silk_dec.osce_model.loaded;
+        #[cfg(not(feature = "osce"))]
+        let osce = false;
+        (plc, osce)
     }
 
     /// Numeric `opus_decoder_ctl` for requests taking an `opus_int32` value (SET requests and
-    /// `OPUS_RESET_STATE`, whose value is ignored). GET requests (and the pointer-taking
-    /// `OPUS_SET_DNN_BLOB`) return [`Error::BadArg`]; unknown requests return
-    /// [`Error::Unimplemented`], like C.
+    /// `OPUS_RESET_STATE`, whose value is ignored). GET requests return [`Error::BadArg`];
+    /// unknown requests return [`Error::Unimplemented`], like C. The pointer-taking
+    /// `OPUS_SET_DNN_BLOB` is not available numerically (use [`Decoder::set_dnn_blob`]) and
+    /// returns [`Error::Unimplemented`], as the C library built with compiled-in weights does.
     ///
     /// # Errors
     /// [`Error::BadArg`] for an out-of-range value, [`Error::Unimplemented`] for an unknown
@@ -1456,8 +1602,6 @@ impl Decoder {
             OPUS_SET_OSCE_BWE_REQUEST => self.set_osce_bwe(value),
             #[cfg(feature = "osce")]
             OPUS_GET_OSCE_BWE_REQUEST => Err(Error::BadArg),
-            #[cfg(any(feature = "deep-plc", feature = "osce"))]
-            OPUS_SET_DNN_BLOB_REQUEST => Err(Error::BadArg),
             OPUS_GET_BANDWIDTH_REQUEST
             | OPUS_GET_COMPLEXITY_REQUEST
             | OPUS_GET_FINAL_RANGE_REQUEST
@@ -1491,11 +1635,9 @@ impl Decoder {
             }
             OPUS_GET_IGNORE_EXTENSIONS_REQUEST => Ok(self.ignore_extensions),
             #[cfg(feature = "osce")]
-            OPUS_GET_OSCE_BWE_REQUEST => Ok(self.enable_osce_bwe),
+            OPUS_GET_OSCE_BWE_REQUEST => Ok(self.osce_ctl.enable_osce_bwe),
             #[cfg(feature = "osce")]
             OPUS_SET_OSCE_BWE_REQUEST => Err(Error::BadArg),
-            #[cfg(any(feature = "deep-plc", feature = "osce"))]
-            OPUS_SET_DNN_BLOB_REQUEST => Err(Error::BadArg),
             OPUS_SET_COMPLEXITY_REQUEST
             | OPUS_RESET_STATE
             | OPUS_SET_GAIN_REQUEST
@@ -1503,6 +1645,275 @@ impl Decoder {
             | OPUS_SET_IGNORE_EXTENSIONS_REQUEST => Err(Error::BadArg),
             _ => Err(Error::Unimplemented),
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // DRED (ENABLE_DRED)
+    // -----------------------------------------------------------------------------------------
+
+    /// The `ENABLE_DRED` block of `opus_decode_native`: queues the DRED features covering the
+    /// concealed `frame_size` samples (starting `dred_offset` samples before the end of the
+    /// DRED data) in the deep PLC.
+    #[cfg(feature = "dred")]
+    fn feed_dred(&mut self, dred: &OpusDred, dred_offset: i32, frame_size: i32) {
+        lpcnet_plc_fec_clear(&mut self.lpcnet);
+        let f10 = self.fs / 100;
+        // if blend==0, the last PLC call was "update" and we need to feed two extra 10-ms
+        // frames.
+        let init_frames = if self.lpcnet.blend == 0 { 2 } else { 0 };
+        let features_per_frame = imax_i32(1, frame_size / f10);
+        let needed_feature_frames = init_frames + features_per_frame;
+        for i in 0..needed_feature_frames {
+            // We floor instead of rounding because 5-ms overlap compensates for the missing 0.5
+            // rounding offset.
+            // C: `(int)floor(((float)dred_offset + dred->dred_offset*F10/4)/F10)`; the int
+            // product is computed with wrapping (C: UB on overflow of absurd offsets).
+            let num = dred_offset as f32 + (dred.dred_offset.wrapping_mul(f10) / 4) as f32;
+            let feature_offset =
+                init_frames - i - 2 + crate::math::floor(f64::from(num / f10 as f32)) as i32;
+            // C: `feature_offset <= 4*dred->nb_latents-1`.
+            if feature_offset < 4 * dred.nb_latents && feature_offset >= 0 {
+                let off = feature_offset as usize * DRED_NUM_FEATURES;
+                lpcnet_plc_fec_add(&mut self.lpcnet, Some(&dred.fec_features[off..]));
+            } else if feature_offset >= 0 {
+                lpcnet_plc_fec_add(&mut self.lpcnet, None);
+            }
+        }
+    }
+
+    /// Port of `src/opus_decoder.c:opus_decoder_dred_decode_float` with C argument types (for
+    /// the C ABI). See [`Decoder::dred_decode_float`].
+    ///
+    /// # Errors
+    /// As [`Decoder::dred_decode_float`].
+    #[cfg(feature = "dred")]
+    #[doc(hidden)]
+    pub fn opus_decoder_dred_decode_float(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [f32],
+        frame_size: i32,
+    ) -> Result<i32> {
+        if frame_size <= 0 {
+            return Err(Error::BadArg);
+        }
+        // Rust-only guard: C would write past the caller's buffer.
+        if frame_size as usize * self.channels as usize > pcm.len() {
+            return Err(Error::BadArg);
+        }
+        self.decode_native_impl(
+            None,
+            pcm,
+            frame_size,
+            0,
+            false,
+            None,
+            false,
+            Some((dred.inner(), dred_offset)),
+        )
+    }
+
+    /// `opus_decoder_dred_decode` / `opus_decoder_dred_decode24`: `opus_decode_native` into
+    /// the scratch buffer (soft clipping for the int16 path), then `convert`.
+    #[cfg(feature = "dred")]
+    fn dred_decode_via_out(
+        &mut self,
+        dred: &OpusDred,
+        dred_offset: i32,
+        pcm_len: usize,
+        frame_size: i32,
+        soft_clip: bool,
+        convert: &mut dyn FnMut(&[OpusRes]),
+    ) -> Result<i32> {
+        if frame_size <= 0 {
+            return Err(Error::BadArg);
+        }
+        debug_assert!(self.channels == 1 || self.channels == 2);
+        let n = frame_size as usize * self.channels as usize;
+        // Rust-only guard: C would write past the caller's buffer.
+        if n > pcm_len {
+            return Err(Error::BadArg);
+        }
+        let mut out = core::mem::take(&mut self.scratch.out);
+        if out.len() < n {
+            out.resize(n, 0.0);
+        }
+        let ret = self.decode_native_impl(
+            None,
+            &mut out[..n],
+            frame_size,
+            0,
+            false,
+            None,
+            soft_clip,
+            Some((dred, dred_offset)),
+        );
+        if let Ok(r) = ret
+            && r > 0
+        {
+            convert(&out[..r as usize * self.channels as usize]);
+        }
+        self.scratch.out = out;
+        ret
+    }
+
+    /// Port of `src/opus_decoder.c:opus_decoder_dred_decode` with C argument types (for the C
+    /// ABI). See [`Decoder::dred_decode`].
+    ///
+    /// # Errors
+    /// As [`Decoder::dred_decode`].
+    #[cfg(feature = "dred")]
+    #[doc(hidden)]
+    pub fn opus_decoder_dred_decode(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [i16],
+        frame_size: i32,
+    ) -> Result<i32> {
+        let pcm_len = pcm.len();
+        self.dred_decode_via_out(
+            dred.inner(),
+            dred_offset,
+            pcm_len,
+            frame_size,
+            true,
+            &mut |out| {
+                celt_float2int16(out, &mut pcm[..out.len()]);
+            },
+        )
+    }
+
+    /// Port of `src/opus_decoder.c:opus_decoder_dred_decode24` with C argument types (for the C
+    /// ABI). See [`Decoder::dred_decode24`].
+    ///
+    /// # Errors
+    /// As [`Decoder::dred_decode24`].
+    #[cfg(feature = "dred")]
+    #[doc(hidden)]
+    pub fn opus_decoder_dred_decode24(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [i32],
+        frame_size: i32,
+    ) -> Result<i32> {
+        let pcm_len = pcm.len();
+        self.dred_decode_via_out(
+            dred.inner(),
+            dred_offset,
+            pcm_len,
+            frame_size,
+            false,
+            &mut |out| {
+                for (o, &x) in pcm.iter_mut().zip(out) {
+                    *o = res2int24(x);
+                }
+            },
+        )
+    }
+
+    /// Conceals `frame_size` samples per channel using the redundancy of a processed
+    /// [`crate::dred::Dred`] (port of `opus_decoder_dred_decode`; int16 output with soft
+    /// clipping).
+    ///
+    /// `dred_offset` is the position, in samples before the end of the DRED data's newest
+    /// frame, of the first concealed sample (as returned by
+    /// [`crate::dred::DredDecoder::parse`]). Without a processed `dred` (or without a deep PLC
+    /// model, see [`Decoder::set_dnn_blob`]) this is ordinary packet-loss concealment.
+    /// `frame_size` must be a multiple of 2.5 ms and `pcm` must hold `frame_size * channels`
+    /// samples.
+    ///
+    /// # Errors
+    /// [`Error::BadArg`] for an invalid `frame_size` or a short `pcm`.
+    #[cfg(feature = "dred")]
+    pub fn dred_decode(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [i16],
+        frame_size: usize,
+    ) -> Result<usize> {
+        let fs = frame_size_i32(frame_size)?;
+        self.opus_decoder_dred_decode(dred, dred_offset, pcm, fs)
+            .map(|n| n as usize)
+    }
+
+    /// [`Decoder::dred_decode`] with 24-bit output in `i32` (port of
+    /// `opus_decoder_dred_decode24`; no soft clipping).
+    ///
+    /// # Errors
+    /// As [`Decoder::dred_decode`].
+    #[cfg(feature = "dred")]
+    pub fn dred_decode24(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [i32],
+        frame_size: usize,
+    ) -> Result<usize> {
+        let fs = frame_size_i32(frame_size)?;
+        self.opus_decoder_dred_decode24(dred, dred_offset, pcm, fs)
+            .map(|n| n as usize)
+    }
+
+    /// [`Decoder::dred_decode`] with float output (port of `opus_decoder_dred_decode_float`;
+    /// no soft clipping).
+    ///
+    /// # Errors
+    /// As [`Decoder::dred_decode`].
+    #[cfg(feature = "dred")]
+    pub fn dred_decode_float(
+        &mut self,
+        dred: &crate::dred::Dred,
+        dred_offset: i32,
+        pcm: &mut [f32],
+        frame_size: usize,
+    ) -> Result<usize> {
+        let fs = frame_size_i32(frame_size)?;
+        self.opus_decoder_dred_decode_float(dred, dred_offset, pcm, fs)
+            .map(|n| n as usize)
+    }
+
+    /// The DNN state in the layout of the oracle's `oracle_di_dec_dump` (for differential
+    /// tests): lpcnet `{loaded, analysis_gap, fec_read_pos, fec_fill_pos, fec_skip,
+    /// analysis_pos, predict_pos, blend, loss_count}`, `DecControl` `{osce_method,
+    /// enable_osce_bwe, osce_extended_mode, prev_osce_extended_mode}`, and lpcnet `pcm` +
+    /// `features`.
+    #[cfg(all(feature = "deep-plc", feature = "internals"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dnn_debug_state(&self) -> ([i32; 13], Vec<f32>) {
+        let l = &self.lpcnet;
+        #[cfg(feature = "osce")]
+        let o = [
+            self.osce_ctl.osce_method,
+            self.osce_ctl.enable_osce_bwe,
+            self.osce_ctl.osce_extended_mode,
+            self.osce_ctl.prev_osce_extended_mode,
+        ];
+        #[cfg(not(feature = "osce"))]
+        let o = [0; 4];
+        let ints = [
+            i32::from(l.loaded),
+            l.analysis_gap,
+            l.fec_read_pos,
+            l.fec_fill_pos,
+            l.fec_skip,
+            l.analysis_pos,
+            l.predict_pos,
+            l.blend,
+            l.loss_count,
+            o[0],
+            o[1],
+            o[2],
+            o[3],
+        ];
+        let mut floats = Vec::with_capacity(l.pcm.len() + l.features.len());
+        floats.extend_from_slice(&l.pcm);
+        floats.extend_from_slice(&l.features);
+        (ints, floats)
     }
 
     /// The Opus-level state (for differential tests).
@@ -1535,8 +1946,15 @@ fn frame_size_i32(frame_size: usize) -> Result<i32> {
     i32::try_from(frame_size).map_err(|_| Error::BadArg)
 }
 
-// DNN hook (dred): TODO the OpusDREDDecoder / OpusDRED API of opus_decoder.c:1356-1691
-// (opus_dred_decoder_get_size/init/create/destroy/ctl, dred_find_payload, opus_dred_get_size,
-// opus_dred_alloc/free, opus_dred_parse, opus_dred_process, opus_decoder_dred_decode{,24,_float}).
-// Without ENABLE_DRED every one of them returns OPUS_UNIMPLEMENTED (or 0 for the sizes and NULL
-// for opus_dred_alloc), which the C ABI layer can reproduce directly.
+// The OpusDREDDecoder / OpusDRED API of opus_decoder.c (opus_dred_decoder_*, opus_dred_parse,
+// opus_dred_process, ...) is in `crate::dred`; `opus_decoder_dred_decode*` are the
+// `Decoder::dred_decode*` methods (feature `dred`). Without ENABLE_DRED every one of them returns
+// OPUS_UNIMPLEMENTED (or 0 for the sizes and NULL for opus_dred_alloc), which the C ABI layer can
+// reproduce directly.
+
+/// C `IMAX` on `int`.
+#[cfg(feature = "dred")]
+#[inline]
+const fn imax_i32(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}

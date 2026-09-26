@@ -21,6 +21,7 @@ pub mod celt_modes;
 pub mod celt_pitch_lpc;
 pub mod dnn_core;
 pub mod dnn_dred;
+pub mod dnn_integration;
 pub mod dnn_osce;
 pub mod dnn_plc;
 pub mod opus_decoder;

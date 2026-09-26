@@ -584,6 +584,25 @@ impl MsDecoder {
         Ok(&mut self.decoders[stream_id as usize])
     }
 
+    /// Loads DNN weights into every stream decoder ([`Decoder::set_dnn_blob`]).
+    ///
+    /// Rust extension: C `opus_multistream_decoder_ctl` does not forward `OPUS_SET_DNN_BLOB`
+    /// (upstream relies on compiled-in weights there; a `USE_WEIGHTS_FILE` build would load each
+    /// stream through `OPUS_MULTISTREAM_GET_DECODER_STATE`). Every stream is attempted.
+    ///
+    /// # Errors
+    /// [`Error::BadArg`] if a model fails to load in any stream.
+    #[cfg(any(feature = "deep-plc", feature = "osce"))]
+    pub fn set_dnn_blob(&mut self, data: &[u8]) -> Result<()> {
+        let mut ret = Ok(());
+        for d in &mut self.decoders {
+            if let Err(e) = d.set_dnn_blob(data) {
+                ret = Err(e);
+            }
+        }
+        ret
+    }
+
     /// Applies a SET request to every stream, stopping at the first error (C behaviour).
     fn set_all(&mut self, f: impl Fn(&mut Decoder) -> Result<()>) -> Result<()> {
         for d in &mut self.decoders {

@@ -174,10 +174,37 @@ struct Pair {
     stats: Stats,
 }
 
+/// A Rust decoder with the DNN models the C oracle has compiled in (the port loads them from a
+/// weight blob, upstream `OPUS_SET_DNN_BLOB`).
+fn rust_decoder(fs: i32, ch: i32) -> Decoder {
+    #[allow(unused_mut, reason = "only mutated with DNN features")]
+    let mut d = Decoder::new(fs, ch).unwrap();
+    #[cfg(any(feature = "deep-plc", feature = "osce"))]
+    d.set_dnn_blob(opusorus_oracle::dnn_integration::decoder_blob())
+        .unwrap();
+    d
+}
+
+/// A Rust multistream decoder with the oracle's DNN models (see [`rust_decoder`]).
+fn rust_ms_decoder(
+    fs: i32,
+    channels: i32,
+    streams: i32,
+    coupled: i32,
+    mapping: &[u8],
+) -> MsDecoder {
+    #[allow(unused_mut, reason = "only mutated with DNN features")]
+    let mut d = MsDecoder::new(fs, channels, streams, coupled, mapping).unwrap();
+    #[cfg(any(feature = "deep-plc", feature = "osce"))]
+    d.set_dnn_blob(opusorus_oracle::dnn_integration::decoder_blob())
+        .unwrap();
+    d
+}
+
 impl Pair {
     fn new(fs: i32, ch: i32) -> Self {
         Self {
-            r: Decoder::new(fs, ch).unwrap(),
+            r: rust_decoder(fs, ch),
             c: c::Dec::new(fs, ch).unwrap(),
             fs,
             ch: ch as usize,
@@ -1380,7 +1407,7 @@ fn multistream_decode() {
                 let c = rng.range_i32(1, 12);
                 (c, random_mapping(&mut rng, c, streams, coupled))
             };
-            let r = MsDecoder::new(dfs, channels, streams, coupled, &mapping).unwrap();
+            let r = rust_ms_decoder(dfs, channels, streams, coupled, &mapping);
             let c = c::MsDec::new(dfs, channels, streams, coupled, &mapping).unwrap();
             let mut p = MsPair {
                 r,
@@ -1515,6 +1542,10 @@ fn projection_decode() {
         }
         for &dfs in &[fs, pick(&mut rng, &RATES)] {
             let mut r = ProjectionDecoder::new(dfs, channels, streams, coupled, &matrix).unwrap();
+            #[cfg(any(feature = "deep-plc", feature = "osce"))]
+            r.ms_decoder()
+                .set_dnn_blob(opusorus_oracle::dnn_integration::decoder_blob())
+                .unwrap();
             let mut c = c::ProjDec::new(dfs, channels, streams, coupled, &matrix).unwrap();
             let max_fs = dfs / 25 * 3;
             for (i, pkt) in packets.iter().enumerate() {
@@ -1597,7 +1628,7 @@ fn projection_decode() {
         let sig = test_signal(fs, channels as usize, 1.0, rng.next_u64());
         let mut buf = vec![0u8; 40000];
         let mut p = MsPair {
-            r: MsDecoder::new(fs, channels, streams, coupled, &mapping).unwrap(),
+            r: rust_ms_decoder(fs, channels, streams, coupled, &mapping),
             c: c::MsDec::new(fs, channels, streams, coupled, &mapping).unwrap(),
             ch: channels as usize,
             streams,

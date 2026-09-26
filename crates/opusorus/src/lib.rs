@@ -69,6 +69,8 @@ pub mod analysis;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod analysis;
 pub mod decoder;
+#[cfg(feature = "dred")]
+pub mod dred;
 pub mod encoder;
 pub mod extensions;
 #[cfg(feature = "internals")]

@@ -20,9 +20,12 @@
 //! channels is rejected at init. C's `celt_assert`s (`validate_celt_decoder`) are
 //! `debug_assert!`s.
 //!
-//! DNN: `ENABLE_DEEP_PLC` / `ENABLE_DRED` are not ported yet. Their hook points carry
-//! `DNN hook` comments naming the C lines; the deep-PLC state fields exist under
-//! `#[cfg(feature = "deep-plc")]` so the reset region matches C.
+//! DNN (`deep-plc` / `dred` features, C `ENABLE_DEEP_PLC` / `ENABLE_DRED`): the neural PLC of
+//! `celt_decode_lost` (`FRAME_PLC_NEURAL` / `FRAME_DRED`, `update_plc_state`, the 16 → 48 kHz
+//! resampling of the LPCNet concealment) runs when an [`LpcnetPlcState`] is passed through
+//! [`CeltDecoder::celt_decode_with_ec_lpcnet`] (the C `lpcnet` argument of
+//! `celt_decode_with_ec_dred`); [`CeltDecoder::celt_decode_with_ec`] and
+//! [`CeltDecoder::celt_decode_with_ec_dred`] pass C's `NULL`.
 
 #![allow(
     clippy::needless_range_loop,
@@ -67,6 +70,10 @@ use crate::celt::rate::clt_compute_allocation;
 use crate::celt::rate::clt_compute_extra_allocation;
 use crate::celt::static_modes::CeltMode;
 use crate::celt::vq::renormalise_vector;
+#[cfg(feature = "deep-plc")]
+use crate::dnn::freq::{FRAME_SIZE as LPCNET_FRAME_SIZE, PREEMPHASIS as LPCNET_PREEMPHASIS};
+#[cfg(feature = "deep-plc")]
+use crate::dnn::lpcnet_plc::{LpcnetPlcState, lpcnet_plc_conceal, lpcnet_plc_update};
 use crate::{Error, Result};
 
 /// The maximum pitch lag to allow in the pitch-based PLC. It's possible to save CPU time in the
@@ -164,6 +171,9 @@ struct DecoderScratch {
     qext_collapse_masks: Vec<u8>,
     /// `quant_all_bands` scratch.
     bands: BandsScratch,
+    /// `buf_copy` of the neural PLC (`2*overlap`).
+    #[cfg(feature = "deep-plc")]
+    buf_copy: Vec<CeltSig>,
 }
 
 impl DecoderScratch {
@@ -194,6 +204,8 @@ impl DecoderScratch {
             #[cfg(feature = "qext")]
             qext_collapse_masks: vec![0; 2 * NB_QEXT_BANDS as usize],
             bands: BandsScratch::new(),
+            #[cfg(feature = "deep-plc")]
+            buf_copy: vec![0.0; 2 * overlap],
         }
     }
 }
@@ -256,7 +268,7 @@ pub struct CeltDecoder<'m> {
     pub prefilter_and_fold: i32,
     /// `preemph_memD`.
     pub preemph_mem_d: [CeltSig; 2],
-    /// `plc_pcm` (deep PLC; not used until the DNN port).
+    /// `plc_pcm` (deep PLC): LPCNet concealment output at 16 kHz waiting to be resampled.
     #[cfg(feature = "deep-plc")]
     pub plc_pcm: [i16; PLC_UPDATE_SAMPLES],
     /// `plc_fill` (deep PLC).
@@ -1013,7 +1025,12 @@ impl<'m> CeltDecoder<'m> {
 
     /// Port of celt/celt_decoder.c:celt_decode_lost: packet loss concealment (noise-based PLC
     /// or pitch-based PLC with LPC extrapolation) of one frame of `n` samples.
-    fn celt_decode_lost(&mut self, n: usize, lm: i32) {
+    fn celt_decode_lost(
+        &mut self,
+        n: usize,
+        lm: i32,
+        #[cfg(feature = "deep-plc")] mut lpcnet: Option<&mut LpcnetPlcState>,
+    ) {
         let cn = self.channels as usize;
         let dbs = self.decode_buffer_size();
         let max_period = (self.qext_scale() * MAX_PERIOD) as usize;
@@ -1029,8 +1046,20 @@ impl<'m> CeltDecoder<'m> {
         if self.plc_duration >= 40 || start != 0 || self.skip_plc != 0 {
             curr_frame_type = FRAME_PLC_NOISE;
         }
-        // DNN hook (deep-plc/dred): TODO port celt_decoder.c:726-736 (FRAME_PLC_NEURAL /
-        // FRAME_DRED selection when an LPCNet PLC state is loaded).
+        #[cfg(feature = "deep-plc")]
+        if let Some(l) = lpcnet.as_deref()
+            && start == 0
+            && mode.fs != 96000
+            && l.loaded
+        {
+            if self.complexity >= 5 && self.plc_duration < 80 && self.skip_plc == 0 {
+                curr_frame_type = FRAME_PLC_NEURAL;
+            }
+            #[cfg(feature = "dred")]
+            if l.fec_fill_pos > l.fec_read_pos {
+                curr_frame_type = FRAME_DRED;
+            }
+        }
 
         if curr_frame_type == FRAME_PLC_NOISE {
             // Noise-based PLC/CNG
@@ -1138,8 +1167,19 @@ impl<'m> CeltDecoder<'m> {
                 pitch_index = self.last_pitch_index;
                 fade = qconst16(0.8, 15);
             }
-            // DNN hook (deep-plc): TODO port celt_decoder.c:829-831 and 623-673 (update_plc_state when
-            // entering neural PLC).
+            #[cfg(feature = "deep-plc")]
+            if curr_neural
+                && !last_neural
+                && let Some(l) = lpcnet.as_deref_mut()
+            {
+                update_plc_state(
+                    l,
+                    &self.decode_mem,
+                    stride,
+                    &mut self.plc_preemphasis_mem,
+                    cn,
+                );
+            }
 
             // We want the excitation for 2 pitch periods in order to look for a decaying
             // signal, but we can't get more than MAX_PERIOD.
@@ -1300,17 +1340,105 @@ impl<'m> CeltDecoder<'m> {
                 }
             }
 
-            // DNN hook (deep-plc): TODO port celt_decoder.c:1020-1075 (neural PLC synthesis:
-            // lpcnet_plc_conceal, 16->48 kHz resampling, pre-emphasis and cross-fade).
+            #[cfg(feature = "deep-plc")]
+            if curr_neural && let Some(l) = lpcnet {
+                self.neural_plc_synthesis(l, n, dbs, stride, last_neural);
+            }
             self.prefilter_and_fold = 1;
         }
 
         // Saturate to something large to avoid wrap-around.
         self.loss_duration = imin(10000, loss_duration + (1 << lm));
         self.plc_duration = imin(10000, self.plc_duration + (1 << lm));
-        // DNN hook (dred): TODO port celt_decoder.c:1082-1087 (FRAME_DRED resets plc_duration
-        // and skip_plc).
+        #[cfg(feature = "dred")]
+        if curr_frame_type == FRAME_DRED {
+            self.plc_duration = 0;
+            self.skip_plc = 0;
+        }
         self.last_frame_type = curr_frame_type;
+    }
+
+    /// The `ENABLE_DEEP_PLC` block at the end of the pitch-based branch of
+    /// celt/celt_decoder.c:celt_decode_lost: replaces the extrapolated frame (plus overlap) by
+    /// the LPCNet concealment resampled from 16 to 48 kHz, re-applies the pre-emphasis, copies
+    /// channel 0 to channel 1 ("for now, we just do mono PLC") and cross-fades with the
+    /// pitch-based extrapolation when entering neural PLC.
+    #[cfg(feature = "deep-plc")]
+    fn neural_plc_synthesis(
+        &mut self,
+        lpcnet: &mut LpcnetPlcState,
+        n: usize,
+        dbs: usize,
+        stride: usize,
+        last_neural: bool,
+    ) {
+        let cn = self.channels as usize;
+        let overlap = self.mode.overlap as usize;
+        let window = &self.mode.window[..];
+        let buf_copy = &mut self.scratch.buf_copy;
+        for c in 0..cn {
+            buf_copy[c * overlap..(c + 1) * overlap]
+                .copy_from_slice(&self.decode_mem[c * stride + dbs - n..][..overlap]);
+        }
+
+        // Need enough samples from the PLC to cover the frame size, resampling delay, and the
+        // overlap at the end.
+        let samples_needed16k = (n + SINC_ORDER + overlap) / 3;
+        if !last_neural {
+            self.plc_fill = 0;
+        }
+        while (self.plc_fill as usize) < samples_needed16k {
+            lpcnet_plc_conceal(lpcnet, &mut self.plc_pcm[self.plc_fill as usize..]);
+            self.plc_fill += LPCNET_FRAME_SIZE as i32;
+        }
+        // Resample to 48 kHz.
+        let plc_pcm = &self.plc_pcm;
+        let buf = &mut self.decode_mem[..stride];
+        for i in 0..(n + overlap) / 3 {
+            let mut sum: f32 = 0.0;
+            for j in 0..17 {
+                sum += (3 * i32::from(plc_pcm[i + j])) as f32 * SINC_FILTER[3 * j];
+            }
+            buf[dbs - n + 3 * i] = sum;
+            let mut sum: f32 = 0.0;
+            for j in 0..16 {
+                sum += (3 * i32::from(plc_pcm[i + j + 1])) as f32 * SINC_FILTER[3 * j + 2];
+            }
+            buf[dbs - n + 3 * i + 1] = sum;
+            let mut sum: f32 = 0.0;
+            for j in 0..16 {
+                sum += (3 * i32::from(plc_pcm[i + j + 1])) as f32 * SINC_FILTER[3 * j + 1];
+            }
+            buf[dbs - n + 3 * i + 2] = sum;
+        }
+        let n3 = n / 3;
+        self.plc_pcm.copy_within(n3..self.plc_fill as usize, 0);
+        self.plc_fill -= n3 as i32;
+        for v in &mut buf[dbs - n..dbs] {
+            let tmp = *v;
+            *v -= LPCNET_PREEMPHASIS * self.plc_preemphasis_mem;
+            self.plc_preemphasis_mem = tmp;
+        }
+        let mut overlap_mem = self.plc_preemphasis_mem;
+        for v in &mut buf[dbs..dbs + overlap] {
+            let tmp = *v;
+            *v -= LPCNET_PREEMPHASIS * overlap_mem;
+            overlap_mem = tmp;
+        }
+        // For now, we just do mono PLC.
+        if cn == 2 {
+            self.decode_mem.copy_within(0..dbs + overlap, stride);
+        }
+        // Cross-fade with 48-kHz non-neural PLC for the first 2.5 ms to avoid a discontinuity.
+        if !last_neural {
+            for c in 0..cn {
+                let d = &mut self.decode_mem[c * stride + dbs - n..][..overlap];
+                let bc = &buf_copy[c * overlap..(c + 1) * overlap];
+                for i in 0..overlap {
+                    d[i] = (1.0 - window[i]) * bc[i] + window[i] * d[i];
+                }
+            }
+        }
     }
 
     /// De-emphasis of the `n` output samples of every channel into `pcm`.
@@ -1359,17 +1487,15 @@ impl<'m> CeltDecoder<'m> {
             frame_size,
             dec,
             accum,
-            // DNN hook (deep-plc): C passes lpcnet = NULL here (celt_decoder.c:1619-1621).
+            // C passes lpcnet = NULL here (celt_decoder.c:1619-1621).
             #[cfg(feature = "qext")]
             None,
         )
     }
 
-    /// Port of celt/celt_decoder.c:celt_decode_with_ec_dred: [`Self::celt_decode_with_ec`]
-    /// plus (QEXT) the extension payload `qext_payload`.
-    ///
-    /// DNN hook (deep-plc): TODO the C `LPCNetPLCState *lpcnet` argument (celt_decoder.c:1102-1104,
-    /// passed on to `celt_decode_lost` at 676-678 and 1280-1282) is not ported yet.
+    /// Port of celt/celt_decoder.c:celt_decode_with_ec_dred without the deep-PLC state (C
+    /// `lpcnet == NULL`): [`Self::celt_decode_with_ec`] plus (QEXT) the extension payload
+    /// `qext_payload`. See [`Self::celt_decode_with_ec_lpcnet`] for the neural PLC.
     #[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
     pub fn celt_decode_with_ec_dred(
         &mut self,
@@ -1379,6 +1505,63 @@ impl<'m> CeltDecoder<'m> {
         frame_size: i32,
         dec: Option<&mut EcDec<'_>>,
         accum: bool,
+        #[cfg(feature = "qext")] qext_payload: Option<&[u8]>,
+    ) -> Result<i32> {
+        self.decode_impl(
+            data,
+            len,
+            pcm,
+            frame_size,
+            dec,
+            accum,
+            #[cfg(feature = "deep-plc")]
+            None,
+            #[cfg(feature = "qext")]
+            qext_payload,
+        )
+    }
+
+    /// Port of celt/celt_decoder.c:celt_decode_with_ec_dred with its `ENABLE_DEEP_PLC`
+    /// `LPCNetPLCState *lpcnet` argument: lost frames use the neural PLC (`FRAME_PLC_NEURAL`, at
+    /// complexity >= 5) or the DRED features queued in `lpcnet` (`FRAME_DRED`) when `lpcnet` has
+    /// a loaded model; a received frame clears `lpcnet.blend`.
+    #[cfg(feature = "deep-plc")]
+    #[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
+    pub fn celt_decode_with_ec_lpcnet(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [OpusRes],
+        frame_size: i32,
+        dec: Option<&mut EcDec<'_>>,
+        accum: bool,
+        lpcnet: Option<&mut LpcnetPlcState>,
+        #[cfg(feature = "qext")] qext_payload: Option<&[u8]>,
+    ) -> Result<i32> {
+        self.decode_impl(
+            data,
+            len,
+            pcm,
+            frame_size,
+            dec,
+            accum,
+            lpcnet,
+            #[cfg(feature = "qext")]
+            qext_payload,
+        )
+    }
+
+    /// The body of `celt_decode_with_ec_dred`.
+    #[allow(clippy::too_many_arguments, reason = "mirrors the C signature")]
+    fn decode_impl(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [OpusRes],
+        frame_size: i32,
+        dec: Option<&mut EcDec<'_>>,
+        accum: bool,
+        #[cfg(feature = "deep-plc")] lpcnet: Option<&mut LpcnetPlcState>,
         #[cfg(feature = "qext")] qext_payload: Option<&[u8]>,
     ) -> Result<i32> {
         validate_celt_decoder(self);
@@ -1437,12 +1620,22 @@ impl<'m> CeltDecoder<'m> {
         let data = match data {
             Some(d) if len > 1 => &d[..len as usize],
             _ => {
-                self.celt_decode_lost(n, lm);
+                self.celt_decode_lost(
+                    n,
+                    lm,
+                    #[cfg(feature = "deep-plc")]
+                    lpcnet,
+                );
                 self.deemphasis_out(pcm, n, accum);
                 return Ok(frame_size / self.downsample);
             }
         };
-        // DNN hook (deep-plc): TODO port celt_decoder.c:1288-1293 (lpcnet->blend = 0).
+        // FIXME (C): This is a bit of a hack just to make sure opus_decode_native() knows we're
+        // no longer in PLC.
+        #[cfg(feature = "deep-plc")]
+        if let Some(l) = lpcnet {
+            l.blend = 0;
+        }
 
         // Check if there are at least two packets received consecutively before turning on
         // the pitch-based PLC
@@ -2290,6 +2483,111 @@ impl<'m> CeltDecoder<'m> {
             _ => Err(Error::Unimplemented),
         }
     }
+}
+
+/// `SINC_ORDER` (celt_decoder.c, deep PLC).
+#[cfg(feature = "deep-plc")]
+const SINC_ORDER: usize = 48;
+
+/// `sinc_filter` (celt_decoder.c, deep PLC): the 16 ↔ 48 kHz resampling filter
+/// (`h=cos(pi/2*abs(sin([-24:24]/48*pi*23./24)).^2); b=sinc([-24:24]/3*1.02).*h; b=b/sum(b);`).
+#[cfg(feature = "deep-plc")]
+const SINC_FILTER: [f32; SINC_ORDER + 1] = [
+    4.2931e-05,
+    -0.000190293,
+    -0.000816132,
+    -0.000637162,
+    0.00141662,
+    0.00354764,
+    0.00184368,
+    -0.00428274,
+    -0.00856105,
+    -0.0034003,
+    0.00930201,
+    0.0159616,
+    0.00489785,
+    -0.0169649,
+    -0.0259484,
+    -0.00596856,
+    0.0286551,
+    0.0405872,
+    0.00649994,
+    -0.0509284,
+    -0.0716655,
+    -0.00665212,
+    0.134336,
+    0.278927,
+    0.339995,
+    0.278927,
+    0.134336,
+    -0.00665212,
+    -0.0716655,
+    -0.0509284,
+    0.00649994,
+    0.0405872,
+    0.0286551,
+    -0.00596856,
+    -0.0259484,
+    -0.0169649,
+    0.00489785,
+    0.0159616,
+    0.00930201,
+    -0.0034003,
+    -0.00856105,
+    -0.00428274,
+    0.00184368,
+    0.00354764,
+    0.00141662,
+    -0.000637162,
+    -0.000816132,
+    -0.000190293,
+    4.2931e-05,
+];
+
+/// Port of celt/celt_decoder.c:update_plc_state: feeds the last 40 ms of decoded audio
+/// (`decode_mem`, channel `c` at `c*stride`; downmixed when `cc == 2`), downsampled to 16 kHz,
+/// to the LPCNet PLC state before the first neural concealment, keeping its FEC read position.
+#[cfg(feature = "deep-plc")]
+fn update_plc_state(
+    lpcnet: &mut LpcnetPlcState,
+    decode_mem: &[CeltSig],
+    stride: usize,
+    plc_preemphasis_mem: &mut f32,
+    cc: usize,
+) {
+    const DBS: usize = DECODE_BUFFER_SIZE as usize;
+    let mut buf48k = [0f32; DBS];
+    let mut buf16k = [0i16; PLC_UPDATE_SAMPLES];
+    if cc == 1 {
+        buf48k.copy_from_slice(&decode_mem[..DBS]);
+    } else {
+        let (d0, d1) = (&decode_mem[..DBS], &decode_mem[stride..stride + DBS]);
+        for i in 0..DBS {
+            // C: `.5*(a + b)` is a double multiply.
+            buf48k[i] = (0.5f64 * f64::from(d0[i] + d1[i])) as f32;
+        }
+    }
+    // Down-sample the last 40 ms.
+    for i in 1..DBS {
+        buf48k[i] += LPCNET_PREEMPHASIS * buf48k[i - 1];
+    }
+    *plc_preemphasis_mem = buf48k[DBS - 1];
+    let offset = DBS - SINC_ORDER - 1 - 3 * (PLC_UPDATE_SAMPLES - 1);
+    debug_assert!(3 * (PLC_UPDATE_SAMPLES - 1) + SINC_ORDER + offset == DBS - 1);
+    for i in 0..PLC_UPDATE_SAMPLES {
+        let mut sum: f32 = 0.0;
+        for j in 0..SINC_ORDER + 1 {
+            sum += buf48k[3 * i + j + offset] * SINC_FILTER[j];
+        }
+        buf16k[i] = crate::celt::mathops::float2int(min32(32767.0, max32(-32767.0, sum))) as i16;
+    }
+    let tmp_read_post = lpcnet.fec_read_pos;
+    let tmp_fec_skip = lpcnet.fec_skip;
+    for i in 0..PLC_UPDATE_FRAMES {
+        lpcnet_plc_update(lpcnet, &buf16k[LPCNET_FRAME_SIZE * i..]);
+    }
+    lpcnet.fec_read_pos = tmp_read_post;
+    lpcnet.fec_skip = tmp_fec_skip;
 }
 
 /// Packet header values of `celt_decode_with_ec_dred` (possibly updated by the custom-mode
