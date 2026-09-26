@@ -33,6 +33,19 @@ cross:
     echo "== thumbv7em-none-eabihf (no_std)"; cargo build -q -p opusorus --release --no-default-features --target thumbv7em-none-eabihf
     echo "== wasm32-unknown-unknown (no_std)"; cargo build -q -p opusorus --release --no-default-features --target wasm32-unknown-unknown
 
+# Build the C-ABI static library for every mobile/desktop target. The C glue for variadic ctls is
+# compiled with host clang in freestanding mode; final shared-library linking needs the platform
+# SDK (NDK/Xcode), so only the static library is produced here.
+cross-capi:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in x86_64-unknown-linux-gnu aarch64-linux-android armv7-linux-androideabi x86_64-linux-android aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+        tu=${t//-/_}
+        echo "== capi $t"
+        env SDKROOT=/tmp "CC_$tu=clang" "CFLAGS_$tu=-ffreestanding" \
+            cargo rustc -q -p opusorus-capi --lib --release --target "$t" --crate-type staticlib
+    done
+
 # Run the library's own tests under wasmtime (wasm32-wasip1).
 test-wasm:
     CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1
@@ -55,4 +68,4 @@ fuzz target secs="60":
     cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
 
 # Everything CI runs.
-ci: fmt clippy test cross test-wasm
+ci: fmt clippy test cross cross-capi test-wasm
