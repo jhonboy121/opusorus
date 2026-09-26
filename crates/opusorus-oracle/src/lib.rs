@@ -22,6 +22,7 @@ pub mod celt_pitch_lpc;
 pub mod dnn_core;
 pub mod dnn_plc;
 pub mod dnn_dred;
+pub mod dnn_osce;
 pub mod opus_decoder;
 pub mod opus_encoder;
 pub mod opus_packet;
