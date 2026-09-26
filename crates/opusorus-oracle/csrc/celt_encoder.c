@@ -12,7 +12,12 @@
  * prefill, QEXT, ...).
  *
  * Part C is a direct API over a persistent library CELT encoder plus shims for the static
- * helpers. */
+ * helpers.
+ *
+ * Built in the float and in the fixed-point oracle: every signal/state value uses the build's
+ * C type (opus_res, celt_sig, celt_norm, celt_glog, opus_val16/32); the AnalysisInfo fields
+ * are float in both builds. */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -35,6 +40,9 @@
 #define opus_custom_encode24 oracle_ce_dup_opus_custom_encode24
 #define opus_custom_encode_float oracle_ce_dup_opus_custom_encode_float
 #define opus_custom_encoder_ctl oracle_ce_dup_opus_custom_encoder_ctl
+/* Non-static fixed-point helpers (also defined by the library's celt_encoder.o). */
+#define normalize_tone_input oracle_ce_dup_normalize_tone_input
+#define acos_approx oracle_ce_dup_acos_approx
 /* Relative path: a bare "celt_encoder.c" would resolve to this shim itself. */
 #include "../../../vendor/libopus/celt/celt_encoder.c"
 #undef celt_encoder_get_size
@@ -49,6 +57,8 @@
 #undef opus_custom_encode24
 #undef opus_custom_encode_float
 #undef opus_custom_encoder_ctl
+#undef normalize_tone_input
+#undef acos_approx
 
 /* The real library functions (their header prototypes were renamed above). */
 int celt_encoder_get_size(int channels);
@@ -100,10 +110,10 @@ typedef struct {
   int mode_fs, mode_short_mdct_size, mode_nb_short_mdcts, mode_nb_ebands, mode_overlap;
   unsigned int rng;
   int spread_decision;
-  float delayed_intra;
+  opus_val32 delayed_intra;
   int tonal_average, last_coded_bands, hf_average, tapset_decision;
   int prefilter_period;
-  float prefilter_gain;
+  opus_val16 prefilter_gain;
   int prefilter_tapset, consec_transient;
   int an_valid;
   float an_tonality, an_tonality_slope, an_noisiness, an_activity, an_music_prob,
@@ -112,20 +122,21 @@ typedef struct {
   float an_activity_probability, an_max_pitch_ratio;
   unsigned char an_leak_boost[20];
   int silk_signal_type, silk_offset;
-  float preemph_mem_e[2], preemph_mem_d[2];
+  opus_val32 preemph_mem_e[2], preemph_mem_d[2];
   int vbr_reservoir, vbr_drift, vbr_offset, vbr_count;
-  float overlap_max, stereo_saving;
+  opus_val32 overlap_max;
+  opus_val16 stereo_saving;
   int intensity;
   int has_energy_mask;
-  float energy_mask[2 * CE_MAX_BANDS];
-  float spec_avg;
-  float in_mem[2 * CE_MAX_OVERLAP];
-  float prefilter_mem[2 * CE_MAX_PERIOD];
-  float old_band_e[2 * CE_MAX_BANDS];
-  float old_log_e[2 * CE_MAX_BANDS];
-  float old_log_e2[2 * CE_MAX_BANDS];
-  float energy_error[2 * CE_MAX_BANDS];
-  float qext_old_band_e[2 * CE_QEXT_BANDS];
+  celt_glog energy_mask[2 * CE_MAX_BANDS];
+  celt_glog spec_avg;
+  celt_sig in_mem[2 * CE_MAX_OVERLAP];
+  celt_sig prefilter_mem[2 * CE_MAX_PERIOD];
+  celt_glog old_band_e[2 * CE_MAX_BANDS];
+  celt_glog old_log_e[2 * CE_MAX_BANDS];
+  celt_glog old_log_e2[2 * CE_MAX_BANDS];
+  celt_glog energy_error[2 * CE_MAX_BANDS];
+  celt_glog qext_old_band_e[2 * CE_QEXT_BANDS];
 } OracleCeState;
 
 size_t oracle_ce_state_size(void) { return sizeof(OracleCeState); }
@@ -137,6 +148,9 @@ size_t oracle_ce_state_offset(int which) {
     case 3: return offsetof(OracleCeState, energy_mask);
     case 4: return offsetof(OracleCeState, in_mem);
     case 5: return offsetof(OracleCeState, qext_old_band_e);
+    case 6: return offsetof(OracleCeState, prefilter_gain);
+    case 7: return offsetof(OracleCeState, stereo_saving);
+    case 8: return offsetof(OracleCeState, spec_avg);
     default: return 0;
   }
 }
@@ -223,16 +237,16 @@ static void dump_state(const CELTEncoder *st, OracleCeState *d) {
   d->stereo_saving = st->stereo_saving;
   d->intensity = st->intensity;
   d->has_energy_mask = st->energy_mask != NULL;
-  if (st->energy_mask) memcpy(d->energy_mask, st->energy_mask, CC * nb * sizeof(float));
+  if (st->energy_mask) memcpy(d->energy_mask, st->energy_mask, CC * nb * sizeof(celt_glog));
   d->spec_avg = st->spec_avg;
-  memcpy(d->in_mem, st->in_mem, CC * ov * sizeof(float));
-  memcpy(d->prefilter_mem, prefilter_mem, CC * mp * sizeof(float));
-  memcpy(d->old_band_e, oldBandE, CC * nb * sizeof(float));
-  memcpy(d->old_log_e, oldLogE, CC * nb * sizeof(float));
-  memcpy(d->old_log_e2, oldLogE2, CC * nb * sizeof(float));
-  memcpy(d->energy_error, energyError, CC * nb * sizeof(float));
+  memcpy(d->in_mem, st->in_mem, CC * ov * sizeof(celt_sig));
+  memcpy(d->prefilter_mem, prefilter_mem, CC * mp * sizeof(celt_sig));
+  memcpy(d->old_band_e, oldBandE, CC * nb * sizeof(celt_glog));
+  memcpy(d->old_log_e, oldLogE, CC * nb * sizeof(celt_glog));
+  memcpy(d->old_log_e2, oldLogE2, CC * nb * sizeof(celt_glog));
+  memcpy(d->energy_error, energyError, CC * nb * sizeof(celt_glog));
 #ifdef ENABLE_QEXT
-  memcpy(d->qext_old_band_e, energyError + CC * nb, CC * NB_QEXT_BANDS * sizeof(float));
+  memcpy(d->qext_old_band_e, energyError + CC * nb, CC * NB_QEXT_BANDS * sizeof(celt_glog));
 #endif
 }
 
@@ -281,7 +295,7 @@ typedef struct {
   OracleCeState pre, post;
   int frame_size, nb_compressed_bytes, ret;
   int has_compressed, has_enc;
-  float *pcm;
+  opus_res *pcm;
   int pcm_len;
   unsigned char *comp_before, *comp_after;
   int comp_len;
@@ -333,8 +347,8 @@ static int oracle_ce_intercept(CELTEncoder *st, const opus_res *pcm, int frame_s
   c->frame_size = frame_size;
   c->nb_compressed_bytes = nbCompressedBytes;
   c->pcm_len = st->channels * frame_size;
-  c->pcm = (float *)malloc(sizeof(float) * (c->pcm_len > 0 ? c->pcm_len : 1));
-  memcpy(c->pcm, pcm, sizeof(float) * c->pcm_len);
+  c->pcm = (opus_res *)malloc(sizeof(opus_res) * (c->pcm_len > 0 ? c->pcm_len : 1));
+  memcpy(c->pcm, pcm, sizeof(opus_res) * c->pcm_len);
   c->has_compressed = compressed != NULL;
   if (compressed) {
     c->comp_len = nbCompressedBytes;
@@ -378,6 +392,7 @@ static int oracle_ce_intercept(CELTEncoder *st, const opus_res *pcm, int frame_s
 #define opus_encode_float oracle_ce_dup_opus_encode_float
 #define opus_encoder_ctl oracle_ce_dup_opus_encoder_ctl
 #define opus_encoder_destroy oracle_ce_dup_opus_encoder_destroy
+#define silk_biquad_res oracle_ce_dup_silk_biquad_res
 #define celt_encode_with_ec oracle_ce_intercept
 #include "../../../vendor/libopus/src/opus_encoder.c"
 #undef celt_encode_with_ec
@@ -396,6 +411,7 @@ static int oracle_ce_intercept(CELTEncoder *st, const opus_res *pcm, int frame_s
 #undef opus_encode_float
 #undef opus_encoder_ctl
 #undef opus_encoder_destroy
+#undef silk_biquad_res
 
 OpusEncoder *oracle_ce_opus_create(int fs, int channels, int application, int *err) {
   return oracle_ce_dup_opus_encoder_create(fs, channels, application, err);
@@ -422,7 +438,7 @@ int oracle_ce_opus_encode_float(OpusEncoder *st, const float *pcm, int frame_siz
 typedef struct {
   CELTEncoder *st;
   CELTMode *custom_mode;
-  float mask[2 * CE_MAX_BANDS];
+  celt_glog mask[2 * CE_MAX_BANDS];
 } CeHandle;
 
 CeHandle *oracle_ce_new(int fs, int channels, int *err) {
@@ -520,26 +536,27 @@ void oracle_ce_set_silk_info(CeHandle *h, int signal_type, int offset) {
   opus_custom_encoder_ctl(h->st, CELT_SET_SILK_INFO(&s));
 }
 
-void oracle_ce_set_energy_mask(CeHandle *h, const float *mask, int n) {
+void oracle_ce_set_energy_mask(CeHandle *h, const celt_glog *mask, int n) {
   if (!mask) {
     opus_custom_encoder_ctl(h->st, OPUS_SET_ENERGY_MASK((celt_glog *)NULL));
     return;
   }
   memset(h->mask, 0, sizeof(h->mask));
-  memcpy(h->mask, mask, n * sizeof(float));
+  memcpy(h->mask, mask, n * sizeof(celt_glog));
   opus_custom_encoder_ctl(h->st, OPUS_SET_ENERGY_MASK(h->mask));
 }
 
 void oracle_ce_get_state(const CeHandle *h, OracleCeState *out) { dump_state(h->st, out); }
 
-int oracle_ce_encode(CeHandle *h, const float *pcm, int frame_size, unsigned char *out, int nb) {
+int oracle_ce_encode(CeHandle *h, const opus_res *pcm, int frame_size, unsigned char *out,
+                     int nb) {
   return celt_encode_with_ec(h->st, pcm, frame_size, out, nb, NULL);
 }
 
 /* Hybrid-style call: buf[0] is the TOC byte, the range coder covers buf[1..buf_size). The
  * (kind, value, param) ops simulate SILK data, then the coder is shrunk to `nb` bytes (when
  * smaller) and CELT encodes with the shared coder. */
-int oracle_ce_encode_with_ec(CeHandle *h, const float *pcm, int frame_size, unsigned char *buf,
+int oracle_ce_encode_with_ec(CeHandle *h, const opus_res *pcm, int frame_size, unsigned char *buf,
                              int buf_size, int nb, const int *ops, int n_ops,
                              OracleEcState *out_enc, int *buf_shift) {
   ec_enc enc;
@@ -590,30 +607,31 @@ static const CELTMode *ce_mode(int fs) {
   return opus_custom_mode_create(fs, fs / 50, NULL);
 }
 
-int oracle_ce_transient_analysis(const float *in, int len, int C, float *tf_estimate,
-                                 int *tf_chan, int allow_weak, int *weak, float tone_freq,
-                                 float toneishness) {
+int oracle_ce_transient_analysis(const opus_val32 *in, int len, int C, opus_val16 *tf_estimate,
+                                 int *tf_chan, int allow_weak, int *weak, opus_val16 tone_freq,
+                                 opus_val32 toneishness) {
   return transient_analysis(in, len, C, tf_estimate, tf_chan, allow_weak, weak, tone_freq,
                             toneishness);
 }
 
-int oracle_ce_patch_transient_decision(float *newE, float *oldE, int nbEBands, int start,
+int oracle_ce_patch_transient_decision(celt_glog *newE, celt_glog *oldE, int nbEBands, int start,
                                        int end, int C) {
   return patch_transient_decision(newE, oldE, nbEBands, start, end, C);
 }
 
-void oracle_ce_compute_mdcts(int fs, int shortBlocks, float *in, float *out, int C, int CC,
+void oracle_ce_compute_mdcts(int fs, int shortBlocks, celt_sig *in, celt_sig *out, int C, int CC,
                              int LM, int upsample) {
   compute_mdcts(ce_mode(fs), shortBlocks, in, out, C, CC, LM, upsample, 0);
 }
 
-void oracle_ce_preemphasis(const float *pcm, float *inp, int N, int CC, int upsample,
-                           const float *coef, float *mem, int clip) {
+void oracle_ce_preemphasis(const opus_res *pcm, celt_sig *inp, int N, int CC, int upsample,
+                           const opus_val16 *coef, celt_sig *mem, int clip) {
   celt_preemphasis(pcm, inp, N, CC, upsample, coef, mem, clip);
 }
 
-int oracle_ce_tf_analysis(int fs, int len, int isTransient, int *tf_res, int lambda, float *X,
-                          int N0, int LM, float tf_estimate, int tf_chan, int *importance) {
+int oracle_ce_tf_analysis(int fs, int len, int isTransient, int *tf_res, int lambda,
+                          celt_norm *X, int N0, int LM, opus_val16 tf_estimate, int tf_chan,
+                          int *importance) {
   return tf_analysis(ce_mode(fs), len, isTransient, tf_res, lambda, X, N0, LM, tf_estimate,
                      tf_chan, importance);
 }
@@ -629,10 +647,10 @@ void oracle_ce_tf_encode(int start, int end, int isTransient, int *tf_res, int L
   ec_snap(&enc, out);
 }
 
-int oracle_ce_alloc_trim_analysis(int fs, const float *X, const float *bandLogE, int end,
+int oracle_ce_alloc_trim_analysis(int fs, const celt_norm *X, const celt_glog *bandLogE, int end,
                                   int LM, int C, int N0, int an_valid, float tonality_slope,
-                                  float *stereo_saving, float tf_estimate, int intensity,
-                                  float surround_trim, int equiv_rate) {
+                                  opus_val16 *stereo_saving, opus_val16 tf_estimate,
+                                  int intensity, celt_glog surround_trim, int equiv_rate) {
   AnalysisInfo a;
   memset(&a, 0, sizeof(a));
   a.valid = an_valid;
@@ -641,20 +659,22 @@ int oracle_ce_alloc_trim_analysis(int fs, const float *X, const float *bandLogE,
                              tf_estimate, intensity, surround_trim, equiv_rate, 0);
 }
 
-int oracle_ce_stereo_analysis(int fs, const float *X, int LM, int N0) {
+int oracle_ce_stereo_analysis(int fs, const celt_norm *X, int LM, int N0) {
   return stereo_analysis(ce_mode(fs), X, LM, N0);
 }
 
-float oracle_ce_median_of_5(const float *x) { return median_of_5(x); }
-float oracle_ce_median_of_3(const float *x) { return median_of_3(x); }
+celt_glog oracle_ce_median_of_5(const celt_glog *x) { return median_of_5(x); }
+celt_glog oracle_ce_median_of_3(const celt_glog *x) { return median_of_3(x); }
 
-float oracle_ce_dynalloc_analysis(int fs, const float *bandLogE, const float *bandLogE2,
-                                  const float *oldBandE, int start, int end, int C, int *offsets,
-                                  int lsb_depth, int isTransient, int vbr, int constrained_vbr,
-                                  int LM, int effectiveBytes, int *tot_boost, int lfe,
-                                  float *surround_dynalloc, int an_valid,
-                                  const unsigned char *leak_boost, int *importance,
-                                  int *spread_weight, float tone_freq, float toneishness) {
+celt_glog oracle_ce_dynalloc_analysis(int fs, const celt_glog *bandLogE,
+                                      const celt_glog *bandLogE2, const celt_glog *oldBandE,
+                                      int start, int end, int C, int *offsets, int lsb_depth,
+                                      int isTransient, int vbr, int constrained_vbr, int LM,
+                                      int effectiveBytes, int *tot_boost, int lfe,
+                                      celt_glog *surround_dynalloc, int an_valid,
+                                      const unsigned char *leak_boost, int *importance,
+                                      int *spread_weight, opus_val16 tone_freq,
+                                      opus_val32 toneishness) {
   const CELTMode *m = ce_mode(fs);
   AnalysisInfo a;
   memset(&a, 0, sizeof(a));
@@ -667,20 +687,66 @@ float oracle_ce_dynalloc_analysis(int fs, const float *bandLogE, const float *ba
                            ARG_QEXT(fs == 96000 ? 2 : 1));
 }
 
-int oracle_ce_tone_lpc(const float *x, int len, int delay, float *lpc) {
+int oracle_ce_tone_lpc(const opus_val16 *x, int len, int delay, opus_val32 *lpc) {
   return tone_lpc(x, len, delay, lpc);
 }
 
-float oracle_ce_tone_detect(const float *in, int CC, int N, float *toneishness, int Fs) {
+opus_val16 oracle_ce_tone_detect(const celt_sig *in, int CC, int N, opus_val32 *toneishness,
+                                 int Fs) {
   return tone_detect(in, CC, N, toneishness, Fs);
+}
+
+#ifdef FIXED_POINT
+void oracle_ce_normalize_tone_input(opus_val16 *x, int len) {
+  oracle_ce_dup_normalize_tone_input(x, len);
+}
+int oracle_ce_acos_approx(opus_val32 x) { return oracle_ce_dup_acos_approx(x); }
+#endif
+
+/* run_prefilter on a scratch encoder state: the st-> fields it reads/writes are passed flat. */
+int oracle_ce_run_prefilter(int fs, int CC, int N, celt_sig *in, celt_sig *prefilter_mem,
+                            celt_sig *in_mem, int *prefilter_period, opus_val16 prefilter_gain,
+                            int prefilter_tapset, int loss_rate, int tapset, int *pitch,
+                            opus_val16 *gain, int *qgain, int enabled, int complexity,
+                            opus_val16 tf_estimate, int nbAvailableBytes, int an_valid,
+                            float max_pitch_ratio, opus_val16 tone_freq,
+                            opus_val32 toneishness) {
+  const CELTMode *m = ce_mode(fs);
+  int qext_scale = fs == 96000 ? 2 : 1;
+  int ov = m->overlap;
+  int ret;
+  AnalysisInfo a;
+  CELTEncoder *st = (CELTEncoder *)calloc(1, oracle_ce_dup_opus_custom_encoder_get_size(m, CC));
+  memset(&a, 0, sizeof(a));
+  a.valid = an_valid;
+  a.max_pitch_ratio = max_pitch_ratio;
+  st->mode = m;
+  st->channels = CC;
+  st->loss_rate = loss_rate;
+  st->prefilter_period = *prefilter_period;
+  st->prefilter_gain = prefilter_gain;
+  st->prefilter_tapset = prefilter_tapset;
+#ifdef ENABLE_QEXT
+  st->qext_scale = qext_scale;
+#else
+  (void)qext_scale;
+#endif
+  memcpy(st->in_mem, in_mem, CC * ov * sizeof(celt_sig));
+  ret = run_prefilter(st, in, prefilter_mem, CC, N, tapset, pitch, gain, qgain, enabled,
+                      complexity, tf_estimate, nbAvailableBytes, &a, tone_freq, toneishness
+                      ARG_QEXT(qext_scale));
+  memcpy(in_mem, st->in_mem, CC * ov * sizeof(celt_sig));
+  *prefilter_period = st->prefilter_period;
+  free(st);
+  return ret;
 }
 
 int oracle_ce_compute_vbr(int fs, int an_valid, float activity, float tonality, int base_target,
                           int LM, int bitrate, int lastCodedBands, int C, int intensity,
-                          int constrained_vbr, float stereo_saving, int tot_boost,
-                          float tf_estimate, int pitch_change, float maxDepth, int lfe,
-                          int has_surround_mask, float surround_masking, float temporal_vbr,
-                          int enable_qext) {
+                          int constrained_vbr, opus_val16 stereo_saving, int tot_boost,
+                          opus_val16 tf_estimate, int pitch_change, celt_glog maxDepth, int lfe,
+                          int has_surround_mask, celt_glog surround_masking,
+                          celt_glog temporal_vbr, int enable_qext) {
   AnalysisInfo a;
   memset(&a, 0, sizeof(a));
   a.valid = an_valid;

@@ -20,8 +20,16 @@
 //! * `RESYNTH` (debug-only re-synthesis, never enabled in libopus builds) is not ported.
 //! * The QEXT mode (`compute_qext_mode(mode)`, a pure function of the mode) is computed once at
 //!   init instead of every frame.
-//! * `FUZZING` branches are not ported. `FIXED_POINT` branches are skipped with markers.
+//! * `FUZZING` branches are not ported.
 //! * There are no DNN (deep PLC / DRED / OSCE) hooks in this file.
+//!
+//! Fixed-point build (`FIXED_POINT`, feature `fixed-point`): the analysis helpers whose
+//! arithmetic differs (transient/tone analysis, pre-emphasis, L1 metric, trim, stereo analysis,
+//! dynalloc, pre-filter, VBR target, surround masking, temporal VBR) have their fixed-point
+//! versions, with the same names and signatures, in the private `fixed` submodule; the
+//! remaining `#ifdef FIXED_POINT` differences of `celt_encode_with_ec` are `#[cfg]` blocks.
+//! Values then use the C Q formats: Q15 gains, Q14 `tf_estimate`, Q13 `tone_freq`, Q29
+//! `toneishness`, Q8 `stereo_saving`, Q24 log energies and `SIG_SHIFT` signals.
 
 #![allow(
     clippy::needless_range_loop,
@@ -36,36 +44,66 @@ use alloc::vec::Vec;
 #[cfg(feature = "qext")]
 use crate::celt::arch::Q15ONE;
 use crate::celt::arch::{
-    CeltEner, CeltGlog, CeltNorm, CeltSig, EPSILON, OpusRes, OpusVal16, OpusVal32, abs16, abs32,
-    half16, half32, imax, imin, max16, max32, maxg, min16, min32, ming, res2sig,
+    CeltEner, CeltGlog, CeltNorm, CeltSig, EPSILON, OpusRes, OpusVal16, OpusVal32, abs32,
+    celt_isnan, gconst, half32, imax, imin, max32, maxg, min32, ming,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{
+    DB_SHIFT, RES_SHIFT, mult16_16_q14, mult16_32_q15, qconst16, qconst32, shl32,
+};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::{abs16, half16, max16, min16, res2sig};
+#[cfg(all(feature = "fixed-point", feature = "qext"))]
+use crate::celt::arch::{mult16_16_q15, pshr32};
 use crate::celt::bands::{
     BandsScratch, SPREAD_AGGRESSIVE, SPREAD_NONE, SPREAD_NORMAL, compute_band_energies, haar1,
     hysteresis_decision, normalise_bands, quant_all_bands, spreading_decision,
 };
-use crate::celt::celt::{AnalysisInfo, LEAK_BANDS};
+use crate::celt::celt::AnalysisInfo;
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::celt::COMBFILTER_MINPERIOD;
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::celt::LEAK_BANDS;
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::celt::comb_filter;
 use crate::celt::celt::{
-    COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD, SPREAD_ICDF, SilkInfo, TAPSET_ICDF,
-    TF_SELECT_TABLE, TRIM_ICDF, bitrate_to_bits, comb_filter, init_caps, resampling_factor,
+    COMBFILTER_MAXPERIOD, SPREAD_ICDF, SilkInfo, TAPSET_ICDF, TF_SELECT_TABLE, TRIM_ICDF,
+    bitrate_to_bits, init_caps, resampling_factor,
 };
 use crate::celt::entcode::{BITRES, EcCoder, ec_ilog};
 use crate::celt::entenc::EcEnc;
-use crate::celt::mathops::{PI, celt_exp2_db, celt_log2, celt_maxabs_res, celt_rcp};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::mathops::{PI, celt_exp2_db, celt_log2};
+use crate::celt::mathops::{celt_maxabs_res, celt_rcp};
 use crate::celt::mdct::clt_mdct_forward;
 use crate::celt::modes::opus_custom_mode_create;
 #[cfg(feature = "qext")]
 use crate::celt::modes::{NB_QEXT_BANDS, QEXT_PACKET_SIZE_CAP, compute_qext_mode};
+#[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::{celt_inner_prod, pitch_downsample, pitch_search, remove_doubling};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::quant_bands::E_MEANS;
 use crate::celt::quant_bands::{
-    E_MEANS, amp2_log2, quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
+    amp2_log2, quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
 };
 use crate::celt::rate::clt_compute_allocation;
 #[cfg(feature = "qext")]
 use crate::celt::rate::clt_compute_extra_allocation;
 use crate::celt::static_modes::CeltMode;
+use crate::celt::vq::{v16, v32};
 use crate::constants::raw::OPUS_BITRATE_MAX;
+#[cfg(not(feature = "fixed-point"))]
 use crate::math;
 use crate::{Error, Result};
+
+#[cfg(feature = "fixed-point")]
+mod fixed;
+#[cfg(feature = "fixed-point")]
+pub use fixed::{
+    acos_approx, alloc_trim_analysis, celt_preemphasis, compute_vbr, dynalloc_analysis, l1_metric,
+    normalize_tone_input, patch_transient_decision, run_prefilter, stereo_analysis, tone_detect,
+    tone_lpc, transient_analysis,
+};
 
 /// `OPUS_BAD_ARG`.
 const OPUS_BAD_ARG: i32 = -1;
@@ -79,6 +117,7 @@ const QEXT_BANDS: usize = NB_QEXT_BANDS as usize;
 const QEXT_BANDS: usize = 0;
 
 /// C `floor` applied to a double expression, converted with C `(int)` (truncation).
+#[cfg(not(feature = "fixed-point"))]
 #[inline(always)]
 fn floor_i32(x: f64) -> i32 {
     math::floor(x) as i32
@@ -153,11 +192,11 @@ impl DynallocScratch {
     #[must_use]
     pub fn new(nb_ebands: usize, c: usize) -> Self {
         Self {
-            follower: vec![0.0; c * nb_ebands],
-            noise_floor: vec![0.0; c * nb_ebands],
-            band_log_e3: vec![0.0; nb_ebands],
-            mask: vec![0.0; nb_ebands],
-            sig: vec![0.0; nb_ebands],
+            follower: vec![CeltGlog::default(); c * nb_ebands],
+            noise_floor: vec![CeltGlog::default(); c * nb_ebands],
+            band_log_e3: vec![CeltGlog::default(); nb_ebands],
+            mask: vec![CeltGlog::default(); nb_ebands],
+            sig: vec![CeltGlog::default(); nb_ebands],
         }
     }
 }
@@ -334,16 +373,16 @@ impl CeltEncoder {
             None
         };
         let scratch = EncScratch {
-            input: vec![0.0; ch * (n_max + overlap)],
-            freq: vec![0.0; ch * n_max],
+            input: vec![Default::default(); ch * (n_max + overlap)],
+            freq: vec![Default::default(); ch * n_max],
             // Custom modes whose last bands lie above the MDCT size (end > effEBands) make C
             // read past `X` (undefined behaviour); the tail keeps the port in bounds.
-            x: vec![0.0; ch * n_max + x_tail],
-            band_e: vec![0.0; ch * nb],
-            band_log_e: vec![0.0; ch * nb],
-            band_log_e2: vec![0.0; ch * nb],
-            error: vec![0.0; ch * nb],
-            surround_dynalloc: vec![0.0; ch * nb],
+            x: vec![Default::default(); ch * n_max + x_tail],
+            band_e: vec![Default::default(); ch * nb],
+            band_log_e: vec![Default::default(); ch * nb],
+            band_log_e2: vec![Default::default(); ch * nb],
+            error: vec![Default::default(); ch * nb],
+            surround_dynalloc: vec![Default::default(); ch * nb],
             offsets: vec![0; nb],
             importance: vec![0; nb],
             spread_weight: vec![0; nb],
@@ -353,14 +392,14 @@ impl CeltEncoder {
             pulses: vec![0; nbq],
             fine_priority: vec![0; nbq],
             collapse_masks: vec![0; ch * nb],
-            tmp: vec![0.0; n_max + overlap],
-            pre: vec![0.0; ch * (n_max + max_period)],
-            pitch_buf: vec![0.0; (max_period + n_max) >> 1],
+            tmp: vec![Default::default(); n_max + overlap],
+            pre: vec![Default::default(); ch * (n_max + max_period)],
+            pitch_buf: vec![Default::default(); (max_period + n_max) >> 1],
             tf_metric: vec![0; nb],
             tf_path0: vec![0; nb],
             tf_path1: vec![0; nb],
-            tf_tmp: vec![0.0; last_band],
-            tf_tmp1: vec![0.0; last_band],
+            tf_tmp: vec![Default::default(); last_band],
+            tf_tmp1: vec![Default::default(); last_band],
             dyn_bufs: DynallocScratch::new(nb, ch),
             bands: BandsScratch::new(),
             #[cfg(feature = "custom-modes")]
@@ -370,7 +409,7 @@ impl CeltEncoder {
             #[cfg(feature = "qext")]
             extra_pulses: vec![0; nbq],
             #[cfg(feature = "qext")]
-            error_bak: vec![0.0; ch * nb],
+            error_bak: vec![Default::default(); ch * nb],
             #[cfg(feature = "qext")]
             zeros: vec![0; nb.max(QEXT_BANDS)],
         };
@@ -398,37 +437,37 @@ impl CeltEncoder {
             qext_scale,
             rng: 0,
             spread_decision: 0,
-            delayed_intra: 0.0,
+            delayed_intra: OpusVal32::default(),
             tonal_average: 0,
             last_coded_bands: 0,
             hf_average: 0,
             tapset_decision: 0,
             prefilter_period: 0,
-            prefilter_gain: 0.0,
+            prefilter_gain: OpusVal16::default(),
             prefilter_tapset: 0,
             consec_transient: 0,
             analysis: AnalysisInfo::default(),
             silk_info: SilkInfo::default(),
-            preemph_mem_e: [0.0; 2],
-            preemph_mem_d: [0.0; 2],
+            preemph_mem_e: [OpusVal32::default(); 2],
+            preemph_mem_d: [OpusVal32::default(); 2],
             vbr_reservoir: 0,
             vbr_drift: 0,
             vbr_offset: 0,
             vbr_count: 0,
-            overlap_max: 0.0,
-            stereo_saving: 0.0,
+            overlap_max: OpusVal32::default(),
+            stereo_saving: OpusVal16::default(),
             intensity: 0,
             has_energy_mask: false,
-            energy_mask: vec![0.0; ch * nb],
-            spec_avg: 0.0,
-            in_mem: vec![0.0; ch * overlap],
-            prefilter_mem: vec![0.0; ch * max_period],
-            old_band_e: vec![0.0; ch * nb],
-            old_log_e: vec![0.0; ch * nb],
-            old_log_e2: vec![0.0; ch * nb],
-            energy_error: vec![0.0; ch * nb],
+            energy_mask: vec![Default::default(); ch * nb],
+            spec_avg: CeltGlog::default(),
+            in_mem: vec![Default::default(); ch * overlap],
+            prefilter_mem: vec![Default::default(); ch * max_period],
+            old_band_e: vec![Default::default(); ch * nb],
+            old_log_e: vec![Default::default(); ch * nb],
+            old_log_e2: vec![Default::default(); ch * nb],
+            energy_error: vec![Default::default(); ch * nb],
             #[cfg(feature = "qext")]
-            qext_old_band_e: vec![0.0; ch * QEXT_BANDS],
+            qext_old_band_e: vec![Default::default(); ch * QEXT_BANDS],
             #[cfg(feature = "qext")]
             qext_mode,
             scratch,
@@ -657,39 +696,40 @@ impl CeltEncoder {
     pub fn reset(&mut self) {
         self.rng = 0;
         self.spread_decision = 0;
-        self.delayed_intra = 0.0;
+        self.delayed_intra = OpusVal32::default();
         self.tonal_average = 0;
         self.last_coded_bands = 0;
         self.hf_average = 0;
         self.tapset_decision = 0;
         self.prefilter_period = 0;
-        self.prefilter_gain = 0.0;
+        self.prefilter_gain = OpusVal16::default();
         self.prefilter_tapset = 0;
         self.consec_transient = 0;
         self.analysis = AnalysisInfo::default();
         self.silk_info = SilkInfo::default();
-        self.preemph_mem_e = [0.0; 2];
-        self.preemph_mem_d = [0.0; 2];
+        self.preemph_mem_e = [OpusVal32::default(); 2];
+        self.preemph_mem_d = [OpusVal32::default(); 2];
         self.vbr_reservoir = 0;
         self.vbr_drift = 0;
         self.vbr_offset = 0;
         self.vbr_count = 0;
-        self.overlap_max = 0.0;
-        self.stereo_saving = 0.0;
+        self.overlap_max = OpusVal32::default();
+        self.stereo_saving = OpusVal16::default();
         self.intensity = 0;
         self.has_energy_mask = false;
-        self.energy_mask.fill(0.0);
-        self.spec_avg = 0.0;
-        self.in_mem.fill(0.0);
-        self.prefilter_mem.fill(0.0);
-        self.old_band_e.fill(0.0);
-        self.energy_error.fill(0.0);
+        self.energy_mask.fill(CeltGlog::default());
+        self.spec_avg = CeltGlog::default();
+        self.in_mem.fill(CeltSig::default());
+        self.prefilter_mem.fill(CeltSig::default());
+        self.old_band_e.fill(CeltGlog::default());
+        self.energy_error.fill(CeltGlog::default());
         #[cfg(feature = "qext")]
-        self.qext_old_band_e.fill(0.0);
-        self.old_log_e.fill(-28.0);
-        self.old_log_e2.fill(-28.0);
+        self.qext_old_band_e.fill(CeltGlog::default());
+        self.old_log_e.fill(-gconst(28.0));
+        self.old_log_e2.fill(-gconst(28.0));
         self.vbr_offset = 0;
-        self.delayed_intra = 1.0;
+        // C: `st->delayedIntra = 1` (an integer 1 in the fixed-point build too).
+        self.delayed_intra = v32(1);
         self.spread_decision = SPREAD_NORMAL;
         self.tonal_average = 256;
         self.hf_average = 0;
@@ -746,7 +786,7 @@ impl CeltEncoder {
             Some(m) => {
                 let n = m.len().min(self.energy_mask.len());
                 self.energy_mask[..n].copy_from_slice(&m[..n]);
-                self.energy_mask[n..].fill(0.0);
+                self.energy_mask[n..].fill(CeltGlog::default());
                 self.has_energy_mask = true;
             }
         }
@@ -770,6 +810,7 @@ static INV_TABLE: [u8; 128] = [
 ///
 /// `input` holds `c` channels of `len` samples. `tmp` is scratch of at least `len` samples.
 /// Returns `is_transient`; writes `tf_estimate`, `tf_chan` and `weak_transient`.
+#[cfg(not(feature = "fixed-point"))]
 pub fn transient_analysis(
     input: &[OpusVal32],
     len: i32,
@@ -784,7 +825,6 @@ pub fn transient_analysis(
 ) -> bool {
     let mut mask_metric: i32 = 0;
     // Forward masking: 6.7 dB/ms.
-    // FIXED_POINT: forward_shift not ported (float build).
     let mut forward_decay: OpusVal16 = 0.0625f32;
     let lenu = len as usize;
     let tmp = &mut tmp[..lenu];
@@ -833,7 +873,6 @@ pub fn transient_analysis(
                     // First few samples are bad because we don't propagate the memory
                     *yk = if 2 * i + k < 12 { 0.0 } else { v };
                 }
-                // FIXED_POINT: normalisation of tmp not ported (float build).
 
                 // Grouping by two to reduce complexity
                 // Forward pass to compute the post-echo threshold
@@ -919,6 +958,7 @@ pub fn transient_analysis(
 /// Port of celt/celt_encoder.c:patch_transient_decision: looks for sudden increases of energy
 /// to decide whether we need to patch the transient decision.
 #[must_use]
+#[cfg(not(feature = "fixed-point"))]
 pub fn patch_transient_decision(
     new_e: &[CeltGlog],
     old_e: &[CeltGlog],
@@ -1006,9 +1046,16 @@ pub fn compute_mdcts(
             let bound = (b_cnt * n / upsample) as usize;
             let o = &mut out[ch * bn..(ch + 1) * bn];
             for v in &mut o[..bound] {
-                *v *= upsample as f32;
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    *v *= upsample as f32;
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    *v *= upsample;
+                }
             }
-            o[bound..].fill(0.0);
+            o[bound..].fill(CeltSig::default());
         }
     }
 }
@@ -1017,6 +1064,7 @@ pub fn compute_mdcts(
 ///
 /// `pcmp` starts at the channel's first sample (C `pcm+c`) and is read with stride `cc`;
 /// `inp` receives `n` pre-emphasised samples. `coef` is `mode->preemph`.
+#[cfg(not(feature = "fixed-point"))]
 pub fn celt_preemphasis(
     pcmp: &[OpusRes],
     inp: &mut [CeltSig],
@@ -1063,7 +1111,6 @@ pub fn celt_preemphasis(
     #[cfg(any(feature = "custom-modes", feature = "qext"))]
     if coef[1] != 0.0 {
         let coef1 = coef[1];
-        // FIXED_POINT && ENABLE_QEXT: coef2_q30 not ported (float build).
         let coef2 = coef[2];
         for i in 0..nn {
             let x: CeltSig = inp[i];
@@ -1086,6 +1133,7 @@ pub fn celt_preemphasis(
 
 /// Port of celt/celt_encoder.c:l1_metric.
 #[must_use]
+#[cfg(not(feature = "fixed-point"))]
 pub fn l1_metric(tmp: &[CeltNorm], n: i32, lm: i32, bias: OpusVal16) -> OpusVal32 {
     let mut l1: OpusVal32 = 0.0;
     for &v in &tmp[..n as usize] {
@@ -1120,7 +1168,10 @@ pub fn tf_analysis(
     let e_bands = &m.e_bands;
     let eb = |i: i32| i32::from(e_bands[i as usize]);
     let it = is_transient as i32;
+    #[cfg(not(feature = "fixed-point"))]
     let bias: OpusVal16 = 0.04f32 * max16(-0.25f32, 0.5f32 - tf_estimate);
+    #[cfg(feature = "fixed-point")]
+    let bias: OpusVal16 = fixed::tf_bias(tf_estimate);
     let lenu = len as usize;
 
     for i in 0..len {
@@ -1275,6 +1326,7 @@ pub fn tf_encode(
 
 /// Port of celt/celt_encoder.c:alloc_trim_analysis. Returns the allocation trim index.
 #[must_use]
+#[cfg(not(feature = "fixed-point"))]
 pub fn alloc_trim_analysis(
     m: &CeltMode,
     x: &[CeltNorm],
@@ -1331,7 +1383,6 @@ pub fn alloc_trim_analysis(
         let log_xc: OpusVal16 = celt_log2(1.001f32 - sum * sum);
         // mid-side savings estimations based on min correlation
         let log_xc2: OpusVal16 = max16(half16(log_xc), celt_log2(1.001f32 - min_xc * min_xc));
-        // FIXED_POINT: Q20 compensation not ported (float build).
 
         trim += max16(-4.0f32, 0.75f32 * log_xc);
         *stereo_saving = min16(*stereo_saving + 0.25f32, -half16(log_xc2));
@@ -1355,13 +1406,13 @@ pub fn alloc_trim_analysis(
         );
     }
 
-    // FIXED_POINT: PSHR32 rounding not ported (float build).
     let trim_index = floor_i32(f64::from(0.5f32 + trim));
     imax(0, imin(10, trim_index))
 }
 
 /// Port of celt/celt_encoder.c:stereo_analysis: whether dual (L/R) stereo is cheaper than M/S.
 #[must_use]
+#[cfg(not(feature = "fixed-point"))]
 pub fn stereo_analysis(m: &CeltMode, x: &[CeltNorm], lm: i32, n0: i32) -> bool {
     let e_bands = &m.e_bands;
     let eb = |i: i32| i32::from(e_bands[i as usize]);
@@ -1424,7 +1475,7 @@ pub fn median_of_5(x: &[CeltGlog]) -> CeltGlog {
 
 /// Port of celt/celt_encoder.c:median_of_3 (`x[0..3]`).
 #[must_use]
-pub fn median_of_3(x: &[CeltGlog]) -> CeltGlog {
+pub const fn median_of_3(x: &[CeltGlog]) -> CeltGlog {
     let (t0, t1) = if x[0] > x[1] {
         (x[1], x[0])
     } else {
@@ -1442,6 +1493,7 @@ pub fn median_of_3(x: &[CeltGlog]) -> CeltGlog {
 
 /// Port of celt/celt_encoder.c:dynalloc_analysis. Returns `maxDepth`; writes `offsets`
 /// (`nbEBands`), `importance`, `spread_weight` and `tot_boost_`.
+#[cfg(not(feature = "fixed-point"))]
 pub fn dynalloc_analysis(
     band_log_e: &[CeltGlog],
     band_log_e2: &[CeltGlog],
@@ -1519,7 +1571,6 @@ pub fn dynalloc_analysis(
             // noise floor.
             let smr: CeltGlog = sig[i] - maxg(maxg(0.0, max_depth - 12.0f32), mask[i]);
             // Clamp SMR to make sure we're not shifting by something negative or too large.
-            // FIXED_POINT: PSHR32 variant not ported (float build).
             let shift = imin(5, imax(0, -floor_i32(f64::from(0.5f32 + smr))));
             spread_weight[i] = 32 >> shift;
         }
@@ -1589,7 +1640,6 @@ pub fn dynalloc_analysis(
             follower[i] = maxg(follower[i], surround_dynalloc[i]);
         }
         for i in startu..endu {
-            // FIXED_POINT: PSHR32 variant not ported (float build).
             importance[i] = floor_i32(f64::from(
                 0.5f32 + 13.0 * celt_exp2_db(ming(follower[i], 4.0f32)),
             ));
@@ -1610,7 +1660,6 @@ pub fn dynalloc_analysis(
         }
         // Compensate for Opus' under-allocation on tones.
         if toneishness > 0.98f32 {
-            // FIXED_POINT: integer freq_bin not ported (float build).
             let freq_bin = floor_i32(0.5 + f64::from(qext_scale as f32 * tone_freq * 120.0) / PI);
             for i in startu..endu {
                 if freq_bin >= eb(i) && freq_bin <= eb(i + 1) {
@@ -1671,10 +1720,9 @@ pub fn dynalloc_analysis(
     max_depth
 }
 
-// FIXED_POINT: normalize_tone_input and acos_approx not ported (float build).
-
 /// Port of celt/celt_encoder.c:tone_lpc: computes the LPC coefficients using a least-squares
 /// fit for both forward and backward prediction. Returns `true` on failure (C returns 1).
+#[cfg(not(feature = "fixed-point"))]
 pub fn tone_lpc(x: &[OpusVal16], len: i32, delay: i32, lpc: &mut [OpusVal32; 2]) -> bool {
     let (lenu, d) = (len as usize, delay as usize);
     let x = &x[..lenu];
@@ -1712,7 +1760,6 @@ pub fn tone_lpc(x: &[OpusVal16], len: i32, delay: i32, lpc: &mut [OpusVal32; 2])
     let (r00, r01, r11, r02, r12) = (r00b, r01b, r11b, r02b, r12b);
     // Solve A*x=b, where A=[r00, r01; r01, r11] and b=[r02; r12].
     let den: OpusVal32 = r00 * r11 - r01 * r01;
-    // FIXED_POINT: integer threshold not ported (float build).
     if den < 0.001f32 * (r00 * r11) {
         return true;
     }
@@ -1738,6 +1785,7 @@ pub fn tone_lpc(x: &[OpusVal16], len: i32, delay: i32, lpc: &mut [OpusVal32; 2])
 /// Port of celt/celt_encoder.c:tone_detect: detects pure or nearly pure tones so we can prevent
 /// them from causing problems with the encoder. Returns the tone frequency (radians/sample, -1
 /// if none) and writes `toneishness`. `x` is scratch of at least `n` samples.
+#[cfg(not(feature = "fixed-point"))]
 pub fn tone_detect(
     input: &[CeltSig],
     cc: i32,
@@ -1758,7 +1806,6 @@ pub fn tone_detect(
     } else {
         x.copy_from_slice(&input[..nu]);
     }
-    // FIXED_POINT: normalize_tone_input not ported (float build).
     let mut fail = tone_lpc(x, n, delay, &mut lpc);
     // If our LPC filter resonates too close to DC, retry the analysis with down-sampling.
     while delay <= fs / 3000 && (fail || (lpc[0] > 1.0f32 && lpc[1] < 0.0)) {
@@ -1770,7 +1817,6 @@ pub fn tone_detect(
     if !fail && f64::from(lpc[0] * lpc[0]) + 3.999999 * f64::from(lpc[1]) < 0.0 {
         // Squared radius of the poles.
         *toneishness = -lpc[1];
-        // FIXED_POINT: acos_approx not ported (float build).
         (math::acos(f64::from(0.5f32 * lpc[0])) / f64::from(delay)) as f32
     } else {
         *toneishness = 0.0;
@@ -1806,6 +1852,7 @@ pub struct PrefilterOut {
 /// (`CC*(N+overlap)`), updating `prefilter_mem` (`CC*QEXT_SCALE(COMBFILTER_MAXPERIOD)`).
 ///
 /// `pre` needs `CC*(N+max_period)` samples and `pitch_buf` `(max_period+N)>>1`.
+#[cfg(not(feature = "fixed-point"))]
 pub fn run_prefilter(
     mode: &CeltMode,
     st: PrefilterState<'_>,
@@ -1866,7 +1913,6 @@ pub fn run_prefilter(
             multiple += 1;
         }
         if qext_scale as f32 * tone_freq > 0.006148f32 {
-            // FIXED_POINT: integer variant not ported (float build).
             pitch_index = imin(
                 floor_i32(
                     0.5 + 2.0f32 as f64 * PI * f64::from(multiple)
@@ -1971,7 +2017,6 @@ pub fn run_prefilter(
         if abs16(gain1 - st_gain) < 0.1f32 {
             gain1 = st_gain;
         }
-        // FIXED_POINT: integer variant not ported (float build).
         qg = floor_i32(f64::from(0.5f32 + gain1 * 32.0 / 3.0)) - 1;
         qg = imax(0, imin(7, qg));
         gain1 = 0.09375f32 * (qg + 1) as f32;
@@ -2093,6 +2138,7 @@ pub fn run_prefilter(
 
 /// Port of celt/celt_encoder.c:compute_vbr: the VBR target (in 1/8 bits) for this frame.
 #[must_use]
+#[cfg(not(feature = "fixed-point"))]
 pub fn compute_vbr(
     mode: &CeltMode,
     analysis: &AnalysisInfo,
@@ -2229,14 +2275,93 @@ struct FrameSetup {
 
 /// `intensity_thresholds` of celt_encode_with_ec.
 static INTENSITY_THRESHOLDS: [OpusVal16; 21] = [
-    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 24.0, 36.0, 44.0, 50.0, 56.0, 62.0, 67.0, 72.0,
-    79.0, 88.0, 106.0, 134.0,
+    v16(1),
+    v16(2),
+    v16(3),
+    v16(4),
+    v16(5),
+    v16(6),
+    v16(7),
+    v16(8),
+    v16(16),
+    v16(24),
+    v16(36),
+    v16(44),
+    v16(50),
+    v16(56),
+    v16(62),
+    v16(67),
+    v16(72),
+    v16(79),
+    v16(88),
+    v16(106),
+    v16(134),
 ];
 /// `intensity_histeresis` of celt_encode_with_ec.
 static INTENSITY_HISTERESIS: [OpusVal16; 21] = [
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0,
-    8.0, 8.0,
+    v16(1),
+    v16(1),
+    v16(1),
+    v16(1),
+    v16(1),
+    v16(1),
+    v16(1),
+    v16(2),
+    v16(2),
+    v16(2),
+    v16(2),
+    v16(2),
+    v16(2),
+    v16(2),
+    v16(3),
+    v16(3),
+    v16(4),
+    v16(5),
+    v16(6),
+    v16(8),
+    v16(8),
 ];
+
+/// `QCONST16(.4f,15)`: pre-filter gain threshold of the pitch-change decision.
+#[cfg(not(feature = "fixed-point"))]
+const GAIN_0_4: OpusVal16 = 0.4f32;
+#[cfg(feature = "fixed-point")]
+const GAIN_0_4: OpusVal16 = qconst16(0.4f32 as f64, 15);
+/// `QCONST16(.2f,14)`: `tf_estimate` of a patched transient.
+#[cfg(not(feature = "fixed-point"))]
+const TF_ESTIMATE_0_2: OpusVal16 = 0.2f32;
+#[cfg(feature = "fixed-point")]
+const TF_ESTIMATE_0_2: OpusVal16 = qconst16(0.2f32 as f64, 14);
+/// `QCONST16(.7f,14)`: strong-transient `tf_estimate` (hybrid VBR).
+#[cfg(not(feature = "fixed-point"))]
+const TF_ESTIMATE_0_7: OpusVal16 = 0.7f32;
+#[cfg(feature = "fixed-point")]
+const TF_ESTIMATE_0_7: OpusVal16 = qconst16(0.7f32 as f64, 14);
+/// `QCONST32(.98f, 29)`: `toneishness` above which TF analysis is disabled.
+#[cfg(not(feature = "fixed-point"))]
+const TONEISHNESS_0_98: OpusVal32 = 0.98f32;
+#[cfg(feature = "fixed-point")]
+const TONEISHNESS_0_98: OpusVal32 = qconst32(0.98f32 as f64, 29);
+
+/// `HALF32(SHL32(LM, DB_SHIFT))`: compensation of the short vs long MDCT scaling.
+#[cfg_attr(
+    not(feature = "fixed-point"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "the fixed-point macros are not const"
+    )
+)]
+#[inline(always)]
+fn lm_glog_half(lm: i32) -> CeltGlog {
+    #[cfg(not(feature = "fixed-point"))]
+    {
+        half32(lm as f32)
+    }
+    #[cfg(feature = "fixed-point")]
+    {
+        half32(shl32(lm, DB_SHIFT))
+    }
+}
 
 impl CeltEncoder {
     /// Port of celt/celt_encoder.c:celt_encode_with_ec: encodes one frame.
@@ -2466,15 +2591,15 @@ impl CeltEncoder {
         let mut tell = s.tell;
         let tell0_frac = s.tell0_frac;
         let packet_size_cap = s.packet_size_cap;
-        let mut tf_estimate: OpusVal16 = 0.0;
+        let mut tf_estimate: OpusVal16 = OpusVal16::default();
         let mut tf_chan: i32 = 0;
         let mut pitch_change = false;
         let mut transient_got_disabled = false;
-        let mut surround_masking: CeltGlog = 0.0;
-        let mut temporal_vbr: CeltGlog = 0.0;
-        let mut surround_trim: CeltGlog = 0.0;
+        let mut surround_masking: CeltGlog = CeltGlog::default();
+        let mut temporal_vbr: CeltGlog = CeltGlog::default();
+        let mut surround_trim: CeltGlog = CeltGlog::default();
         let mut weak_transient = false;
-        let mut toneishness: OpusVal32 = 0.0;
+        let mut toneishness: OpusVal32 = OpusVal32::default();
         let mut dual_stereo: i32 = 0;
         #[allow(unused_mut, reason = "only changed with qext")]
         let mut qext_bytes: i32 = 0;
@@ -2556,7 +2681,9 @@ impl CeltEncoder {
         let mut sample_max: OpusVal32 = max32(st.overlap_max, celt_maxabs_res(&pcm[..l0]));
         st.overlap_max = celt_maxabs_res(&pcm[l0..l0 + (c * overlap / up) as usize]);
         sample_max = max32(sample_max, st.overlap_max);
-        // FIXED_POINT: silence = (sample_max==0) not ported (float build).
+        #[cfg(feature = "fixed-point")]
+        let mut silence = sample_max == 0;
+        #[cfg(not(feature = "fixed-point"))]
         let mut silence = sample_max <= 1.0f32 / (1i32 << st.lsb_depth) as f32;
         if tell == 1 {
             enc.enc_bit_logp(silence, 15);
@@ -2586,7 +2713,9 @@ impl CeltEncoder {
         }
         let max_period = (qext_scale * COMBFILTER_MAXPERIOD) as usize;
         for ch in 0..ccu {
-            // FIXED_POINT: need_clip threshold in fixed point not ported (float build).
+            #[cfg(feature = "fixed-point")]
+            let need_clip = st.clip != 0 && sample_max > 65536 << RES_SHIFT;
+            #[cfg(not(feature = "fixed-point"))]
             let need_clip = st.clip != 0 && sample_max > 65536.0f32;
             celt_preemphasis(
                 &pcm[ch..],
@@ -2625,7 +2754,14 @@ impl CeltEncoder {
                 tmp_buf,
             );
         }
-        toneishness = min32(toneishness, 1.0f32 - tf_estimate);
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            toneishness = min32(toneishness, 1.0f32 - tf_estimate);
+        }
+        #[cfg(feature = "fixed-point")]
+        {
+            toneishness = min32(toneishness, qconst32(1.0, 29) - shl32(tf_estimate, 15));
+        }
         // Find pitch period and gain
         let prefilter_tapset = st.tapset_decision;
         let pf_on;
@@ -2667,7 +2803,7 @@ impl CeltEncoder {
             gain1 = pf.gain;
             let qg = pf.qgain;
             let mut pi = pf.pitch;
-            if (gain1 > 0.4f32 || st.prefilter_gain > 0.4f32)
+            if (gain1 > GAIN_0_4 || st.prefilter_gain > GAIN_0_4)
                 && (st.analysis.valid == 0 || f64::from(st.analysis.tonality) > 0.3)
                 && (f64::from(pi) > 1.26 * f64::from(st.prefilter_period)
                     || f64::from(pi) < 0.79 * f64::from(st.prefilter_period))
@@ -2713,7 +2849,7 @@ impl CeltEncoder {
             amp2_log2(mode, eff_end, end, band_e, band_log_e2, c);
             for ch in 0..cu {
                 for i in 0..end as usize {
-                    band_log_e2[nb * ch + i] += half32(lm as f32);
+                    band_log_e2[nb * ch + i] += lm_glog_half(lm);
                 }
             }
         }
@@ -2721,7 +2857,7 @@ impl CeltEncoder {
         compute_mdcts(mode, short_blocks, input, freq, c, cc, lm, up);
         // This should catch any NaN in the CELT input. Since we're not supposed to see any
         // (they're filtered at the Opus layer), just abort (C asserts).
-        debug_assert!(!freq[0].is_nan() && (c == 1 || !freq[nu].is_nan()));
+        debug_assert!(!celt_isnan(freq[0]) && (c == 1 || !celt_isnan(freq[nu])));
         if cc == 2 && c == 1 {
             tf_chan = 0;
         }
@@ -2729,103 +2865,143 @@ impl CeltEncoder {
 
         if st.lfe != 0 {
             for i in 2..end as usize {
-                band_e[i] = min32(band_e[i], 1e-4f32 * band_e[0]);
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    band_e[i] = min32(band_e[i], 1e-4f32 * band_e[0]);
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    band_e[i] = imin(
+                        band_e[i],
+                        mult16_32_q15(qconst16(1e-4f32 as f64, 15), band_e[0]),
+                    );
+                }
                 band_e[i] = max32(band_e[i], EPSILON);
             }
         }
         amp2_log2(mode, eff_end, end, band_e, band_log_e, c);
 
         let surround_dynalloc = &mut surround_dynalloc[..cu * nb];
-        surround_dynalloc[..end as usize].fill(0.0);
+        surround_dynalloc[..end as usize].fill(CeltGlog::default());
         // This computes how much masking takes place between surround channels
         if !hybrid && st.has_energy_mask && st.lfe == 0 {
-            let energy_mask = &st.energy_mask;
-            let mut mask_avg: OpusVal32 = 0.0;
-            let mut diff: OpusVal32 = 0.0;
-            let mut count: i32 = 0;
-            let mask_end = imax(2, st.last_coded_bands);
-            for ch in 0..cu {
+            #[cfg(feature = "fixed-point")]
+            {
+                (surround_masking, surround_trim) = fixed::surround_masking_analysis(
+                    &st.energy_mask,
+                    e_bands,
+                    nb_ebands,
+                    c,
+                    st.last_coded_bands,
+                    surround_dynalloc,
+                );
+            }
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                let energy_mask = &st.energy_mask;
+                let mut mask_avg: OpusVal32 = 0.0;
+                let mut diff: OpusVal32 = 0.0;
+                let mut count: i32 = 0;
+                let mask_end = imax(2, st.last_coded_bands);
+                for ch in 0..cu {
+                    for i in 0..mask_end {
+                        let mut mask: CeltGlog =
+                            maxg(ming(energy_mask[nb * ch + i as usize], 0.25f32), -2.0f32);
+                        if mask > 0.0 {
+                            mask = half32(mask);
+                        }
+                        let mask16: OpusVal16 = mask;
+                        mask_avg += mask16 * (eb(i + 1) - eb(i)) as f32;
+                        count += eb(i + 1) - eb(i);
+                        diff += mask16 * (1 + 2 * i - mask_end) as f32;
+                    }
+                }
+                debug_assert!(count > 0);
+                mask_avg /= count as f32;
+                mask_avg += 0.2f32;
+                diff = diff * 6.0 / (c * (mask_end - 1) * (mask_end + 1) * mask_end) as f32;
+                // Again, being conservative
+                diff = half32(diff);
+                diff = max32(min32(diff, 0.031f32), -0.031f32);
+                // Find the band that's in the middle of the coded spectrum
+                let mut midband: i32 = 0;
+                while eb(midband + 1) < eb(mask_end) / 2 {
+                    midband += 1;
+                }
+                let mut count_dynalloc = 0;
                 for i in 0..mask_end {
-                    let mut mask: CeltGlog =
-                        maxg(ming(energy_mask[nb * ch + i as usize], 0.25f32), -2.0f32);
-                    if mask > 0.0 {
-                        mask = half32(mask);
-                    }
-                    let mask16: OpusVal16 = mask;
-                    mask_avg += mask16 * (eb(i + 1) - eb(i)) as f32;
-                    count += eb(i + 1) - eb(i);
-                    diff += mask16 * (1 + 2 * i - mask_end) as f32;
-                }
-            }
-            debug_assert!(count > 0);
-            mask_avg /= count as f32;
-            mask_avg += 0.2f32;
-            diff = diff * 6.0 / (c * (mask_end - 1) * (mask_end + 1) * mask_end) as f32;
-            // Again, being conservative
-            diff = half32(diff);
-            diff = max32(min32(diff, 0.031f32), -0.031f32);
-            // Find the band that's in the middle of the coded spectrum
-            let mut midband: i32 = 0;
-            while eb(midband + 1) < eb(mask_end) / 2 {
-                midband += 1;
-            }
-            let mut count_dynalloc = 0;
-            for i in 0..mask_end {
-                let iu = i as usize;
-                let lin: OpusVal32 = mask_avg + diff * (i - midband) as f32;
-                let mut unmask: CeltGlog = if c == 2 {
-                    maxg(energy_mask[iu], energy_mask[nb + iu])
-                } else {
-                    energy_mask[iu]
-                };
-                unmask = ming(unmask, 0.0f32);
-                unmask -= lin;
-                if unmask > 0.25f32 {
-                    surround_dynalloc[iu] = unmask - 0.25f32;
-                    count_dynalloc += 1;
-                }
-            }
-            if count_dynalloc >= 3 {
-                // If we need dynalloc in many bands, it's probably because our initial masking
-                // rate was too low.
-                mask_avg += 0.25f32;
-                if mask_avg > 0.0 {
-                    // Something went really wrong in the original calculations, disabling
-                    // masking.
-                    mask_avg = 0.0;
-                    diff = 0.0;
-                    surround_dynalloc[..mask_end as usize].fill(0.0);
-                } else {
-                    for i in 0..mask_end as usize {
-                        surround_dynalloc[i] = maxg(0.0, surround_dynalloc[i] - 0.25f32);
+                    let iu = i as usize;
+                    let lin: OpusVal32 = mask_avg + diff * (i - midband) as f32;
+                    let mut unmask: CeltGlog = if c == 2 {
+                        maxg(energy_mask[iu], energy_mask[nb + iu])
+                    } else {
+                        energy_mask[iu]
+                    };
+                    unmask = ming(unmask, 0.0f32);
+                    unmask -= lin;
+                    if unmask > 0.25f32 {
+                        surround_dynalloc[iu] = unmask - 0.25f32;
+                        count_dynalloc += 1;
                     }
                 }
+                if count_dynalloc >= 3 {
+                    // If we need dynalloc in many bands, it's probably because our initial masking
+                    // rate was too low.
+                    mask_avg += 0.25f32;
+                    if mask_avg > 0.0 {
+                        // Something went really wrong in the original calculations, disabling
+                        // masking.
+                        mask_avg = 0.0;
+                        diff = 0.0;
+                        surround_dynalloc[..mask_end as usize].fill(0.0);
+                    } else {
+                        for i in 0..mask_end as usize {
+                            surround_dynalloc[i] = maxg(0.0, surround_dynalloc[i] - 0.25f32);
+                        }
+                    }
+                }
+                mask_avg += 0.2f32;
+                // Convert to 1/64th units used for the trim
+                surround_trim = 64.0 * diff;
+                surround_masking = mask_avg;
             }
-            mask_avg += 0.2f32;
-            // Convert to 1/64th units used for the trim
-            surround_trim = 64.0 * diff;
-            surround_masking = mask_avg;
         }
         // Temporal VBR (but not for LFE)
         if st.lfe == 0 {
-            let mut follow: CeltGlog = -10.0f32;
-            let mut frame_avg: OpusVal32 = 0.0;
-            let offset: CeltGlog = if short_blocks != 0 {
-                half32(lm as f32)
-            } else {
-                0.0
-            };
-            for i in start as usize..end as usize {
-                follow = maxg(follow - 1.0f32, band_log_e[i] - offset);
-                if c == 2 {
-                    follow = maxg(follow, band_log_e[i + nb] - offset);
-                }
-                frame_avg += follow;
+            #[cfg(feature = "fixed-point")]
+            {
+                temporal_vbr = fixed::temporal_vbr_analysis(
+                    band_log_e,
+                    nb_ebands,
+                    start,
+                    end,
+                    c,
+                    short_blocks != 0,
+                    lm,
+                    &mut st.spec_avg,
+                );
             }
-            frame_avg /= (end - start) as f32;
-            temporal_vbr = frame_avg - st.spec_avg;
-            temporal_vbr = ming(3.0f32, maxg(-1.5f32, temporal_vbr));
-            st.spec_avg += 0.02f32 * temporal_vbr;
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                let mut follow: CeltGlog = -10.0f32;
+                let mut frame_avg: OpusVal32 = 0.0;
+                let offset: CeltGlog = if short_blocks != 0 {
+                    half32(lm as f32)
+                } else {
+                    0.0
+                };
+                for i in start as usize..end as usize {
+                    follow = maxg(follow - 1.0f32, band_log_e[i] - offset);
+                    if c == 2 {
+                        follow = maxg(follow, band_log_e[i + nb] - offset);
+                    }
+                    frame_avg += follow;
+                }
+                frame_avg /= (end - start) as f32;
+                temporal_vbr = frame_avg - st.spec_avg;
+                temporal_vbr = ming(3.0f32, maxg(-1.5f32, temporal_vbr));
+                st.spec_avg += 0.02f32 * temporal_vbr;
+            }
         }
 
         if !second_mdct {
@@ -2849,10 +3025,10 @@ impl CeltEncoder {
             // Compensate for the scaling of short vs long mdcts
             for ch in 0..cu {
                 for i in 0..end as usize {
-                    band_log_e2[nb * ch + i] += half32(lm as f32);
+                    band_log_e2[nb * ch + i] += lm_glog_half(lm);
                 }
             }
-            tf_estimate = 0.2f32;
+            tf_estimate = TF_ESTIMATE_0_2;
         }
 
         if lm > 0 && enc.tell() + 3 <= total_bits {
@@ -2870,7 +3046,7 @@ impl CeltEncoder {
             && !hybrid
             && st.complexity >= 2
             && st.lfe == 0
-            && toneishness < 0.98f32;
+            && toneishness < TONEISHNESS_0_98;
 
         let mut tot_boost: i32 = 0;
         let max_depth = dynalloc_analysis(
@@ -2949,8 +3125,15 @@ impl CeltEncoder {
                 // When the energy is stable, slightly bias energy quantization towards the
                 // previous error to make the gain more stable (a constant offset is better than
                 // fluctuations).
-                if abs32(band_log_e[k] - st.old_band_e[k]) < 2.0f32 {
-                    band_log_e[k] -= 0.25f32 * st.energy_error[k];
+                if abs32(band_log_e[k] - st.old_band_e[k]) < gconst(2.0) {
+                    #[cfg(not(feature = "fixed-point"))]
+                    {
+                        band_log_e[k] -= 0.25f32 * st.energy_error[k];
+                    }
+                    #[cfg(feature = "fixed-point")]
+                    {
+                        band_log_e[k] -= mult16_32_q15(qconst16(0.25, 15), st.energy_error[k]);
+                    }
                 }
             }
         }
@@ -3063,7 +3246,7 @@ impl CeltEncoder {
             }
 
             st.intensity = hysteresis_decision(
-                (equiv_rate / 1000) as f32,
+                v16(equiv_rate / 1000),
                 &INTENSITY_THRESHOLDS,
                 &INTENSITY_HISTERESIS,
                 21,
@@ -3075,7 +3258,7 @@ impl CeltEncoder {
         let mut alloc_trim = 5;
         if tell + (6 << BITRES) <= total_bits - total_boost {
             if start > 0 || st.lfe != 0 {
-                st.stereo_saving = 0.0;
+                st.stereo_saving = OpusVal16::default();
                 alloc_trim = 5;
             } else {
                 alloc_trim = alloc_trim_analysis(
@@ -3164,10 +3347,20 @@ impl CeltEncoder {
                     target -= 18 << BITRES >> (3 - lm);
                 }
                 // Boosting bitrate on transients and vowels with significant temporal spikes.
-                target += ((tf_estimate - 0.25f32) * (50 << BITRES) as f32) as i32;
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    target += ((tf_estimate - 0.25f32) * (50 << BITRES) as f32) as i32;
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    target += mult16_16_q14(
+                        i32::from(tf_estimate) - i32::from(qconst16(0.25, 14)),
+                        50 << BITRES,
+                    );
+                }
                 // If we have a strong transient, let's make sure it has enough bits to code the
                 // first two bands, so that it can use folding rather than noise.
-                if tf_estimate > 0.7f32 {
+                if tf_estimate > TF_ESTIMATE_0_7 {
                     target = imax(target, 50 << BITRES);
                 }
             }
@@ -3195,9 +3388,23 @@ impl CeltEncoder {
 
             let alpha: OpusVal16 = if st.vbr_count < 970 {
                 st.vbr_count += 1;
-                celt_rcp((st.vbr_count + 20) as f32)
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    celt_rcp((st.vbr_count + 20) as f32)
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    celt_rcp(shl32(st.vbr_count + 20, 16)) as i16
+                }
             } else {
-                0.001f32
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    0.001f32
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    qconst16(0.001f32 as f64, 15)
+                }
             };
             // How many bits have we used in excess of what we're allowed
             if st.constrained_vbr != 0 {
@@ -3206,9 +3413,19 @@ impl CeltEncoder {
 
             // Compute the offset we need to apply in order to reach the target
             if st.constrained_vbr != 0 {
-                st.vbr_drift += (alpha
-                    * ((delta * (1 << lm_diff)) - st.vbr_offset - st.vbr_drift) as f32)
-                    as i32;
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    st.vbr_drift += (alpha
+                        * ((delta * (1 << lm_diff)) - st.vbr_offset - st.vbr_drift) as f32)
+                        as i32;
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    st.vbr_drift += mult16_32_q15(
+                        alpha,
+                        (delta * (1 << lm_diff)) - st.vbr_offset - st.vbr_drift,
+                    );
+                }
                 st.vbr_offset = -st.vbr_drift;
             }
 
@@ -3244,7 +3461,11 @@ impl CeltEncoder {
                 let mut target: i32 = ((nb_compressed_bytes - qext_bytes / 3) * 8) << BITRES;
                 if vbr_rate == 0 {
                     target -= (40 * c + 20) << BITRES;
+                    #[cfg(not(feature = "fixed-point"))]
                     let tf_estimate2: OpusVal16 = min32(1.0f32, 2.0 * tf_estimate);
+                    #[cfg(feature = "fixed-point")]
+                    let tf_estimate2: OpusVal16 =
+                        min32(i32::from(qconst16(1.0, 14)), 2 * i32::from(tf_estimate)) as i16;
                     target = compute_vbr(
                         mode,
                         &st.analysis,
@@ -3268,13 +3489,25 @@ impl CeltEncoder {
                     );
                     target += tell;
                 }
-                let mut scale: OpusVal16 = toneishness;
-                scale = Q15ONE - scale * scale;
-                // C: qext_bytes += (float) → float addition, truncated back to int.
-                qext_bytes = (qext_bytes as f32
-                    + scale
-                        * ((nb_compressed_bytes - (target / (8 << BITRES))) - qext_bytes) as f32)
-                    as i32;
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    let mut scale: OpusVal16 = toneishness;
+                    scale = Q15ONE - scale * scale;
+                    // C: qext_bytes += (float) → float addition, truncated back to int.
+                    qext_bytes = (qext_bytes as f32
+                        + scale
+                            * ((nb_compressed_bytes - (target / (8 << BITRES))) - qext_bytes)
+                                as f32) as i32;
+                }
+                #[cfg(feature = "fixed-point")]
+                {
+                    let mut scale: OpusVal16 = pshr32(toneishness, 14) as i16;
+                    scale = (i32::from(Q15ONE) - mult16_16_q15(scale, scale)) as i16;
+                    qext_bytes += mult16_32_q15(
+                        scale,
+                        (nb_compressed_bytes - (target / (8 << BITRES))) - qext_bytes,
+                    );
+                }
                 qext_bytes = imax(nb_compressed_bytes - 1275, imax(21, qext_bytes));
             }
             padding_len_bytes = (qext_bytes + 253) / 254;
@@ -3405,14 +3638,14 @@ impl CeltEncoder {
             enc,
             c,
         );
-        st.energy_error[..nb * ccu].fill(0.0);
+        st.energy_error[..nb * ccu].fill(CeltGlog::default());
 
         #[cfg(feature = "qext")]
-        let mut qext_band_e = [0.0f32; 2 * QEXT_BANDS];
+        let mut qext_band_e = [CeltEner::default(); 2 * QEXT_BANDS];
         #[cfg(feature = "qext")]
-        let mut qext_band_log_e = [0.0f32; 2 * QEXT_BANDS];
+        let mut qext_band_log_e = [CeltGlog::default(); 2 * QEXT_BANDS];
         #[cfg(feature = "qext")]
-        let mut qext_error = [0.0f32; 2 * QEXT_BANDS];
+        let mut qext_error = [CeltGlog::default(); 2 * QEXT_BANDS];
         #[cfg(feature = "qext")]
         let mut qext_intensity: i32 = 0;
         #[cfg(feature = "qext")]
@@ -3420,7 +3653,7 @@ impl CeltEncoder {
         #[cfg(feature = "qext")]
         if let Some(qm) = qext_mode {
             // Don't bias for intra.
-            let mut qext_delayed_intra: OpusVal32 = 0.0;
+            let mut qext_delayed_intra: OpusVal32 = OpusVal32::default();
             compute_band_energies(qm, freq, &mut qext_band_e, qext_end, c, lm);
             normalise_bands(qm, freq, x, &qext_band_e, qext_end, c, m_);
             amp2_log2(
@@ -3603,7 +3836,7 @@ impl CeltEncoder {
         for ch in 0..cu {
             for i in start as usize..end as usize {
                 let k = i + ch * nb;
-                st.energy_error[k] = maxg(-0.5f32, ming(0.5f32, error[k]));
+                st.energy_error[k] = maxg(-gconst(0.5), ming(gconst(0.5), error[k]));
             }
         }
         #[cfg(feature = "qext")]
@@ -3622,7 +3855,7 @@ impl CeltEncoder {
             );
         }
         if silence {
-            st.old_band_e[..cu * nb].fill(-28.0f32);
+            st.old_band_e[..cu * nb].fill(-gconst(28.0));
         }
 
         // RESYNTH: re-synthesis of the coded audio (using anti_collapse_on) not ported.
@@ -3646,9 +3879,9 @@ impl CeltEncoder {
         // In case start or end were to change
         for ch in 0..ccu {
             for i in (0..start as usize).chain(end as usize..nb) {
-                st.old_band_e[ch * nb + i] = 0.0;
-                st.old_log_e[ch * nb + i] = -28.0f32;
-                st.old_log_e2[ch * nb + i] = -28.0f32;
+                st.old_band_e[ch * nb + i] = CeltGlog::default();
+                st.old_log_e[ch * nb + i] = -gconst(28.0);
+                st.old_log_e2[ch * nb + i] = -gconst(28.0);
             }
         }
 
@@ -3702,8 +3935,9 @@ pub type CustomEncoder = CeltEncoder;
 
 #[cfg(feature = "custom-modes")]
 impl CeltEncoder {
-    /// Port of celt/celt_encoder.c:opus_custom_encode (float build): encodes 16-bit PCM.
-    /// Returns the packet size or a negative error code.
+    /// Port of celt/celt_encoder.c:opus_custom_encode: encodes 16-bit PCM (`INT16TORES`, the
+    /// identity in the 16-bit fixed-point build, where C passes the samples through). Returns
+    /// the packet size or a negative error code.
     pub fn opus_custom_encode(
         &mut self,
         pcm: &[i16],
@@ -3732,7 +3966,8 @@ impl CeltEncoder {
         ret
     }
 
-    /// Port of celt/celt_encoder.c:opus_custom_encode24 (float build): encodes 24-bit PCM.
+    /// Port of celt/celt_encoder.c:opus_custom_encode24: encodes 24-bit PCM (`INT24TORES`, the
+    /// identity in the 24-bit fixed-point build, where C passes the samples through).
     /// Returns the packet size or a negative error code.
     pub fn opus_custom_encode24(
         &mut self,
@@ -3761,8 +3996,39 @@ impl CeltEncoder {
         ret
     }
 
+    /// Port of celt/celt_encoder.c:opus_custom_encode_float: encodes float PCM (converted with
+    /// `FLOAT2RES` in the fixed-point build). Returns the packet size or a negative error code.
+    #[cfg(feature = "fixed-point")]
+    pub fn opus_custom_encode_float(
+        &mut self,
+        pcm: &[f32],
+        frame_size: i32,
+        compressed: &mut [u8],
+        nb_compressed_bytes: i32,
+    ) -> i32 {
+        let n = (self.channels * frame_size).max(0) as usize;
+        if pcm.len() < n {
+            return OPUS_BAD_ARG;
+        }
+        let mut conv = core::mem::take(&mut self.scratch.pcm_conv);
+        conv.clear();
+        conv.extend(pcm[..n].iter().map(|&v| crate::celt::arch::float2res(v)));
+        let ret = self.celt_encode_with_ec(
+            &conv,
+            frame_size,
+            Some(compressed),
+            nb_compressed_bytes,
+            None,
+            #[cfg(feature = "qext")]
+            None,
+        );
+        self.scratch.pcm_conv = conv;
+        ret
+    }
+
     /// Port of celt/celt_encoder.c:opus_custom_encode_float (float build): encodes float PCM.
     /// Returns the packet size or a negative error code.
+    #[cfg(not(feature = "fixed-point"))]
     pub fn opus_custom_encode_float(
         &mut self,
         pcm: &[f32],

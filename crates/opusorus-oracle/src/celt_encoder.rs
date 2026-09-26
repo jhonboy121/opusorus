@@ -1,4 +1,9 @@
-//! Oracle bindings for unit `celt_encoder` (celt/celt_encoder.c, float build).
+//! Oracle bindings for unit `celt_encoder` (celt/celt_encoder.c), in the float and in the
+//! fixed-point oracle (`csrc/celt_encoder.c` is `// oracle-build: any`).
+//!
+//! The libopus types are mirrored by [`Res`], [`Sig`], [`Norm`], [`Glog`], [`Val16`] and
+//! [`Val32`] (float in the float build, integers in the fixed-point build); `AnalysisInfo`
+//! values stay `f32` in both.
 //!
 //! * [`CeltEnc`]: a persistent library CELT encoder (CTLs, encode with/without an existing
 //!   range coder, full state dumps as [`CeState`]).
@@ -15,6 +20,56 @@
 )]
 
 use core::ffi::{c_int, c_void};
+
+/// `opus_res`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Res = f32;
+/// `celt_sig`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Sig = f32;
+/// `celt_norm`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Norm = f32;
+/// `celt_glog`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Glog = f32;
+/// `opus_val16`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val16 = f32;
+/// `opus_val32`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val32 = f32;
+/// `opus_res` (16-bit PCM).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type Res = i16;
+/// `opus_res` (24-bit resolution, `RES_SHIFT` = 8).
+#[cfg(feature = "fixed-res24")]
+pub type Res = i32;
+/// `celt_sig`.
+#[cfg(feature = "fixed-point")]
+pub type Sig = i32;
+/// `celt_norm` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Norm = i32;
+/// `celt_glog` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Glog = i32;
+/// `opus_val16`.
+#[cfg(feature = "fixed-point")]
+pub type Val16 = i16;
+/// `opus_val32`.
+#[cfg(feature = "fixed-point")]
+pub type Val32 = i32;
+
+/// Zero values usable in `const` context.
+#[cfg(not(feature = "fixed-point"))]
+const Z16: Val16 = 0.0;
+#[cfg(not(feature = "fixed-point"))]
+const Z32: Val32 = 0.0;
+#[cfg(feature = "fixed-point")]
+const Z16: Val16 = 0;
+#[cfg(feature = "fixed-point")]
+const Z32: Val32 = 0;
 
 /// `CE_MAX_OVERLAP` etc. of the shim (dump array capacities).
 pub const CE_MAX_OVERLAP: usize = 1024;
@@ -52,13 +107,13 @@ pub struct CeState {
     pub mode_overlap: c_int,
     pub rng: u32,
     pub spread_decision: c_int,
-    pub delayed_intra: f32,
+    pub delayed_intra: Val32,
     pub tonal_average: c_int,
     pub last_coded_bands: c_int,
     pub hf_average: c_int,
     pub tapset_decision: c_int,
     pub prefilter_period: c_int,
-    pub prefilter_gain: f32,
+    pub prefilter_gain: Val16,
     pub prefilter_tapset: c_int,
     pub consec_transient: c_int,
     pub an_valid: c_int,
@@ -75,25 +130,25 @@ pub struct CeState {
     pub an_leak_boost: [u8; 20],
     pub silk_signal_type: c_int,
     pub silk_offset: c_int,
-    pub preemph_mem_e: [f32; 2],
-    pub preemph_mem_d: [f32; 2],
+    pub preemph_mem_e: [Val32; 2],
+    pub preemph_mem_d: [Val32; 2],
     pub vbr_reservoir: c_int,
     pub vbr_drift: c_int,
     pub vbr_offset: c_int,
     pub vbr_count: c_int,
-    pub overlap_max: f32,
-    pub stereo_saving: f32,
+    pub overlap_max: Val32,
+    pub stereo_saving: Val16,
     pub intensity: c_int,
     pub has_energy_mask: c_int,
-    pub energy_mask: [f32; 2 * CE_MAX_BANDS],
-    pub spec_avg: f32,
-    pub in_mem: [f32; 2 * CE_MAX_OVERLAP],
-    pub prefilter_mem: [f32; 2 * CE_MAX_PERIOD],
-    pub old_band_e: [f32; 2 * CE_MAX_BANDS],
-    pub old_log_e: [f32; 2 * CE_MAX_BANDS],
-    pub old_log_e2: [f32; 2 * CE_MAX_BANDS],
-    pub energy_error: [f32; 2 * CE_MAX_BANDS],
-    pub qext_old_band_e: [f32; 2 * CE_QEXT_BANDS],
+    pub energy_mask: [Glog; 2 * CE_MAX_BANDS],
+    pub spec_avg: Glog,
+    pub in_mem: [Sig; 2 * CE_MAX_OVERLAP],
+    pub prefilter_mem: [Sig; 2 * CE_MAX_PERIOD],
+    pub old_band_e: [Glog; 2 * CE_MAX_BANDS],
+    pub old_log_e: [Glog; 2 * CE_MAX_BANDS],
+    pub old_log_e2: [Glog; 2 * CE_MAX_BANDS],
+    pub energy_error: [Glog; 2 * CE_MAX_BANDS],
+    pub qext_old_band_e: [Glog; 2 * CE_QEXT_BANDS],
 }
 
 impl CeState {
@@ -127,13 +182,13 @@ impl CeState {
             mode_overlap: 0,
             rng: 0,
             spread_decision: 0,
-            delayed_intra: 0.0,
+            delayed_intra: Z32,
             tonal_average: 0,
             last_coded_bands: 0,
             hf_average: 0,
             tapset_decision: 0,
             prefilter_period: 0,
-            prefilter_gain: 0.0,
+            prefilter_gain: Z16,
             prefilter_tapset: 0,
             consec_transient: 0,
             an_valid: 0,
@@ -150,25 +205,25 @@ impl CeState {
             an_leak_boost: [0; 20],
             silk_signal_type: 0,
             silk_offset: 0,
-            preemph_mem_e: [0.0; 2],
-            preemph_mem_d: [0.0; 2],
+            preemph_mem_e: [Z32; 2],
+            preemph_mem_d: [Z32; 2],
             vbr_reservoir: 0,
             vbr_drift: 0,
             vbr_offset: 0,
             vbr_count: 0,
-            overlap_max: 0.0,
-            stereo_saving: 0.0,
+            overlap_max: Z32,
+            stereo_saving: Z16,
             intensity: 0,
             has_energy_mask: 0,
-            energy_mask: [0.0; 2 * CE_MAX_BANDS],
-            spec_avg: 0.0,
-            in_mem: [0.0; 2 * CE_MAX_OVERLAP],
-            prefilter_mem: [0.0; 2 * CE_MAX_PERIOD],
-            old_band_e: [0.0; 2 * CE_MAX_BANDS],
-            old_log_e: [0.0; 2 * CE_MAX_BANDS],
-            old_log_e2: [0.0; 2 * CE_MAX_BANDS],
-            energy_error: [0.0; 2 * CE_MAX_BANDS],
-            qext_old_band_e: [0.0; 2 * CE_QEXT_BANDS],
+            energy_mask: [Z32; 2 * CE_MAX_BANDS],
+            spec_avg: Z32,
+            in_mem: [Z32; 2 * CE_MAX_OVERLAP],
+            prefilter_mem: [Z32; 2 * CE_MAX_PERIOD],
+            old_band_e: [Z32; 2 * CE_MAX_BANDS],
+            old_log_e: [Z32; 2 * CE_MAX_BANDS],
+            old_log_e2: [Z32; 2 * CE_MAX_BANDS],
+            energy_error: [Z32; 2 * CE_MAX_BANDS],
+            qext_old_band_e: [Z32; 2 * CE_QEXT_BANDS],
         }
     }
 }
@@ -200,7 +255,7 @@ struct RawCall {
     ret: c_int,
     has_compressed: c_int,
     has_enc: c_int,
-    pcm: *const f32,
+    pcm: *const Res,
     pcm_len: c_int,
     comp_before: *const u8,
     comp_after: *const u8,
@@ -221,7 +276,7 @@ pub struct CeltCall {
     pub frame_size: i32,
     pub nb_compressed_bytes: i32,
     pub ret: i32,
-    pub pcm: Vec<f32>,
+    pub pcm: Vec<Res>,
     /// `compressed[0..nb]` before/after when the call had a `compressed` buffer.
     pub compressed: Option<(Vec<u8>, Vec<u8>)>,
     /// Range coder state before/after and `[toc, buf[0..storage)]` before/after when the call
@@ -287,18 +342,18 @@ unsafe extern "C" {
         leak_boost: *const u8,
     );
     fn oracle_ce_set_silk_info(h: *mut CeHandle, signal_type: c_int, offset: c_int);
-    fn oracle_ce_set_energy_mask(h: *mut CeHandle, mask: *const f32, n: c_int);
+    fn oracle_ce_set_energy_mask(h: *mut CeHandle, mask: *const Glog, n: c_int);
     fn oracle_ce_get_state(h: *const CeHandle, out: *mut CeState);
     fn oracle_ce_encode(
         h: *mut CeHandle,
-        pcm: *const f32,
+        pcm: *const Res,
         frame_size: c_int,
         out: *mut u8,
         nb: c_int,
     ) -> c_int;
     fn oracle_ce_encode_with_ec(
         h: *mut CeHandle,
-        pcm: *const f32,
+        pcm: *const Res,
         frame_size: c_int,
         buf: *mut u8,
         buf_size: c_int,
@@ -330,19 +385,19 @@ unsafe extern "C" {
         nb: c_int,
     ) -> c_int;
     fn oracle_ce_transient_analysis(
-        input: *const f32,
+        input: *const Val32,
         len: c_int,
         c: c_int,
-        tf_estimate: *mut f32,
+        tf_estimate: *mut Val16,
         tf_chan: *mut c_int,
         allow_weak: c_int,
         weak: *mut c_int,
-        tone_freq: f32,
-        toneishness: f32,
+        tone_freq: Val16,
+        toneishness: Val32,
     ) -> c_int;
     fn oracle_ce_patch_transient_decision(
-        new_e: *mut f32,
-        old_e: *mut f32,
+        new_e: *mut Glog,
+        old_e: *mut Glog,
         nb_ebands: c_int,
         start: c_int,
         end: c_int,
@@ -351,21 +406,21 @@ unsafe extern "C" {
     fn oracle_ce_compute_mdcts(
         fs: c_int,
         short_blocks: c_int,
-        input: *mut f32,
-        out: *mut f32,
+        input: *mut Sig,
+        out: *mut Sig,
         c: c_int,
         cc: c_int,
         lm: c_int,
         upsample: c_int,
     );
     fn oracle_ce_preemphasis(
-        pcm: *const f32,
-        inp: *mut f32,
+        pcm: *const Res,
+        inp: *mut Sig,
         n: c_int,
         cc: c_int,
         upsample: c_int,
-        coef: *const f32,
-        mem: *mut f32,
+        coef: *const Val16,
+        mem: *mut Sig,
         clip: c_int,
     );
     fn oracle_ce_tf_analysis(
@@ -374,10 +429,10 @@ unsafe extern "C" {
         is_transient: c_int,
         tf_res: *mut c_int,
         lambda: c_int,
-        x: *mut f32,
+        x: *mut Norm,
         n0: c_int,
         lm: c_int,
-        tf_estimate: f32,
+        tf_estimate: Val16,
         tf_chan: c_int,
         importance: *mut c_int,
     ) -> c_int;
@@ -396,28 +451,28 @@ unsafe extern "C" {
     );
     fn oracle_ce_alloc_trim_analysis(
         fs: c_int,
-        x: *const f32,
-        band_log_e: *const f32,
+        x: *const Norm,
+        band_log_e: *const Glog,
         end: c_int,
         lm: c_int,
         c: c_int,
         n0: c_int,
         an_valid: c_int,
         tonality_slope: f32,
-        stereo_saving: *mut f32,
-        tf_estimate: f32,
+        stereo_saving: *mut Val16,
+        tf_estimate: Val16,
         intensity: c_int,
-        surround_trim: f32,
+        surround_trim: Glog,
         equiv_rate: c_int,
     ) -> c_int;
-    fn oracle_ce_stereo_analysis(fs: c_int, x: *const f32, lm: c_int, n0: c_int) -> c_int;
-    fn oracle_ce_median_of_5(x: *const f32) -> f32;
-    fn oracle_ce_median_of_3(x: *const f32) -> f32;
+    fn oracle_ce_stereo_analysis(fs: c_int, x: *const Norm, lm: c_int, n0: c_int) -> c_int;
+    fn oracle_ce_median_of_5(x: *const Glog) -> Glog;
+    fn oracle_ce_median_of_3(x: *const Glog) -> Glog;
     fn oracle_ce_dynalloc_analysis(
         fs: c_int,
-        band_log_e: *const f32,
-        band_log_e2: *const f32,
-        old_band_e: *const f32,
+        band_log_e: *const Glog,
+        band_log_e2: *const Glog,
+        old_band_e: *const Glog,
         start: c_int,
         end: c_int,
         c: c_int,
@@ -430,22 +485,50 @@ unsafe extern "C" {
         effective_bytes: c_int,
         tot_boost: *mut c_int,
         lfe: c_int,
-        surround_dynalloc: *mut f32,
+        surround_dynalloc: *mut Glog,
         an_valid: c_int,
         leak_boost: *const u8,
         importance: *mut c_int,
         spread_weight: *mut c_int,
-        tone_freq: f32,
-        toneishness: f32,
-    ) -> f32;
-    fn oracle_ce_tone_lpc(x: *const f32, len: c_int, delay: c_int, lpc: *mut f32) -> c_int;
+        tone_freq: Val16,
+        toneishness: Val32,
+    ) -> Glog;
+    fn oracle_ce_tone_lpc(x: *const Val16, len: c_int, delay: c_int, lpc: *mut Val32) -> c_int;
     fn oracle_ce_tone_detect(
-        input: *const f32,
+        input: *const Sig,
         cc: c_int,
         n: c_int,
-        toneishness: *mut f32,
+        toneishness: *mut Val32,
         fs: c_int,
-    ) -> f32;
+    ) -> Val16;
+    #[cfg(feature = "fixed-point")]
+    fn oracle_ce_normalize_tone_input(x: *mut Val16, len: c_int);
+    #[cfg(feature = "fixed-point")]
+    fn oracle_ce_acos_approx(x: Val32) -> c_int;
+    fn oracle_ce_run_prefilter(
+        fs: c_int,
+        cc: c_int,
+        n: c_int,
+        input: *mut Sig,
+        prefilter_mem: *mut Sig,
+        in_mem: *mut Sig,
+        prefilter_period: *mut c_int,
+        prefilter_gain: Val16,
+        prefilter_tapset: c_int,
+        loss_rate: c_int,
+        tapset: c_int,
+        pitch: *mut c_int,
+        gain: *mut Val16,
+        qgain: *mut c_int,
+        enabled: c_int,
+        complexity: c_int,
+        tf_estimate: Val16,
+        nb_available_bytes: c_int,
+        an_valid: c_int,
+        max_pitch_ratio: f32,
+        tone_freq: Val16,
+        toneishness: Val32,
+    ) -> c_int;
     fn oracle_ce_compute_vbr(
         fs: c_int,
         an_valid: c_int,
@@ -458,15 +541,15 @@ unsafe extern "C" {
         c: c_int,
         intensity: c_int,
         constrained_vbr: c_int,
-        stereo_saving: f32,
+        stereo_saving: Val16,
         tot_boost: c_int,
-        tf_estimate: f32,
+        tf_estimate: Val16,
         pitch_change: c_int,
-        max_depth: f32,
+        max_depth: Glog,
         lfe: c_int,
         has_surround_mask: c_int,
-        surround_masking: f32,
-        temporal_vbr: f32,
+        surround_masking: Glog,
+        temporal_vbr: Glog,
         enable_qext: c_int,
     ) -> c_int;
 }
@@ -499,6 +582,9 @@ pub fn layout_ok() -> bool {
             && oracle_ce_state_offset(3) == offset_of!(CeState, energy_mask)
             && oracle_ce_state_offset(4) == offset_of!(CeState, in_mem)
             && oracle_ce_state_offset(5) == offset_of!(CeState, qext_old_band_e)
+            && oracle_ce_state_offset(6) == offset_of!(CeState, prefilter_gain)
+            && oracle_ce_state_offset(7) == offset_of!(CeState, stereo_saving)
+            && oracle_ce_state_offset(8) == offset_of!(CeState, spec_avg)
     }
 }
 
@@ -568,7 +654,7 @@ impl CeltEnc {
     }
 
     /// `OPUS_SET_ENERGY_MASK` (the shim keeps a copy alive; `None` clears it).
-    pub fn set_energy_mask(&mut self, mask: Option<&[f32]>) {
+    pub fn set_energy_mask(&mut self, mask: Option<&[Glog]>) {
         match mask {
             // SAFETY: h is live; NULL clears the mask.
             None => unsafe { oracle_ce_set_energy_mask(self.h, core::ptr::null(), 0) },
@@ -592,7 +678,7 @@ impl CeltEnc {
     /// `celt_encode_with_ec(st, pcm, frame_size, out, nb, NULL)`.
     pub fn encode(
         &mut self,
-        pcm: &[f32],
+        pcm: &[Res],
         channels: usize,
         frame_size: i32,
         out: &mut [u8],
@@ -609,7 +695,7 @@ impl CeltEnc {
     /// shrunk to `nb` when smaller. Returns `(ret, coder state, enc->buf shift)`.
     pub fn encode_with_ec(
         &mut self,
-        pcm: &[f32],
+        pcm: &[Res],
         channels: usize,
         frame_size: i32,
         buf: &mut [u8],
@@ -800,15 +886,15 @@ impl Drop for OpusRec {
 /// `transient_analysis` → `(is_transient, tf_estimate, tf_chan, weak_transient)`.
 #[must_use]
 pub fn transient_analysis(
-    input: &[f32],
+    input: &[Val32],
     len: i32,
     c: i32,
     allow_weak: bool,
-    tone_freq: f32,
-    toneishness: f32,
-) -> (bool, f32, i32, bool) {
+    tone_freq: Val16,
+    toneishness: Val32,
+) -> (bool, Val16, i32, bool) {
     assert!(input.len() >= (len * c) as usize);
-    let (mut tf, mut chan, mut weak) = (0.0f32, 0 as c_int, 0 as c_int);
+    let (mut tf, mut chan, mut weak) = (Z16, 0 as c_int, 0 as c_int);
     // SAFETY: input has len*c floats; out pointers are valid.
     let r = unsafe {
         oracle_ce_transient_analysis(
@@ -829,8 +915,8 @@ pub fn transient_analysis(
 /// `patch_transient_decision`.
 #[must_use]
 pub fn patch_transient_decision(
-    new_e: &[f32],
-    old_e: &[f32],
+    new_e: &[Glog],
+    old_e: &[Glog],
     nb_ebands: i32,
     start: i32,
     end: i32,
@@ -851,8 +937,8 @@ pub fn patch_transient_decision(
 pub fn compute_mdcts(
     fs: i32,
     short_blocks: i32,
-    input: &[f32],
-    out: &mut [f32],
+    input: &[Sig],
+    out: &mut [Sig],
     c: i32,
     cc: i32,
     lm: i32,
@@ -876,13 +962,13 @@ pub fn compute_mdcts(
 
 /// `celt_preemphasis` (library). `pcm` starts at the channel's first sample.
 pub fn preemphasis(
-    pcm: &[f32],
-    inp: &mut [f32],
+    pcm: &[Res],
+    inp: &mut [Sig],
     n: i32,
     cc: i32,
     upsample: i32,
-    coef: &[f32; 4],
-    mem: &mut f32,
+    coef: &[Val16; 4],
+    mem: &mut Sig,
     clip: bool,
 ) {
     assert!(inp.len() >= n as usize);
@@ -909,10 +995,10 @@ pub fn tf_analysis(
     is_transient: bool,
     tf_res: &mut [i32],
     lambda: i32,
-    x: &[f32],
+    x: &[Norm],
     n0: i32,
     lm: i32,
-    tf_estimate: f32,
+    tf_estimate: Val16,
     tf_chan: i32,
     importance: &[i32],
 ) -> i32 {
@@ -972,18 +1058,18 @@ pub fn tf_encode(
 /// `alloc_trim_analysis`.
 pub fn alloc_trim_analysis(
     fs: i32,
-    x: &[f32],
-    band_log_e: &[f32],
+    x: &[Norm],
+    band_log_e: &[Glog],
     end: i32,
     lm: i32,
     c: i32,
     n0: i32,
     an_valid: bool,
     tonality_slope: f32,
-    stereo_saving: &mut f32,
-    tf_estimate: f32,
+    stereo_saving: &mut Val16,
+    tf_estimate: Val16,
     intensity: i32,
-    surround_trim: f32,
+    surround_trim: Glog,
     equiv_rate: i32,
 ) -> i32 {
     // SAFETY: the caller sizes x (c*n0) and band_log_e (c*nbEBands).
@@ -1009,7 +1095,7 @@ pub fn alloc_trim_analysis(
 
 /// `stereo_analysis`.
 #[must_use]
-pub fn stereo_analysis(fs: i32, x: &[f32], lm: i32, n0: i32) -> bool {
+pub fn stereo_analysis(fs: i32, x: &[Norm], lm: i32, n0: i32) -> bool {
     assert!(x.len() >= 2 * n0 as usize);
     // SAFETY: x holds two channels of n0 samples.
     unsafe { oracle_ce_stereo_analysis(fs, x.as_ptr(), lm, n0) != 0 }
@@ -1017,14 +1103,14 @@ pub fn stereo_analysis(fs: i32, x: &[f32], lm: i32, n0: i32) -> bool {
 
 /// `median_of_5`.
 #[must_use]
-pub fn median_of_5(x: &[f32; 5]) -> f32 {
+pub fn median_of_5(x: &[Glog; 5]) -> Glog {
     // SAFETY: 5 floats.
     unsafe { oracle_ce_median_of_5(x.as_ptr()) }
 }
 
 /// `median_of_3`.
 #[must_use]
-pub fn median_of_3(x: &[f32; 3]) -> f32 {
+pub fn median_of_3(x: &[Glog; 3]) -> Glog {
     // SAFETY: 3 floats.
     unsafe { oracle_ce_median_of_3(x.as_ptr()) }
 }
@@ -1033,9 +1119,9 @@ pub fn median_of_3(x: &[f32; 3]) -> f32 {
 /// importance and spread_weight (`nbEBands` each).
 pub fn dynalloc_analysis(
     fs: i32,
-    band_log_e: &[f32],
-    band_log_e2: &[f32],
-    old_band_e: &[f32],
+    band_log_e: &[Glog],
+    band_log_e2: &[Glog],
+    old_band_e: &[Glog],
     start: i32,
     end: i32,
     c: i32,
@@ -1047,14 +1133,14 @@ pub fn dynalloc_analysis(
     lm: i32,
     effective_bytes: i32,
     lfe: bool,
-    surround_dynalloc: &[f32],
+    surround_dynalloc: &[Glog],
     an_valid: bool,
     leak_boost: &[u8; 19],
     importance: &mut [i32],
     spread_weight: &mut [i32],
-    tone_freq: f32,
-    toneishness: f32,
-) -> (f32, i32) {
+    tone_freq: Val16,
+    toneishness: Val32,
+) -> (Glog, i32) {
     let mut tot = 0 as c_int;
     let mut sd = surround_dynalloc.to_vec();
     // SAFETY: the caller sizes the per-band arrays for the mode (c*nbEBands / nbEBands).
@@ -1090,7 +1176,7 @@ pub fn dynalloc_analysis(
 
 /// `tone_lpc` → `(fail, lpc)`.
 #[must_use]
-pub fn tone_lpc(x: &[f32], len: i32, delay: i32, lpc_in: [f32; 2]) -> (bool, [f32; 2]) {
+pub fn tone_lpc(x: &[Val16], len: i32, delay: i32, lpc_in: [Val32; 2]) -> (bool, [Val32; 2]) {
     assert!(x.len() >= len as usize);
     let mut lpc = lpc_in;
     // SAFETY: x has len floats; lpc has 2.
@@ -1100,12 +1186,88 @@ pub fn tone_lpc(x: &[f32], len: i32, delay: i32, lpc_in: [f32; 2]) -> (bool, [f3
 
 /// `tone_detect` → `(freq, toneishness)`.
 #[must_use]
-pub fn tone_detect(input: &[f32], cc: i32, n: i32, fs: i32) -> (f32, f32) {
+pub fn tone_detect(input: &[Sig], cc: i32, n: i32, fs: i32) -> (Val16, Val32) {
     assert!(input.len() >= (cc * n) as usize);
-    let mut t = 0.0f32;
-    // SAFETY: input has cc*n floats.
+    let mut t = Z32;
+    // SAFETY: input has cc*n values.
     let f = unsafe { oracle_ce_tone_detect(input.as_ptr(), cc, n, &mut t, fs) };
     (f, t)
+}
+
+/// `normalize_tone_input` (fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub fn normalize_tone_input(x: &mut [Val16]) {
+    // SAFETY: x has x.len() values.
+    unsafe { oracle_ce_normalize_tone_input(x.as_mut_ptr(), x.len() as c_int) }
+}
+
+/// `acos_approx` (fixed-point build).
+#[cfg(feature = "fixed-point")]
+#[must_use]
+pub fn acos_approx(x: Val32) -> i32 {
+    // SAFETY: scalar argument only.
+    unsafe { oracle_ce_acos_approx(x) }
+}
+
+/// Encoder state read/written by [`run_prefilter`] (the `st->` fields of the C function).
+#[derive(Debug, Clone)]
+pub struct PrefilterSt {
+    pub prefilter_period: i32,
+    pub prefilter_gain: Val16,
+    pub prefilter_tapset: i32,
+    pub loss_rate: i32,
+    /// `CC*overlap`.
+    pub in_mem: Vec<Sig>,
+}
+
+/// `run_prefilter` on a scratch encoder of the mode for `fs` → `(pf_on, pitch, gain, qgain)`.
+/// `input` holds `cc*(n+overlap)` samples, `prefilter_mem` `cc*QEXT_SCALE(1024)`.
+pub fn run_prefilter(
+    fs: i32,
+    st: &mut PrefilterSt,
+    input: &mut [Sig],
+    prefilter_mem: &mut [Sig],
+    cc: i32,
+    n: i32,
+    tapset: i32,
+    enabled: bool,
+    complexity: i32,
+    tf_estimate: Val16,
+    nb_available_bytes: i32,
+    an_valid: bool,
+    max_pitch_ratio: f32,
+    tone_freq: Val16,
+    toneishness: Val32,
+) -> (bool, i32, Val16, i32) {
+    let (mut pitch, mut gain, mut qg) = (0 as c_int, Z16, 0 as c_int);
+    // SAFETY: the caller sizes input/prefilter_mem/in_mem for the mode and channel count.
+    let r = unsafe {
+        oracle_ce_run_prefilter(
+            fs,
+            cc,
+            n,
+            input.as_mut_ptr(),
+            prefilter_mem.as_mut_ptr(),
+            st.in_mem.as_mut_ptr(),
+            &mut st.prefilter_period,
+            st.prefilter_gain,
+            st.prefilter_tapset,
+            st.loss_rate,
+            tapset,
+            &mut pitch,
+            &mut gain,
+            &mut qg,
+            c_int::from(enabled),
+            complexity,
+            tf_estimate,
+            nb_available_bytes,
+            c_int::from(an_valid),
+            max_pitch_ratio,
+            tone_freq,
+            toneishness,
+        )
+    };
+    (r != 0, pitch, gain, qg)
 }
 
 /// `compute_vbr` on the mode for `fs`.
@@ -1122,15 +1284,15 @@ pub fn compute_vbr(
     c: i32,
     intensity: i32,
     constrained_vbr: bool,
-    stereo_saving: f32,
+    stereo_saving: Val16,
     tot_boost: i32,
-    tf_estimate: f32,
+    tf_estimate: Val16,
     pitch_change: bool,
-    max_depth: f32,
+    max_depth: Glog,
     lfe: bool,
     has_surround_mask: bool,
-    surround_masking: f32,
-    temporal_vbr: f32,
+    surround_masking: Glog,
+    temporal_vbr: Glog,
     enable_qext: bool,
 ) -> i32 {
     // SAFETY: scalar arguments only.

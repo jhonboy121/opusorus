@@ -10,7 +10,6 @@ pub mod bands;
 pub mod celt;
 #[cfg(not(feature = "fixed-point"))]
 pub mod celt_decoder;
-#[cfg(not(feature = "fixed-point"))]
 pub mod celt_encoder;
 pub mod celt_lpc;
 pub mod cwrs;
