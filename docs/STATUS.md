@@ -38,53 +38,56 @@ Host: aarch64 Linux, rustc 1.98.1, clang 21 / gcc (oracle via `cc`).
 ## Benchmarks
 
 Host: aarch64 Linux (Neoverse V2, 16 cores), rustc 1.98.1 release (fat LTO), criterion slope
-estimates per 20 ms frame (codec) or per call (kernels). `c_scalar` = libopus 1.6.1 built like
-the oracle (no SIMD, `-ffp-contract=off`, bit-identical output); `c_opt` = upstream CMake Release
-(NEON intrinsics, RTCD). Ratio < 1 means Rust is faster. Reproduce with `scripts/bench_report.sh`.
+estimates per 20 ms frame (codec) or per call (kernels). `c_scalar` = libopus 1.6.1 built like the
+oracle (no SIMD, `-ffp-contract=off`; bit-identical output to Rust); `c_opt` = upstream CMake
+Release (NEON intrinsics, RTCD, FMA contraction allowed). Ratio < 1 means Rust is faster.
+Reproduce with `scripts/bench_report.sh [--qext]`. Numbers after the performance pass (2026-09-26):
 
 | benchmark | rust | c_scalar | c_opt | rust/c_scalar | rust/c_opt |
 |---|---:|---:|---:|---:|---:|
-| decode celt_48k_stereo_128k | 28.2 µs | 30.0 µs | 25.3 µs | 0.94 | 1.12 |
-| decode hybrid_48k_mono_32k | 23.5 µs | 23.6 µs | 20.9 µs | 1.00 | 1.13 |
-| decode silk_16k_mono_16k_voip | 8.77 µs | 6.33 µs | 5.90 µs | **1.39** | 1.49 |
-| encode celt_48k_stereo_128k cx10 | 137.8 µs | 157.7 µs | 122.8 µs | 0.87 | 1.12 |
-| encode celt_48k_stereo_128k cx5 | 112.6 µs | 114.5 µs | 95.6 µs | 0.98 | 1.18 |
-| encode hybrid_48k_mono_32k cx10 | 239.1 µs | 242.7 µs | 179.8 µs | 0.98 | 1.33 |
-| encode hybrid_48k_mono_32k cx5 | 140.7 µs | 139.7 µs | 120.7 µs | 1.01 | 1.17 |
-| encode silk_16k_mono_16k_voip cx10 | 193.8 µs | 203.8 µs | 143.9 µs | 0.95 | 1.35 |
-| encode silk_16k_mono_16k_voip cx5 | 99.5 µs | 105.3 µs | 88.2 µs | 0.95 | 1.13 |
-| decode surround51_48k_256k | 87.6 µs | 94.5 µs | 78.3 µs | 0.93 | 1.12 |
-| encode surround51_48k_256k cx10 | 460.1 µs | 486.0 µs | 396.6 µs | 0.95 | 1.16 |
-| encode surround51_48k_256k cx5 | 398.9 µs | 407.5 µs | 323.7 µs | 0.98 | 1.23 |
-| decode qext_96k_stereo_256k | 75.8 µs | 86.2 µs | 68.0 µs | 0.88 | 1.11 |
-| encode qext_96k_stereo_256k cx10 | 290.6 µs | 298.2 µs | 244.6 µs | 0.97 | 1.19 |
-| MDCT forward N=1920 | 3.91 µs | 3.79 µs | 2.90 µs | 1.03 | 1.35 |
-| MDCT backward N=1920 | 3.55 µs | 3.38 µs | 2.59 µs | 1.05 | 1.37 |
-| FFT 480 | 2.52 µs | 2.78 µs | 2.35 µs | 0.91 | 1.07 |
-| range coder enc+dec (1000 ops) | 8.03 µs | 11.9 µs | 10.3 µs | 0.67 | 0.78 |
-| SILK resampler 48k→16k | 5.12 µs | 5.33 µs | 5.50 µs | 0.96 | 0.93 |
+| decode celt_48k_stereo_128k | 28.4 µs | 32.9 µs | 28.2 µs | 0.86 | 1.01 |
+| decode hybrid_48k_mono_32k | 19.7 µs | 23.8 µs | 21.2 µs | 0.83 | 0.93 |
+| decode silk_16k_mono_16k_voip | 5.22 µs | 6.32 µs | 5.90 µs | 0.83 | 0.88 |
+| decode qext_96k_stereo_256k | 66.0 µs | 86.3 µs | 67.8 µs | 0.76 | 0.97 |
+| encode celt_48k_stereo_128k cx10 | 124.6 µs | 146.8 µs | 124.6 µs | 0.85 | 1.00 |
+| encode celt_48k_stereo_128k cx5 | 100.9 µs | 116.1 µs | 97.0 µs | 0.87 | 1.04 |
+| encode hybrid_48k_mono_32k cx10 | 186.0 µs | 243.1 µs | 180.1 µs | 0.77 | 1.03 |
+| encode hybrid_48k_mono_32k cx5 | 125.5 µs | 139.9 µs | 121.0 µs | 0.90 | 1.04 |
+| encode silk_16k_mono_16k_voip cx10 | 143.7 µs | 203.9 µs | 144.0 µs | 0.70 | 1.00 |
+| encode silk_16k_mono_16k_voip cx5 | 86.6 µs | 105.2 µs | 88.2 µs | 0.82 | 0.98 |
+| encode qext_96k_stereo_256k cx10 | 249.4 µs | 297.2 µs | 244.3 µs | 0.84 | 1.02 |
+| encode qext_96k_stereo_256k cx5 | 224.5 µs | 270.0 µs | 221.1 µs | 0.83 | 1.02 |
+| decode surround51_48k_256k | 87.7 µs | 100.9 µs | 84.8 µs | 0.87 | 1.03 |
+| encode surround51_48k_256k cx10 | 415.6 µs | 490.3 µs | 400.9 µs | 0.85 | 1.04 |
+| encode surround51_48k_256k cx5 | 360.6 µs | 410.9 µs | 328.2 µs | 0.88 | 1.10 |
+| MDCT forward N=1920 | 3.42 µs | 3.69 µs | 2.92 µs | 0.93 | 1.17 |
+| MDCT backward N=1920 | 3.25 µs | 3.36 µs | 2.58 µs | 0.97 | 1.26 |
+| FFT 480 | 2.50 µs | 2.78 µs | 2.31 µs | 0.90 | 1.09 |
+| range coder enc+dec (1000 ops) | 9.80 µs | 11.9 µs | 10.2 µs | 0.83 | 0.96 |
+| SILK resampler 48k→16k | 5.14 µs | 5.29 µs | 5.50 µs | 0.97 | 0.93 |
 
-DNN decode (20 s at complexity 10, 20 % loss, release): SILK WB 0.77× C time, CELT 48k 0.77× C.
-`opus_demo` end-to-end (Rust vs C, byte-identical output): decode 12 RFC vectors 0.58 s vs 0.63 s;
-encode 64 kb/s stereo 29 s input 0.41 s vs 0.45 s.
-
-Findings: the Rust port matches or beats the scalar C build everywhere except SILK decode (1.39×);
-vs NEON-optimized C it is 7–37 % slower (SIMD kernels). Performance pass: see TRACKER.
+Summary: Rust is faster than scalar C on every codec benchmark (0.70–0.90×) and on par with
+NEON-optimized C (0.88–1.10×). The remaining MDCT/FFT gap to `c_opt` comes from FMA contraction and
+NEON kernels that a bit-exact port cannot use for float code.
+DNN decode (20 s at complexity 10, 20 % loss): SILK WB 0.77×, CELT 48k 0.77× C time.
 
 ## Shared library sizes
 
-`scripts/size_report.sh` (aarch64 Linux, stripped):
+`scripts/size_report.sh` (aarch64 Linux, stripped; section totals in parentheses because file sizes
+are quantised by 64 KiB segment alignment on aarch64):
 
 | Library | Config | Bytes | KiB |
 |---|---|---:|---:|
 | libopus 1.6.1 (C) | Release (-O3), default features | 592328 | 578.4 |
 | libopus 1.6.1 (C) | MinSizeRel (-Os) | 330192 | 322.5 |
 | libopus 1.6.1 (C) | Release, no intrinsics | 526752 | 514.4 |
-| opusorus (Rust, C ABI) | release (opt-level 3, fat LTO) | 1053248 | 1028.6 |
-| opusorus (Rust, C ABI) | release-small (opt-level s, fat LTO) | 791104 | 772.6 |
+| opusorus (Rust, C ABI) | release (opt-level 3, fat LTO) | 987712 (942801) | 964.6 |
+| opusorus (Rust, C ABI) | release-small (opt-level s, fat LTO) | 791104 (733209) | 772.6 |
 
-Of the release-small build ≈389 KB is codec code, ≈166 KB is Rust std (panic/backtrace/fmt),
-≈16 KB the C ABI layer. Size reduction is tracked in the performance pass.
+Breakdown of the Rust C ABI: ≈390 KB codec code, ≈150 KB Rust std panic/backtrace machinery
+(gimli/addr2line/demangle), ≈90 KB panic location records (~1,400 sites), ≈47 KB `.eh_frame`,
+≈16 KB C ABI glue. Removing std from the C ABI (own panic handler/allocator/libm bridge) is the
+remaining big lever; see TRACKER open follow-ups.
 
 ## Fuzzing
 
