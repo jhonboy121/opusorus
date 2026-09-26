@@ -14,7 +14,6 @@ pub mod celt;
 pub mod celt_decoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod celt_encoder;
-#[cfg(not(feature = "fixed-point"))]
 pub mod celt_lpc;
 pub mod cwrs;
 pub mod entcode;
@@ -27,7 +26,6 @@ pub mod mdct;
 #[cfg(feature = "qext")]
 pub mod mini_kfft;
 pub mod modes;
-#[cfg(not(feature = "fixed-point"))]
 pub mod pitch;
 #[cfg(not(feature = "fixed-point"))]
 pub mod quant_bands;
