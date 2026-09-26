@@ -104,7 +104,12 @@ int oracle_sd_decode(void *p, int ctrl[7], int lost, int new_packet, float *out,
   c.payloadSize_ms = ctrl[4];
   c.prevPitchLag = ctrl[5];
   c.enable_deep_plc = ctrl[6];
+#ifdef ENABLE_DEEP_PLC
+  /* DNN oracle builds (dnn_core build.rs): silk_Decode takes an extra LPCNetPLCState*. */
+  ret = oracle_sd_silk_Decode(h->dec, &c, lost, new_packet, &h->ec, out, &n, NULL, 0);
+#else
   ret = oracle_sd_silk_Decode(h->dec, &c, lost, new_packet, &h->ec, out, &n, 0);
+#endif
   ctrl[0] = c.nChannelsAPI;
   ctrl[1] = c.nChannelsInternal;
   ctrl[2] = c.API_sampleRate;
