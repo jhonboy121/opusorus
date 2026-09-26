@@ -12,7 +12,7 @@ C libopus is the **oracle**: every ported component must be verified against it.
 - `unwrap()`/`expect()` only with `#[expect(clippy::unwrap_used/expect_used, reason = "...")]` or an
   adjacent comment stating why it cannot fail. Tests may unwrap freely.
 - Mark functions `const fn` wherever possible (clippy `missing_const_for_fn` is on).
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` must pass. Lint suppressions
+- `just clippy` must pass (clippy `-D warnings` over the float and fixed-point feature sets; `--all-features` is invalid because `fixed-point` is non-additive). Lint suppressions
   need `reason = "..."` (use `#[expect]` over `#[allow]` where the lint always fires).
 - `cargo fmt --all` clean.
 - Must build for host, wasm32-unknown-unknown, wasm32-wasip1, aarch64/armv7/x86_64 Android,
