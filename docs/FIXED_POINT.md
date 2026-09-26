@@ -131,7 +131,7 @@ tests, and verifies bit-exactness with `fixed-point`, `fixed-res24` and `qext` c
 | FX2 | `fixed_silk_encoder` ✅ | new `silk/fixed.rs` (+ `silk/fixed/*.rs`), `silk/encoder.rs` | silk/fixed/*.c (23 files, `SILK_SOURCES_FIXED`), main_FIX.h, structs_FIX.h, enc_API.c (1), init_encoder.c (1), control_codec.c (4) | replaces `silk/float.rs` in fixed builds; needs `fixed_pitch_lpc` (`celt_pitch_xcorr`) |
 | FX2 | `fixed_analysis` ✅ | `analysis.rs` (`mlp.rs` unchanged: float) | src/analysis.c (7) | float analysis fed by fixed PCM (`downmix`, `celt_inner_prod` scaling) |
 | FX3 | `fixed_celt_decoder` | `celt/celt_decoder.rs` | celt_decoder.c (9) | deemphasis/`SIG2RES`, PLC in fixed; needs FX1+FX2 |
-| FX3 | `fixed_celt_encoder` | `celt/celt_encoder.rs` | celt_encoder.c (30) | preemphasis, transient analysis, tf/dynalloc in fixed; needs FX1+FX2 |
+| FX3 | `fixed_celt_encoder` ✅ | `celt/celt_encoder.rs` | celt_encoder.c (30) | preemphasis, transient analysis, tf/dynalloc in fixed; needs FX1+FX2 |
 | FX4 | `fixed_opus_decoder` | `decoder.rs`, `ms_decoder.rs`, `projection_decoder.rs` | opus_decoder.c (9), opus_multistream_decoder.c (1), opus_projection_decoder.c (1) | `opus_res` outputs (`RES2INT16/24/FLOAT`) |
 | FX4 | `fixed_opus_encoder` | `encoder.rs`, `ms_encoder.rs`, `projection_encoder.rs` | opus_encoder.c (16), opus_multistream_encoder.c (2), opus_projection_encoder.c | `FLOAT2SIG`/`INT16TOSIG` downmix, gain fades |
 | FX5 | `fixed_integration` | `lib.rs` gates, `opusorus/tests`, examples, `opusorus-tools`, `opusorus-capi`, `opusorus-bench` | — | fixed RFC 8251 vectors (the decoder must pass `opus_compare`), libopus C test suite against a fixed `libopusorus`, benchmarks vs a fixed C build, docs |
