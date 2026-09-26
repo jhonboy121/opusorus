@@ -4,3 +4,4 @@ target/
 /fuzz/artifacts/
 /testdata/vectors/
 *.profraw
+.claude/
