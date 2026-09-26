@@ -2,11 +2,15 @@
 //! API (`silk_Get_Encoder_Size`, `silk_InitEncoder`, `silk_Encode`), encoder state
 //! initialization, and encoder control (`silk_control_encoder` with its static setup helpers).
 //!
-//! The encoder super-struct `silk_encoder` (declared in `silk/float/structs_FLP.h`) is
-//! [`SilkEncoder`].
+//! The encoder super-struct `silk_encoder` (declared in `silk/float/structs_FLP.h` /
+//! `silk/fixed/structs_FIX.h`) is [`SilkEncoder`].
 //!
-//! * FIXED_POINT: not ported (float build) — the C files select `main_FIX.h` /
-//!   `silk_encoder_state_FIX` there; only `silk_setup_resamplers` has a fixed-point branch.
+//! * FIXED_POINT: the C files include `main_FIX.h` / `main_FLP.h`, which select the build's
+//!   channel state `silk_encoder_state_Fxx` (`silk_encoder_state_FIX` / `_FLP`) and the
+//!   `silk_encode_do_VAD_Fxx` / `silk_encode_frame_Fxx` functions: here the aliases
+//!   [`SilkEncoderStateFxx`], [`SilkShapeStateFxx`] and the private `silk_encode_do_vad_fxx` /
+//!   `silk_encode_frame_fxx`. `silk_setup_resamplers` resamples `x_buf` in place in the
+//!   fixed-point build (the float build converts it to and from `opus_int16`).
 //! * DNN: ENABLE_DRED only adds `#include "dred_encoder.h"` to `enc_API.c` and
 //!   `init_encoder.c` (no code in these files); nothing to hook here.
 
@@ -39,9 +43,15 @@ use crate::silk::encoder_common::{
 use crate::silk::errors::{
     SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES, SILK_ENC_PACKET_SIZE_NOT_SUPPORTED, SILK_NO_ERROR,
 };
+#[cfg(feature = "fixed-point")]
+use crate::silk::fixed::{
+    SilkEncoderStateFix, SilkShapeStateFix, silk_encode_do_vad_fix as silk_encode_do_vad_fxx,
+    silk_encode_frame_fix as silk_encode_frame_fxx,
+};
+#[cfg(not(feature = "fixed-point"))]
 use crate::silk::float::{
-    SilkEncoderStateFlp, SilkShapeStateFlp, silk_encode_do_vad_flp, silk_encode_frame_flp,
-    silk_float2short_array, silk_short2float_array,
+    SilkEncoderStateFlp, SilkShapeStateFlp, silk_encode_do_vad_flp as silk_encode_do_vad_fxx,
+    silk_encode_frame_flp as silk_encode_frame_fxx, silk_float2short_array, silk_short2float_array,
 };
 use crate::silk::macros::{
     silk_div32_16, silk_fix_const, silk_limit, silk_lshift, silk_max_int, silk_min, silk_min_int,
@@ -64,6 +74,21 @@ use crate::silk::vad::silk_vad_init;
 
 const NCH: usize = ENCODER_NUM_CHANNELS as usize;
 
+/// `silk_encoder_state_Fxx`: the channel encoder state of the build
+/// (`silk_encoder_state_FLP`).
+#[cfg(not(feature = "fixed-point"))]
+pub type SilkEncoderStateFxx = SilkEncoderStateFlp;
+/// `silk_encoder_state_Fxx`: the channel encoder state of the build
+/// (`silk_encoder_state_FIX`).
+#[cfg(feature = "fixed-point")]
+pub type SilkEncoderStateFxx = SilkEncoderStateFix;
+/// The noise shaping analysis state of the build (`silk_shape_state_FLP`).
+#[cfg(not(feature = "fixed-point"))]
+pub type SilkShapeStateFxx = SilkShapeStateFlp;
+/// The noise shaping analysis state of the build (`silk_shape_state_FIX`).
+#[cfg(feature = "fixed-point")]
+pub type SilkShapeStateFxx = SilkShapeStateFix;
+
 /// Maximum number of API-rate samples per channel handled by one pass of the `silk_Encode`
 /// input loop (at most one 20 ms frame): the size of the C `buf` VLA actually used.
 const ENC_BUF_MAX: usize = (MAX_API_FS_KHZ * MAX_FRAME_LENGTH_MS) as usize;
@@ -73,10 +98,11 @@ const ENC_BUF_MAX: usize = (MAX_API_FS_KHZ * MAX_FRAME_LENGTH_MS) as usize;
 const SETUP_BUF_MS: usize = (2 * MAX_NB_SUBFR * SUB_FRAME_LENGTH_MS + LA_SHAPE_MS) as usize;
 
 // ---------------------------------------------------------------------------------------------
-// structs_FLP.h: silk_encoder
+// structs_FLP.h / structs_FIX.h: silk_encoder
 // ---------------------------------------------------------------------------------------------
 
-/// `silk_encoder`: the SILK encoder super struct (`silk/float/structs_FLP.h`).
+/// `silk_encoder`: the SILK encoder super struct (`silk/float/structs_FLP.h`,
+/// `silk/fixed/structs_FIX.h`).
 ///
 /// Roughly 20 KB (two channel states); the Opus encoder should embed or `Box` it.
 #[derive(Debug, Clone)]
@@ -91,7 +117,7 @@ pub struct SilkEncoder {
     pub allow_bandwidth_switch: i32,
     pub prev_decode_only_middle: i32,
     /// This needs to be last so we can skip the second state for mono (C layout note).
-    pub state_fxx: [SilkEncoderStateFlp; NCH],
+    pub state_fxx: [SilkEncoderStateFxx; NCH],
 }
 
 impl SilkEncoder {
@@ -109,7 +135,7 @@ impl SilkEncoder {
             time_since_switch_allowed_ms: 0,
             allow_bandwidth_switch: 0,
             prev_decode_only_middle: 0,
-            state_fxx: [SilkEncoderStateFlp::new(), SilkEncoderStateFlp::new()],
+            state_fxx: [SilkEncoderStateFxx::new(), SilkEncoderStateFxx::new()],
         }
     }
 
@@ -130,9 +156,9 @@ impl SilkEncoder {
         self.time_since_switch_allowed_ms = 0;
         self.allow_bandwidth_switch = 0;
         self.prev_decode_only_middle = 0;
-        self.state_fxx[0] = SilkEncoderStateFlp::new();
+        self.state_fxx[0] = SilkEncoderStateFxx::new();
         if channels != 1 {
-            self.state_fxx[1] = SilkEncoderStateFlp::new();
+            self.state_fxx[1] = SilkEncoderStateFxx::new();
         }
         for n in 0..channels as usize {
             ret += silk_init_encoder(&mut self.state_fxx[n]);
@@ -175,7 +201,8 @@ impl SilkEncoder {
     /// Port of `silk/enc_API.c:silk_Encode` — encode frame(s) with SILK.
     ///
     /// `samples_in` holds `n_samples_in` samples per API channel (interleaved for stereo),
-    /// as `opus_res` (float in the float build, converted with `RES2INT16`). `n_bytes_out` is
+    /// as `opus_res` (float in the float build, `opus_int16` / `opus_int32` in the fixed-point
+    /// builds; converted with `RES2INT16`). `n_bytes_out` is
     /// the payload size (input: max bytes). If `prefill_flag` is set, the input must contain
     /// 10 ms of audio irrespective of `enc_control.payload_size_ms`, and `ps_range_enc` is never
     /// touched (the Opus encoder passes `NULL`; pass any encoder, e.g. one over an empty
@@ -386,7 +413,7 @@ impl SilkEncoder {
                 } else if n_ch_api == 2 && n_ch_int == 1 {
                     // Combine left and right channels before resampling
                     for n in 0..nfi {
-                        let sum = res2int16(input[2 * n] + input[2 * n + 1]) as i32;
+                        let sum = res2int16_sum(input[2 * n], input[2 * n + 1]);
                         buf[n] = silk_rshift_round(sum, 1) as i16;
                     }
                     let ix = s0.s_cmn.input_buf_ix as usize;
@@ -596,7 +623,7 @@ impl SilkEncoder {
                         // Reset side channel encoder memory for first frame with side coding
                         if self.prev_decode_only_middle == 1 {
                             let s1 = &mut self.state_fxx[1];
-                            s1.s_shape = SilkShapeStateFlp::default();
+                            s1.s_shape = SilkShapeStateFxx::default();
                             s1.s_cmn.s_nsq = SilkNsqState::new();
                             s1.s_cmn.prev_nlsfq_q15 = [0; MAX_LPC_ORDER as usize];
                             s1.s_cmn.s_lp.in_lp_state = [0; 2];
@@ -607,7 +634,7 @@ impl SilkEncoder {
                             s1.s_cmn.s_nsq.prev_gain_q16 = 65536;
                             s1.s_cmn.first_frame_after_reset = 1;
                         }
-                        silk_encode_do_vad_flp(&mut self.state_fxx[1], activity);
+                        silk_encode_do_vad_fxx(&mut self.state_fxx[1], activity);
                     } else {
                         self.state_fxx[1].s_cmn.vad_flags[nfe] = 0;
                     }
@@ -629,7 +656,7 @@ impl SilkEncoder {
                         .s_mid
                         .copy_from_slice(&s0.input_buf[fl..fl + 2]);
                 }
-                silk_encode_do_vad_flp(&mut self.state_fxx[0], activity);
+                silk_encode_do_vad_fxx(&mut self.state_fxx[0], activity);
 
                 // Encode
                 for n in 0..n_ch_int as usize {
@@ -673,7 +700,7 @@ impl SilkEncoder {
                             } else {
                                 CODE_CONDITIONALLY
                             };
-                        ret = silk_encode_frame_flp(
+                        ret = silk_encode_frame_fxx(
                             &mut self.state_fxx[n],
                             n_bytes_out,
                             ps_range_enc,
@@ -786,6 +813,28 @@ impl Default for SilkEncoder {
     }
 }
 
+/// `RES2INT16( a + b )` of the stereo-to-mono downmix in `silk_Encode`: the sum of two
+/// `opus_res` samples in the C expression type (`float` in the float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+fn res2int16_sum(a: OpusRes, b: OpusRes) -> i32 {
+    res2int16(a + b) as i32
+}
+/// `RES2INT16( a + b )` of the stereo-to-mono downmix in `silk_Encode`: `opus_res` is
+/// `opus_int32` (24-bit resolution), the sum is an `int`.
+#[cfg(feature = "fixed-res24")]
+#[inline(always)]
+const fn res2int16_sum(a: OpusRes, b: OpusRes) -> i32 {
+    res2int16(a + b) as i32
+}
+/// `RES2INT16( a + b )` of the stereo-to-mono downmix in `silk_Encode`: `opus_res` is
+/// `opus_int16`, so the sum is an `int` and `RES2INT16` is the identity.
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+#[inline(always)]
+const fn res2int16_sum(a: OpusRes, b: OpusRes) -> i32 {
+    a as i32 + b as i32
+}
+
 /// `SILK_FIX_CONST( ( 1 - SPEECH_ACTIVITY_DTX_THRES ) / MAX_BANDWIDTH_SWITCH_DELAY_MS, 16 + 8 )`,
 /// with the C float arithmetic (`(1 - 0.05f) / 5000` is a float division).
 #[inline]
@@ -800,7 +849,7 @@ pub const fn silk_get_encoder_size(enc_size_bytes: &mut i32, channels: i32) -> i
     *enc_size_bytes = size_of::<SilkEncoder>() as i32;
     // Skip second encoder state for mono.
     if channels == 1 {
-        *enc_size_bytes -= size_of::<SilkEncoderStateFlp>() as i32;
+        *enc_size_bytes -= size_of::<SilkEncoderStateFxx>() as i32;
     }
     SILK_NO_ERROR
 }
@@ -810,11 +859,11 @@ pub const fn silk_get_encoder_size(enc_size_bytes: &mut i32, channels: i32) -> i
 // ---------------------------------------------------------------------------------------------
 
 /// Port of `silk/init_encoder.c:silk_init_encoder` — initialize the SILK encoder state.
-pub fn silk_init_encoder(ps_enc: &mut SilkEncoderStateFlp) -> i32 {
+pub fn silk_init_encoder(ps_enc: &mut SilkEncoderStateFxx) -> i32 {
     let mut ret = 0;
 
     // Clear the entire encoder state
-    *ps_enc = SilkEncoderStateFlp::new();
+    *ps_enc = SilkEncoderStateFxx::new();
 
     ps_enc.s_cmn.variable_hp_smth1_q15 = silk_lshift(
         silk_lin2log(silk_fix_const(VARIABLE_HP_MIN_CUTOFF_HZ as f64, 16)) - (16 << 7),
@@ -838,7 +887,7 @@ pub fn silk_init_encoder(ps_enc: &mut SilkEncoderStateFlp) -> i32 {
 
 /// Port of `silk/control_codec.c:silk_control_encoder` — control the SILK encoder.
 pub fn silk_control_encoder(
-    ps_enc: &mut SilkEncoderStateFlp,
+    ps_enc: &mut SilkEncoderStateFxx,
     enc_control: &mut SilkEncControlStruct,
     allow_bw_switch: i32,
     channel_nb: i32,
@@ -900,7 +949,7 @@ pub fn silk_control_encoder(
 /// Port of the static `silk/control_codec.c:silk_setup_resamplers` — prepare the input
 /// resampler and re-sample the buffered analysis data (`x_buf`) when the internal or API
 /// sampling rate changes.
-pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32) -> i32 {
+pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFxx, fs_khz: i32) -> i32 {
     let mut ret = SILK_NO_ERROR;
     let s = &mut ps_enc.s_cmn;
 
@@ -910,17 +959,25 @@ pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32) -> i
             // fs_kHz
             ret += silk_resampler_init(&mut s.resampler_state, s.api_fs_hz, fs_khz * 1000, 1);
         } else {
-            const XBUF_MAX: usize = SETUP_BUF_MS * crate::silk::define::MAX_FS_KHZ as usize;
-            let mut x_buf_fix = [0i16; XBUF_MAX];
             let mut x_buf_api_fs_hz = [0i16; SETUP_BUF_MS * MAX_API_FS_KHZ as usize];
             let mut temp_resampler_state = SilkResamplerState::default();
 
             let buf_length_ms = silk_lshift(s.nb_subfr * 5, 1) + LA_SHAPE_MS;
             let old_buf_samples = buf_length_ms * s.fs_khz;
 
-            // FIXED_POINT: not ported (float build) — x_bufFIX aliases psEnc->x_buf there.
+            // Fixed-point build: `x_bufFIX` is `psEnc->x_buf` itself.
+            #[cfg(feature = "fixed-point")]
+            let x_buf_fix = &mut ps_enc.x_buf;
+            #[cfg(not(feature = "fixed-point"))]
+            const XBUF_MAX: usize = SETUP_BUF_MS * crate::silk::define::MAX_FS_KHZ as usize;
+            #[cfg(not(feature = "fixed-point"))]
+            let mut x_buf_fix_arr = [0i16; XBUF_MAX];
+            #[cfg(not(feature = "fixed-point"))]
+            let x_buf_fix = &mut x_buf_fix_arr;
+            #[cfg(not(feature = "fixed-point"))]
             let new_buf_samples = buf_length_ms * fs_khz;
-            silk_float2short_array(&mut x_buf_fix, &ps_enc.x_buf, old_buf_samples as usize);
+            #[cfg(not(feature = "fixed-point"))]
+            silk_float2short_array(x_buf_fix, &ps_enc.x_buf, old_buf_samples as usize);
 
             // Initialize resampler for temporary resampling of x_buf data to API_fs_Hz
             ret += silk_resampler_init(
@@ -937,7 +994,7 @@ pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32) -> i
             ret += silk_resampler(
                 &mut temp_resampler_state,
                 &mut x_buf_api_fs_hz,
-                &x_buf_fix,
+                &x_buf_fix[..],
                 old_buf_samples,
             );
 
@@ -953,12 +1010,13 @@ pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32) -> i
             // Correct resampler state by resampling buffered data from API_fs_Hz to fs_kHz
             ret += silk_resampler(
                 &mut s.resampler_state,
-                &mut x_buf_fix,
+                &mut x_buf_fix[..],
                 &x_buf_api_fs_hz,
                 api_buf_samples,
             );
 
-            silk_short2float_array(&mut ps_enc.x_buf, &x_buf_fix, new_buf_samples as usize);
+            #[cfg(not(feature = "fixed-point"))]
+            silk_short2float_array(&mut ps_enc.x_buf, x_buf_fix, new_buf_samples as usize);
         }
     }
 
@@ -969,7 +1027,7 @@ pub fn silk_setup_resamplers(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32) -> i
 
 /// Port of the static `silk/control_codec.c:silk_setup_fs` — set packet size and internal
 /// sampling frequency.
-pub fn silk_setup_fs(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32, packet_size_ms: i32) -> i32 {
+pub fn silk_setup_fs(ps_enc: &mut SilkEncoderStateFxx, fs_khz: i32, packet_size_ms: i32) -> i32 {
     let mut ret = SILK_NO_ERROR;
     let s = &mut ps_enc.s_cmn;
 
@@ -1012,7 +1070,7 @@ pub fn silk_setup_fs(ps_enc: &mut SilkEncoderStateFlp, fs_khz: i32, packet_size_
     debug_assert!(s.nb_subfr == 2 || s.nb_subfr == 4);
     if s.fs_khz != fs_khz {
         // reset part of the state
-        ps_enc.s_shape = SilkShapeStateFlp::default();
+        ps_enc.s_shape = SilkShapeStateFxx::default();
         let s = &mut ps_enc.s_cmn;
         s.s_nsq = SilkNsqState::new();
         s.prev_nlsfq_q15 = [0; MAX_LPC_ORDER as usize];

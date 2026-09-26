@@ -15,6 +15,8 @@ pub mod foundation;
 // Fixed-point oracle (features `fixed-point` / `fixed-res24`, docs/FIXED_POINT.md).
 #[cfg(feature = "fixed-point")]
 pub mod fixed_foundation;
+#[cfg(feature = "fixed-point")]
+pub mod silk_encoder_fix;
 
 // Units whose shims compile in both oracles (`// oracle-build: any`).
 pub mod celt_bands;
