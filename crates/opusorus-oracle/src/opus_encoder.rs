@@ -9,6 +9,9 @@
 //! * Free functions: the static helpers of opus_encoder.c / opus_multistream_encoder.c.
 //!
 //! Errors are the raw negative libopus codes, as in [`crate::api`].
+//!
+//! Built in the float and in the fixed-point oracle: signal / state values use the build's
+//! types ([`Res`], [`Val16`], [`Val32`], [`Glog`]).
 
 #![allow(
     clippy::too_many_arguments,
@@ -21,6 +24,34 @@ use core::ptr::NonNull;
 use crate::api::OResult;
 use crate::sys;
 
+/// `opus_res` of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type Res = f32;
+/// `opus_res` of the oracle build.
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type Res = i16;
+/// `opus_res` of the oracle build.
+#[cfg(feature = "fixed-res24")]
+pub type Res = i32;
+/// `opus_val16` of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val16 = f32;
+/// `opus_val16` of the oracle build.
+#[cfg(feature = "fixed-point")]
+pub type Val16 = i16;
+/// `opus_val32` of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val32 = f32;
+/// `opus_val32` of the oracle build.
+#[cfg(feature = "fixed-point")]
+pub type Val32 = i32;
+/// `celt_glog` of the oracle build (Q24 in the fixed-point build).
+#[cfg(not(feature = "fixed-point"))]
+pub type Glog = f32;
+/// `celt_glog` of the oracle build (Q24 in the fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub type Glog = i32;
+
 const fn check(ret: c_int) -> OResult<usize> {
     if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
@@ -32,36 +63,36 @@ unsafe extern "C" {
     fn oracle_oe_gen_toc(mode: c_int, framerate: c_int, bandwidth: c_int, channels: c_int)
     -> c_int;
     fn oracle_oe_hp_cutoff(
-        input: *const f32,
+        input: *const Res,
         cutoff_hz: c_int,
-        out: *mut f32,
-        hp_mem: *mut f32,
+        out: *mut Res,
+        hp_mem: *mut Val32,
         len: c_int,
         channels: c_int,
         fs: c_int,
     );
     fn oracle_oe_dc_reject(
-        input: *const f32,
+        input: *const Res,
         cutoff_hz: c_int,
-        out: *mut f32,
-        hp_mem: *mut f32,
+        out: *mut Res,
+        hp_mem: *mut Val32,
         len: c_int,
         channels: c_int,
         fs: c_int,
     );
     fn oracle_oe_stereo_fade(
-        buf: *mut f32,
-        g1: f32,
-        g2: f32,
+        buf: *mut Res,
+        g1: Val16,
+        g2: Val16,
         fs96: c_int,
         frame_size: c_int,
         channels: c_int,
         fs: c_int,
     );
     fn oracle_oe_gain_fade(
-        buf: *mut f32,
-        g1: f32,
-        g2: f32,
+        buf: *mut Res,
+        g1: Val16,
+        g2: Val16,
         fs96: c_int,
         frame_size: c_int,
         channels: c_int,
@@ -74,11 +105,11 @@ unsafe extern "C" {
         fs: c_int,
     ) -> c_int;
     fn oracle_oe_compute_stereo_width(
-        pcm: *const f32,
+        pcm: *const Res,
         frame_size: c_int,
         fs: c_int,
-        mem: *mut f32,
-    ) -> f32;
+        mem: *mut Val32,
+    ) -> Val16;
     fn oracle_oe_decide_fec(
         use_fec: c_int,
         loss: c_int,
@@ -104,7 +135,8 @@ unsafe extern "C" {
         complexity: c_int,
         loss: c_int,
     ) -> c_int;
-    fn oracle_oe_compute_frame_energy(pcm: *const f32, frame_size: c_int, channels: c_int) -> f32;
+    fn oracle_oe_compute_frame_energy(pcm: *const Res, frame_size: c_int, channels: c_int)
+    -> Val32;
     fn oracle_oe_decide_dtx_mode(activity: c_int, nb: *mut c_int, frame_size_ms_q1: c_int)
     -> c_int;
     fn oracle_oe_compute_redundancy_bytes(
@@ -113,13 +145,13 @@ unsafe extern "C" {
         frame_rate: c_int,
         channels: c_int,
     ) -> c_int;
-    fn oracle_oe_log_sum(a: f32, b: f32) -> f32;
+    fn oracle_oe_log_sum(a: Glog, b: Glog) -> Val16;
     fn oracle_oe_channel_pos(channels: c_int, pos: *mut c_int);
     fn oracle_oe_surround_analysis(
         pcm: *const f32,
-        band_log_e: *mut f32,
-        mem: *mut f32,
-        preemph_mem: *mut f32,
+        band_log_e: *mut Glog,
+        mem: *mut Val32,
+        preemph_mem: *mut Val32,
         len: c_int,
         channels: c_int,
         rate: c_int,
@@ -155,7 +187,7 @@ unsafe extern "C" {
         max_bytes: c_int,
     ) -> c_int;
     fn oracle_oe_ctl_get(st: *mut sys::OpusEncoder, request: c_int, value: *mut i32) -> c_int;
-    fn oracle_oe_dump(st: *const sys::OpusEncoder, v: *mut u32, delay: *mut f32) -> c_int;
+    fn oracle_oe_dump(st: *const sys::OpusEncoder, v: *mut u32, delay: *mut Res) -> c_int;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -170,10 +202,10 @@ pub fn gen_toc(mode: i32, framerate: i32, bandwidth: i32, channels: i32) -> u8 {
 
 /// `hp_cutoff`: `input`/`out` hold `len*channels` samples.
 pub fn hp_cutoff(
-    input: &[f32],
+    input: &[Res],
     cutoff_hz: i32,
-    out: &mut [f32],
-    hp_mem: &mut [f32; 4],
+    out: &mut [Res],
+    hp_mem: &mut [Val32; 4],
     len: i32,
     channels: i32,
     fs: i32,
@@ -196,10 +228,10 @@ pub fn hp_cutoff(
 
 /// `dc_reject`: `input`/`out` hold `len*channels` samples.
 pub fn dc_reject(
-    input: &[f32],
+    input: &[Res],
     cutoff_hz: i32,
-    out: &mut [f32],
-    hp_mem: &mut [f32; 4],
+    out: &mut [Res],
+    hp_mem: &mut [Val32; 4],
     len: i32,
     channels: i32,
     fs: i32,
@@ -222,9 +254,9 @@ pub fn dc_reject(
 
 /// `stereo_fade` in place with the 48 kHz (or, `fs96`, 96 kHz) mode window.
 pub fn stereo_fade(
-    buf: &mut [f32],
-    g1: f32,
-    g2: f32,
+    buf: &mut [Res],
+    g1: Val16,
+    g2: Val16,
     fs96: bool,
     frame_size: i32,
     channels: i32,
@@ -247,9 +279,9 @@ pub fn stereo_fade(
 
 /// `gain_fade` in place with the 48 kHz (or, `fs96`, 96 kHz) mode window.
 pub fn gain_fade(
-    buf: &mut [f32],
-    g1: f32,
-    g2: f32,
+    buf: &mut [Res],
+    g1: Val16,
+    g2: Val16,
     fs96: bool,
     frame_size: i32,
     channels: i32,
@@ -282,7 +314,7 @@ pub fn frame_size_select(
 }
 
 /// `compute_stereo_width`; `mem` = XX, XY, YY, smoothed_width, max_follower.
-pub fn compute_stereo_width(pcm: &[f32], frame_size: i32, fs: i32, mem: &mut [f32; 5]) -> f32 {
+pub fn compute_stereo_width(pcm: &[Res], frame_size: i32, fs: i32, mem: &mut [Val32; 5]) -> Val16 {
     assert!(pcm.len() >= 2 * frame_size as usize);
     // SAFETY: pcm holds 2*frame_size samples; mem has 5 entries.
     unsafe { oracle_oe_compute_stereo_width(pcm.as_ptr(), frame_size, fs, mem.as_mut_ptr()) }
@@ -333,7 +365,7 @@ pub fn compute_equiv_rate(
 }
 
 /// `compute_frame_energy`.
-pub fn compute_frame_energy(pcm: &[f32], frame_size: i32, channels: i32) -> f32 {
+pub fn compute_frame_energy(pcm: &[Res], frame_size: i32, channels: i32) -> Val32 {
     assert!(pcm.len() >= (frame_size * channels) as usize);
     // SAFETY: pcm holds frame_size*channels samples.
     unsafe { oracle_oe_compute_frame_energy(pcm.as_ptr(), frame_size, channels) }
@@ -361,7 +393,7 @@ pub fn compute_redundancy_bytes(
 }
 
 /// `logSum`.
-pub fn log_sum(a: f32, b: f32) -> f32 {
+pub fn log_sum(a: Glog, b: Glog) -> Val16 {
     // SAFETY: pure function of its arguments.
     unsafe { oracle_oe_log_sum(a, b) }
 }
@@ -378,9 +410,9 @@ pub fn channel_pos(channels: i32) -> [i32; 8] {
 /// `mem`: `channels*overlap`, `preemph_mem`: `channels`, `band_log_e`: `21*channels`.
 pub fn surround_analysis(
     pcm: &[f32],
-    band_log_e: &mut [f32],
-    mem: &mut [f32],
-    preemph_mem: &mut [f32],
+    band_log_e: &mut [Glog],
+    mem: &mut [Val32],
+    preemph_mem: &mut [Val32],
     len: i32,
     channels: i32,
     rate: i32,
@@ -488,9 +520,9 @@ impl DupEnc {
     }
     /// Flat state dump (see `oracle_oe_dump` in the shim for the field order) and the delay
     /// buffer (`encoder_buffer*channels` samples).
-    pub fn dump(&self) -> (Vec<u32>, Vec<f32>) {
+    pub fn dump(&self) -> (Vec<u32>, Vec<Res>) {
         let mut v = vec![0u32; 64];
-        let mut d = vec![0f32; 2 * 960];
+        let mut d: Vec<Res> = vec![Res::default(); 2 * 960];
         // SAFETY: v has 64 entries (the shim writes 63), d holds the largest delay buffer.
         let n = unsafe { oracle_oe_dump(self.ptr.as_ptr(), v.as_mut_ptr(), d.as_mut_ptr()) };
         v.truncate(n as usize);
@@ -518,7 +550,7 @@ pub struct Enc {
     ptr: NonNull<sys::OpusEncoder>,
     channels: usize,
     /// Storage for `OPUS_SET_ENERGY_MASK` (C keeps the pointer).
-    mask: Box<[f32; 42]>,
+    mask: Box<[Glog; 42]>,
 }
 
 macro_rules! encode_fns {
@@ -624,7 +656,7 @@ impl Enc {
         Ok(Self {
             ptr,
             channels: channels as usize,
-            mask: Box::new([0.0; 42]),
+            mask: Box::new([Glog::default(); 42]),
         })
     }
     encode_fns!(sys::opus_encode, sys::opus_encode24, sys::opus_encode_float);
@@ -632,10 +664,10 @@ impl Enc {
 
     /// `OPUS_SET_ENERGY_MASK`: copies `mask` into storage owned by this wrapper (C keeps the
     /// pointer) or passes NULL.
-    pub fn set_energy_mask(&mut self, mask: Option<&[f32]>) -> OResult<()> {
-        let p: *const f32 = match mask {
+    pub fn set_energy_mask(&mut self, mask: Option<&[Glog]>) -> OResult<()> {
+        let p: *const Glog = match mask {
             Some(m) => {
-                self.mask.fill(0.0);
+                self.mask.fill(Glog::default());
                 self.mask[..m.len()].copy_from_slice(m);
                 self.mask.as_ptr()
             }

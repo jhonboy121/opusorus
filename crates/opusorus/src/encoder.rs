@@ -13,7 +13,12 @@
 //! * `opus_encoder_get_size` → [`encoder_get_size`] (Rust footprint, not the C `sizeof`).
 //! * `opus_encoder_destroy` → `Drop`.
 //!
-//! The float build is ported (`opus_res` = `f32`); it is bit-exact with the C reference.
+//! Both builds are ported: the float build (`opus_res` = `f32`) and the fixed-point build
+//! (features `fixed-point` / `fixed-res24`: `opus_res` = `i16` / `i32`, the `FIXED_POINT`
+//! branches of the C file: integer high-pass / DC filters, gain and stereo fades, stereo width,
+//! frame energy, surround masking, `opus_encode` / `opus_encode24` passing their input through
+//! without conversion when it already is `opus_res`). Each is bit-exact with the matching C
+//! build.
 //!
 //! Deviations from C (none observable in the output):
 //! * The energy mask (`OPUS_SET_ENERGY_MASK`, used by the surround multistream encoder) is
@@ -24,7 +29,6 @@
 //!   packet buffer grow on first use).
 //! * Rust-only argument checks: a PCM slice shorter than `frame_size * channels` returns
 //!   [`Error::BadArg`] (C reads out of bounds).
-//! * `FIXED_POINT` branches are not ported (markers in the code).
 //!
 //! DRED (feature `dred`, C `ENABLE_DRED`): with [`Encoder::set_dred_duration`] > 0 the encoder
 //! reserves part of the bitrate for Deep REDundancy and appends a DRED extension (RDOVAE latents
@@ -57,16 +61,29 @@ use crate::analysis::{
     is_digital_silence, run_analysis, tonality_analysis_init, tonality_analysis_reset,
     tonality_get_info,
 };
+#[cfg(not(feature = "fixed-res24"))]
+use crate::celt::arch::int24tores;
 use crate::celt::arch::{
-    CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, Q15ONE, VERY_SMALL, abs16,
-    celt_isnan, half32, imax, imin, int16tores, int24tores, max16, max32, maxg, min16, min32, ming,
+    CeltCoef, CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, Q15ONE, abs16, half32,
+    imax, imin, int16tores, max16, max32, maxg, min16, min32, ming,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{
+    DB_SHIFT, EPSILON, RES_SHIFT, coef2val16, extend32, extract16, float2res, gconst, mac16_16,
+    mult16_16, mult16_16_q15, mult16_32_q15, mult16_res_q15, pshr32, qconst16, qconst32, res2int16,
+    res2val16, saturate, shl16, shl32, shr32,
+};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::{VERY_SMALL, celt_isnan};
 use crate::celt::celt::{SilkInfo, bitrate_to_bits, bits_to_bitrate};
 use crate::celt::celt_encoder::CeltEncoder;
 use crate::celt::entenc::EcEnc;
 use crate::celt::mathops::{celt_exp2, celt_sqrt, frac_div32};
+#[cfg(feature = "fixed-point")]
+use crate::celt::mathops::{celt_ilog2, celt_maxabs_res};
 #[cfg(feature = "qext")]
 use crate::celt::modes::QEXT_PACKET_SIZE_CAP;
+#[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::celt_inner_prod;
 use crate::celt::static_modes::CeltMode;
 use crate::constants::raw::{
@@ -87,6 +104,10 @@ use crate::silk::macros::{
     silk_div32_16, silk_fix_const, silk_lshift, silk_min, silk_mul, silk_rshift, silk_smlawb,
     silk_smulbb, silk_smulwb, silk_smulww,
 };
+#[cfg(feature = "fixed-point")]
+use crate::silk::macros::{silk_rshift_round, silk_sat16};
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+use crate::silk::sigproc::{silk_biquad_alt_stride1, silk_biquad_alt_stride2};
 use crate::silk::sigproc::{silk_lin2log, silk_log2lin};
 use crate::silk::structs::SilkEncControlStruct;
 use crate::silk::tuning_parameters::{VARIABLE_HP_MIN_CUTOFF_HZ, VARIABLE_HP_SMTH_COEF2};
@@ -477,10 +498,50 @@ pub const fn gen_toc(mode: i32, framerate: i32, bandwidth: i32, channels: i32) -
     toc as u8
 }
 
-// FIXED_POINT: silk_biquad_res (fixed version) not ported (float build).
+/// Port of src/opus_encoder.c:silk_biquad_res (fixed-point build): second order ARMA filter
+/// (direct form II transposed, the `silk_biquad_alt` arithmetic on `RES2INT16` samples) on
+/// `len` samples read/written with `stride`. Used by 24-bit resolution builds.
+#[cfg(feature = "fixed-point")]
+#[doc(hidden)]
+pub fn silk_biquad_res(
+    input: &[OpusRes],
+    b_q28: &[i32; 3],
+    a_q28: &[i32; 2],
+    s: &mut [OpusVal32],
+    out: &mut [OpusRes],
+    len: i32,
+    stride: i32,
+) {
+    // DIRECT FORM II TRANSPOSED (uses 2 element state vector)
+
+    // Negate A_Q28 values and split in two parts
+    let a0_l_q28 = (-a_q28[0]) & 0x0000_3FFF; // lower part
+    let a0_u_q28 = silk_rshift(-a_q28[0], 14); // upper part
+    let a1_l_q28 = (-a_q28[1]) & 0x0000_3FFF; // lower part
+    let a1_u_q28 = silk_rshift(-a_q28[1], 14); // upper part
+
+    let stride = stride as usize;
+    for k in 0..len as usize {
+        // S[ 0 ], S[ 1 ]: Q12
+        let inval = i32::from(res2int16(input[k * stride]));
+        let out32_q14 = silk_lshift(silk_smlawb(s[0], b_q28[0], inval), 2);
+
+        s[0] = s[1] + silk_rshift_round(silk_smulwb(out32_q14, a0_l_q28), 14);
+        s[0] = silk_smlawb(s[0], out32_q14, a0_u_q28);
+        s[0] = silk_smlawb(s[0], b_q28[1], inval);
+
+        s[1] = silk_rshift_round(silk_smulwb(out32_q14, a1_l_q28), 14);
+        s[1] = silk_smlawb(s[1], out32_q14, a1_u_q28);
+        s[1] = silk_smlawb(s[1], b_q28[2], inval);
+
+        // Scale back to Q0 and saturate
+        out[k * stride] = int16tores(silk_sat16(silk_rshift(out32_q14 + (1 << 14) - 1, 14)) as i16);
+    }
+}
 
 /// Port of src/opus_encoder.c:silk_biquad_res (float build): second order ARMA filter
 /// (direct form II transposed) on `len` samples read/written with `stride`.
+#[cfg(not(feature = "fixed-point"))]
 #[doc(hidden)]
 pub fn silk_biquad_res(
     input: &[OpusRes],
@@ -546,25 +607,71 @@ pub fn hp_cutoff(
         silk_smulww(r_q22, r_q22),
     ];
 
-    // FIXED_POINT: silk_biquad_alt_stride1/2 path not ported (float build).
-    let (m01, m23) = hp_mem.split_at_mut(2);
-    silk_biquad_res(input, &b_q28, &a_q28, m01, out, len, channels);
-    if channels == 2 {
-        silk_biquad_res(
-            &input[1..],
-            &b_q28,
-            &a_q28,
-            m23,
-            &mut out[1..],
-            len,
-            channels,
-        );
+    // 16-bit fixed-point builds use the SILK biquad directly on the `opus_int16` samples.
+    #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+    {
+        if channels == 1 {
+            silk_biquad_alt_stride1(input, &b_q28, &a_q28, hp_mem, out, len as usize);
+        } else {
+            silk_biquad_alt_stride2(input, &b_q28, &a_q28, hp_mem, out, len as usize);
+        }
+    }
+    #[cfg(any(not(feature = "fixed-point"), feature = "fixed-res24"))]
+    {
+        let (m01, m23) = hp_mem.split_at_mut(2);
+        silk_biquad_res(input, &b_q28, &a_q28, m01, out, len, channels);
+        if channels == 2 {
+            silk_biquad_res(
+                &input[1..],
+                &b_q28,
+                &a_q28,
+                m23,
+                &mut out[1..],
+                len,
+                channels,
+            );
+        }
     }
 }
 
-// FIXED_POINT: dc_reject (fixed version) not ported (float build).
+/// Port of src/opus_encoder.c:dc_reject (fixed-point build): one-pole DC rejection filter
+/// (`hp_mem` in Q14 of the 16-bit scale).
+#[cfg(feature = "fixed-point")]
+#[doc(hidden)]
+pub fn dc_reject(
+    input: &[OpusRes],
+    cutoff_hz: i32,
+    out: &mut [OpusRes],
+    hp_mem: &mut [OpusVal32; 4],
+    len: i32,
+    channels: i32,
+    fs: i32,
+) {
+    // Approximates -round(log2(6.3*cutoff_Hz/Fs))
+    let shift = celt_ilog2(fs / (cutoff_hz * 4));
+    let ch = channels as usize;
+    for c in 0..ch {
+        for i in 0..len as usize {
+            // Saturate at +6 dBFS to avoid any wrap-around.
+            let mut x: OpusVal32 = saturate(input[ch * i + c], (1 << 16 << RES_SHIFT) - 1);
+            x = shl32(x, 14 - RES_SHIFT);
+            let y: OpusVal32 = x - hp_mem[2 * c];
+            hp_mem[2 * c] += pshr32(x - hp_mem[2 * c], shift);
+            // Don't saturate if we have the headroom to avoid it (24-bit resolution).
+            #[cfg(feature = "fixed-res24")]
+            {
+                out[ch * i + c] = pshr32(y, 14 - RES_SHIFT);
+            }
+            #[cfg(not(feature = "fixed-res24"))]
+            {
+                out[ch * i + c] = saturate(pshr32(y, 14 - RES_SHIFT), 32767) as OpusRes;
+            }
+        }
+    }
+}
 
 /// Port of src/opus_encoder.c:dc_reject (float build): one-pole DC rejection filter.
+#[cfg(not(feature = "fixed-point"))]
 #[doc(hidden)]
 pub fn dc_reject(
     input: &[OpusVal16],
@@ -605,8 +712,23 @@ pub fn dc_reject(
     }
 }
 
-/// Port of src/opus_encoder.c:stereo_fade, in place (the encoder always calls it with
-/// `in == out`): crossfades the stereo width from `g1` to `g2`.
+/// The squared window gain `w` and the crossfaded gain between `g1` and `g2` of
+/// `stereo_fade` / `gain_fade` (fixed-point build): `w = MULT16_16_Q15(w, w)`,
+/// `g = SHR32(MAC16_16(MULT16_16(w,g2), Q15ONE-w, g1), 15)`.
+#[cfg(feature = "fixed-point")]
+#[inline]
+fn fade_gain(window: CeltCoef, g1: OpusVal16, g2: OpusVal16) -> OpusVal16 {
+    let mut w: OpusVal16 = coef2val16(window);
+    w = mult16_16_q15(w, w) as OpusVal16;
+    shr32(
+        mac16_16(mult16_16(w, g2), i32::from(Q15ONE) - i32::from(w), g1),
+        15,
+    ) as OpusVal16
+}
+
+/// Port of src/opus_encoder.c:stereo_fade (fixed-point build), in place (the encoder always
+/// calls it with `in == out`): crossfades the stereo width from `g1` to `g2` (Q15).
+#[cfg(feature = "fixed-point")]
 #[doc(hidden)]
 pub fn stereo_fade(
     buf: &mut [OpusRes],
@@ -615,7 +737,85 @@ pub fn stereo_fade(
     overlap48: i32,
     frame_size: i32,
     channels: i32,
-    window: &[f32],
+    window: &[CeltCoef],
+    fs: i32,
+) {
+    let inc = imax(1, 48000 / fs);
+    let overlap = (overlap48 / inc) as usize;
+    let inc = inc as usize;
+    let ch = channels as usize;
+    let g1 = (i32::from(Q15ONE) - i32::from(g1)) as OpusVal16;
+    let g2 = (i32::from(Q15ONE) - i32::from(g2)) as OpusVal16;
+    // `out[k] = out[k] -/+ diff` with the implicit C narrowing to `opus_res`.
+    let apply = |buf: &mut [OpusRes], i: usize, g: OpusVal16| {
+        let mut diff: OpusVal32 = half32(extend32(buf[i * ch]) - extend32(buf[i * ch + 1]));
+        // MULT16_RES_Q15 takes the difference as an `opus_res` (MULT16_16_Q15 truncates it to
+        // 16 bits in 16-bit builds; it fits).
+        diff = extend32(mult16_res_q15(g, diff as OpusRes));
+        buf[i * ch] = (extend32(buf[i * ch]) - diff) as OpusRes;
+        buf[i * ch + 1] = (extend32(buf[i * ch + 1]) + diff) as OpusRes;
+    };
+    let mut i = 0usize;
+    while i < overlap {
+        let g = fade_gain(window[i * inc], g1, g2);
+        apply(buf, i, g);
+        i += 1;
+    }
+    while i < frame_size as usize {
+        apply(buf, i, g2);
+        i += 1;
+    }
+}
+
+/// Port of src/opus_encoder.c:gain_fade (fixed-point build), in place (the encoder always calls
+/// it with `in == out`): crossfades the gain from `g1` to `g2` (Q15) over the CELT overlap.
+#[cfg(feature = "fixed-point")]
+#[doc(hidden)]
+pub fn gain_fade(
+    buf: &mut [OpusRes],
+    g1: OpusVal16,
+    g2: OpusVal16,
+    overlap48: i32,
+    frame_size: i32,
+    channels: i32,
+    window: &[CeltCoef],
+    fs: i32,
+) {
+    let inc = imax(1, 48000 / fs);
+    let overlap = (overlap48 / inc) as usize;
+    let inc = inc as usize;
+    if channels == 1 {
+        for i in 0..overlap {
+            let g = fade_gain(window[i * inc], g1, g2);
+            buf[i] = mult16_res_q15(g, buf[i]);
+        }
+    } else {
+        for i in 0..overlap {
+            let g = fade_gain(window[i * inc], g1, g2);
+            buf[i * 2] = mult16_res_q15(g, buf[i * 2]);
+            buf[i * 2 + 1] = mult16_res_q15(g, buf[i * 2 + 1]);
+        }
+    }
+    let ch = channels as usize;
+    for c in 0..ch {
+        for i in overlap..frame_size as usize {
+            buf[i * ch + c] = mult16_res_q15(g2, buf[i * ch + c]);
+        }
+    }
+}
+
+/// Port of src/opus_encoder.c:stereo_fade, in place (the encoder always calls it with
+/// `in == out`): crossfades the stereo width from `g1` to `g2`.
+#[cfg(not(feature = "fixed-point"))]
+#[doc(hidden)]
+pub fn stereo_fade(
+    buf: &mut [OpusRes],
+    g1: OpusVal16,
+    g2: OpusVal16,
+    overlap48: i32,
+    frame_size: i32,
+    channels: i32,
+    window: &[CeltCoef],
     fs: i32,
 ) {
     let inc = imax(1, 48000 / fs);
@@ -646,6 +846,7 @@ pub fn stereo_fade(
 
 /// Port of src/opus_encoder.c:gain_fade, in place (the encoder always calls it with
 /// `in == out`): crossfades the gain from `g1` to `g2` over the CELT overlap.
+#[cfg(not(feature = "fixed-point"))]
 #[doc(hidden)]
 pub fn gain_fade(
     buf: &mut [OpusRes],
@@ -654,7 +855,7 @@ pub fn gain_fade(
     overlap48: i32,
     frame_size: i32,
     channels: i32,
-    window: &[f32],
+    window: &[CeltCoef],
     fs: i32,
 ) {
     let inc = imax(1, 48000 / fs);
@@ -731,8 +932,91 @@ pub fn frame_size_select(
     new_size
 }
 
+/// Port of src/opus_encoder.c:compute_stereo_width (fixed-point build): smoothed estimate of
+/// the stereo width (Q15) of `pcm` (interleaved stereo, `frame_size` samples per channel).
+#[cfg(feature = "fixed-point")]
+#[must_use]
+#[doc(hidden)]
+pub fn compute_stereo_width(
+    pcm: &[OpusRes],
+    frame_size: i32,
+    fs: i32,
+    mem: &mut StereoWidthState,
+) -> OpusVal16 {
+    let shift = celt_ilog2(frame_size) - 2;
+    let frame_rate = fs / frame_size;
+    let short_alpha = (mult16_16(25, Q15ONE) / imax(50, frame_rate)) as OpusVal16;
+    let mut xx: OpusVal32 = 0;
+    let mut xy: OpusVal32 = 0;
+    let mut yy: OpusVal32 = 0;
+    // Unroll by 4. The frame size is always a multiple of 4 *except* for 2.5 ms frames at
+    // 12 kHz. Since this setting is very rare (and very stupid), we just discard the last two
+    // samples.
+    let mut i = 0i32;
+    while i < frame_size - 3 {
+        let iu = i as usize;
+        let mut pxx: OpusVal32 = 0;
+        let mut pxy: OpusVal32 = 0;
+        let mut pyy: OpusVal32 = 0;
+        for k in 0..4 {
+            let x: OpusVal16 = res2val16(pcm[2 * iu + 2 * k]);
+            let y: OpusVal16 = res2val16(pcm[2 * iu + 2 * k + 1]);
+            pxx += shr32(mult16_16(x, x), 2);
+            pxy += shr32(mult16_16(x, y), 2);
+            pyy += shr32(mult16_16(y, y), 2);
+        }
+        xx += shr32(pxx, shift);
+        xy += shr32(pxy, shift);
+        yy += shr32(pyy, shift);
+        i += 4;
+    }
+    mem.xx += mult16_32_q15(short_alpha, xx - mem.xx);
+    // mem->XY += MULT16_32_Q15(short_alpha, xy-mem->XY);
+    // Rewritten to avoid overflows on abrupt sign change.
+    mem.xy = mult16_32_q15(i32::from(Q15ONE) - i32::from(short_alpha), mem.xy)
+        + mult16_32_q15(short_alpha, xy);
+    mem.yy += mult16_32_q15(short_alpha, yy - mem.yy);
+    mem.xx = max32(0, mem.xx);
+    mem.xy = max32(0, mem.xy);
+    mem.yy = max32(0, mem.yy);
+    if max32(mem.xx, mem.yy) > i32::from(qconst16(8e-4f32 as f64, 18)) {
+        // C stores the `opus_val32` square roots in `opus_val16` variables.
+        let sqrt_xx = celt_sqrt(mem.xx) as OpusVal16;
+        let sqrt_yy = celt_sqrt(mem.yy) as OpusVal16;
+        let qrrt_xx = celt_sqrt(i32::from(sqrt_xx)) as OpusVal16;
+        let qrrt_yy = celt_sqrt(i32::from(sqrt_yy)) as OpusVal16;
+        // Inter-channel correlation
+        mem.xy = min32(mem.xy, i32::from(sqrt_xx) * i32::from(sqrt_yy));
+        let corr = shr32(
+            frac_div32(mem.xy, EPSILON + mult16_16(sqrt_xx, sqrt_yy)),
+            16,
+        ) as OpusVal16;
+        // Approximate loudness difference
+        let ldiff = (mult16_16(Q15ONE, abs16(i32::from(qrrt_xx) - i32::from(qrrt_yy)))
+            / (EPSILON + i32::from(qrrt_xx) + i32::from(qrrt_yy))) as OpusVal16;
+        let width = mult16_16_q15(
+            min16(
+                i32::from(Q15ONE),
+                celt_sqrt(qconst32(1.0, 30) - mult16_16(corr, corr)),
+            ),
+            ldiff,
+        ) as OpusVal16;
+        // Smoothing over one second
+        mem.smoothed_width = (i32::from(mem.smoothed_width)
+            + (i32::from(width) - i32::from(mem.smoothed_width)) / frame_rate)
+            as OpusVal16;
+        // Peak follower
+        mem.max_follower = max16(
+            i32::from(mem.max_follower) - i32::from(qconst16(0.02f32 as f64, 15)) / frame_rate,
+            i32::from(mem.smoothed_width),
+        ) as OpusVal16;
+    }
+    extract16(min32(i32::from(Q15ONE), mult16_16(20, mem.max_follower)))
+}
+
 /// Port of src/opus_encoder.c:compute_stereo_width (float build): smoothed estimate of the
 /// stereo width of `pcm` (interleaved stereo, `frame_size` samples per channel).
+#[cfg(not(feature = "fixed-point"))]
 #[must_use]
 #[doc(hidden)]
 pub fn compute_stereo_width(
@@ -965,9 +1249,38 @@ pub const fn compute_equiv_rate(
     equiv
 }
 
-// FIXED_POINT: compute_frame_energy (fixed version) not ported (float build).
+/// Port of src/opus_encoder.c:compute_frame_energy (fixed-point build): mean energy per
+/// sample of the 16-bit scaled signal (shifted to avoid overflows in the accumulation).
+#[cfg(feature = "fixed-point")]
+#[must_use]
+#[doc(hidden)]
+pub fn compute_frame_energy(pcm: &[OpusRes], frame_size: i32, channels: i32) -> OpusVal32 {
+    let len = frame_size * channels;
+    let pcm = &pcm[..len as usize];
+    // Max amplitude in the signal
+    #[cfg(feature = "fixed-res24")]
+    let sample_max: OpusVal32 = i32::from(res2int16(celt_maxabs_res(pcm)));
+    // RES2INT16 is the identity with a 16-bit `opus_res` (the maximum may be 32768).
+    #[cfg(not(feature = "fixed-res24"))]
+    let sample_max: OpusVal32 = celt_maxabs_res(pcm);
+
+    // Compute the right shift required in the MAC to avoid an overflow
+    let max_shift = celt_ilog2(len);
+    let shift = imax(0, (celt_ilog2(1 + sample_max) << 1) + max_shift - 28);
+
+    // Compute the energy
+    let mut energy: OpusVal32 = 0;
+    for &v in pcm {
+        energy += shr32(mult16_16(res2int16(v), res2int16(v)), shift);
+    }
+
+    // Normalize energy by the frame size and left-shift back to the original position
+    energy /= len;
+    shl32(energy, shift)
+}
 
 /// Port of src/opus_encoder.c:compute_frame_energy (float build): mean energy per sample.
+#[cfg(not(feature = "fixed-point"))]
 #[must_use]
 #[doc(hidden)]
 pub fn compute_frame_energy(pcm: &[OpusVal16], frame_size: i32, channels: i32) -> OpusVal32 {
@@ -1174,6 +1487,36 @@ fn silk_of(silk: &mut Option<Box<SilkEncoder>>) -> Result<&mut SilkEncoder> {
     silk.as_deref_mut().ok_or(Error::InternalError)
 }
 
+/// A state value of [`Encoder::debug_state_dump`]: the bit pattern of a float, or the
+/// sign-extended value of a fixed-point integer.
+#[cfg(feature = "internals")]
+trait DumpBits {
+    fn dump_bits(self) -> u32;
+}
+#[cfg(feature = "internals")]
+impl DumpBits for f32 {
+    fn dump_bits(self) -> u32 {
+        self.to_bits()
+    }
+}
+#[cfg(feature = "internals")]
+impl DumpBits for i32 {
+    fn dump_bits(self) -> u32 {
+        self as u32
+    }
+}
+#[cfg(feature = "internals")]
+impl DumpBits for i16 {
+    fn dump_bits(self) -> u32 {
+        i32::from(self) as u32
+    }
+}
+/// [`DumpBits::dump_bits`].
+#[cfg(feature = "internals")]
+fn dump_bits(v: impl DumpBits) -> u32 {
+    v.dump_bits()
+}
+
 /// Converts a `usize` sample count / length to the C `int`.
 #[inline]
 fn usize_to_i32(v: usize) -> Result<i32> {
@@ -1295,7 +1638,7 @@ impl Encoder {
             hybrid_stereo_width_q14: 1 << 14,
             variable_hp_smth2_q15: silk_lshift(silk_lin2log(VARIABLE_HP_MIN_CUTOFF_HZ), 8),
             prev_hb_gain: Q15ONE,
-            hp_mem: [0.0; 4],
+            hp_mem: [OpusVal32::default(); 4],
             mode: MODE_HYBRID,
             prev_mode: 0,
             prev_channels: 0,
@@ -1305,11 +1648,11 @@ impl Encoder {
             silk_bw_switch: 0,
             first: 1,
             has_energy_mask: false,
-            energy_masking: [0.0; 42],
+            energy_masking: [CeltGlog::default(); 42],
             width_mem: StereoWidthState::default(),
             detected_bandwidth: 0,
             nb_no_activity_ms_q1: 0,
-            peak_signal_energy: 0.0,
+            peak_signal_energy: OpusVal32::default(),
             #[cfg(feature = "dred")]
             dred_duration: 0,
             #[cfg(feature = "dred")]
@@ -1326,13 +1669,13 @@ impl Encoder {
             dred_bitrate_bps: 0,
             nonfinal_frame: 0,
             range_final: 0,
-            delay_buffer: vec![0.0; MAX_ENCODER_BUFFER * 2],
+            delay_buffer: vec![OpusRes::default(); MAX_ENCODER_BUFFER * 2],
             silk_enc,
             celt_enc,
             scratch: Scratch {
                 input: Vec::new(),
-                pcm_buf: vec![0.0; ((fs / 250 + 3 * fs / 50) as usize) * ch],
-                tmp_prefill: vec![0.0; ch * (fs / 400) as usize],
+                pcm_buf: vec![OpusRes::default(); ((fs / 250 + 3 * fs / 50) as usize) * ch],
+                tmp_prefill: vec![OpusRes::default(); ch * (fs / 400) as usize],
                 tmp_data: Vec::new(),
                 pad: Vec::new(),
             },
@@ -1391,43 +1734,15 @@ impl Encoder {
     /// internal failures (as libopus).
     pub fn encode(&mut self, pcm: &[i16], frame_size: usize, out: &mut [u8]) -> Result<usize> {
         let analysis_frame_size = usize_to_i32(frame_size)?;
-        let frame_size = frame_size_select(
-            self.application,
-            analysis_frame_size,
-            self.variable_duration,
-            self.fs,
-        );
-        if frame_size <= 0 {
-            return Err(Error::BadArg);
+        // 16-bit fixed-point builds pass the input through (`opus_res` is `opus_int16`).
+        #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+        {
+            self.encode_passthrough(pcm, pcm, analysis_frame_size, out, 16, downmix_int, 0)
         }
-        let ch = self.channels as usize;
-        if pcm.len() < analysis_frame_size as usize * ch {
-            return Err(Error::BadArg);
+        #[cfg(any(not(feature = "fixed-point"), feature = "fixed-res24"))]
+        {
+            self.encode_converted(pcm, analysis_frame_size, out, 16, downmix_int, int16tores)
         }
-        let n = frame_size as usize * ch;
-        let mut input = core::mem::take(&mut self.scratch.input);
-        if input.len() < n {
-            input.resize(n, 0.0);
-        }
-        for (d, &s) in input[..n].iter_mut().zip(&pcm[..n]) {
-            *d = int16tores(s);
-        }
-        let ret = self.opus_encode_native(
-            &input[..n],
-            frame_size,
-            out,
-            len_i32(out.len()),
-            16,
-            Some(pcm),
-            analysis_frame_size,
-            0,
-            -2,
-            self.channels,
-            downmix_int,
-            1,
-        );
-        self.scratch.input = input;
-        code_to_result(ret)
     }
 
     /// Port of src/opus_encoder.c:opus_encode24: encodes a frame of 24-bit PCM (in `i32`,
@@ -1437,43 +1752,30 @@ impl Encoder {
     /// As [`Encoder::encode`].
     pub fn encode24(&mut self, pcm: &[i32], frame_size: usize, out: &mut [u8]) -> Result<usize> {
         let analysis_frame_size = usize_to_i32(frame_size)?;
-        let frame_size = frame_size_select(
-            self.application,
-            analysis_frame_size,
-            self.variable_duration,
-            self.fs,
-        );
-        if frame_size <= 0 {
-            return Err(Error::BadArg);
+        // 24-bit resolution builds pass the input through (`opus_res` is `opus_int32`).
+        #[cfg(feature = "fixed-res24")]
+        {
+            self.encode_passthrough(
+                pcm,
+                pcm,
+                analysis_frame_size,
+                out,
+                MAX_ENCODING_DEPTH,
+                downmix_int24,
+                0,
+            )
         }
-        let ch = self.channels as usize;
-        if pcm.len() < analysis_frame_size as usize * ch {
-            return Err(Error::BadArg);
+        #[cfg(not(feature = "fixed-res24"))]
+        {
+            self.encode_converted(
+                pcm,
+                analysis_frame_size,
+                out,
+                MAX_ENCODING_DEPTH,
+                downmix_int24,
+                int24tores,
+            )
         }
-        let n = frame_size as usize * ch;
-        let mut input = core::mem::take(&mut self.scratch.input);
-        if input.len() < n {
-            input.resize(n, 0.0);
-        }
-        for (d, &s) in input[..n].iter_mut().zip(&pcm[..n]) {
-            *d = int24tores(s);
-        }
-        let ret = self.opus_encode_native(
-            &input[..n],
-            frame_size,
-            out,
-            len_i32(out.len()),
-            MAX_ENCODING_DEPTH,
-            Some(pcm),
-            analysis_frame_size,
-            0,
-            -2,
-            self.channels,
-            downmix_int24,
-            1,
-        );
-        self.scratch.input = input;
-        code_to_result(ret)
     }
 
     /// Port of src/opus_encoder.c:opus_encode_float: encodes a frame of float PCM (nominal
@@ -1488,6 +1790,46 @@ impl Encoder {
         out: &mut [u8],
     ) -> Result<usize> {
         let analysis_frame_size = usize_to_i32(frame_size)?;
+        // The float build passes the input through; the fixed-point build converts it with
+        // FLOAT2RES.
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            self.encode_passthrough(
+                pcm,
+                pcm,
+                analysis_frame_size,
+                out,
+                MAX_ENCODING_DEPTH,
+                downmix_float,
+                1,
+            )
+        }
+        #[cfg(feature = "fixed-point")]
+        {
+            self.encode_converted(
+                pcm,
+                analysis_frame_size,
+                out,
+                MAX_ENCODING_DEPTH,
+                downmix_float,
+                float2res,
+            )
+        }
+    }
+
+    /// An `opus_encode*` entry point whose input already is `opus_res`: C passes it to
+    /// `opus_encode_native` unchanged (`pcm` and `res` are the same samples; `res` is the
+    /// `opus_res` view), without checking the frame size first.
+    fn encode_passthrough<T>(
+        &mut self,
+        pcm: &[T],
+        res: &[OpusRes],
+        analysis_frame_size: i32,
+        out: &mut [u8],
+        lsb_depth: i32,
+        downmix: DownmixFunc<T>,
+        float_api: i32,
+    ) -> Result<usize> {
         let frame_size = frame_size_select(
             self.application,
             analysis_frame_size,
@@ -1496,23 +1838,75 @@ impl Encoder {
         );
         let ch = self.channels as usize;
         if frame_size > 0 && pcm.len() < analysis_frame_size as usize * ch {
+            // Rust-only check (C reads out of bounds).
             return Err(Error::BadArg);
         }
         let n = frame_size.max(0) as usize * ch;
         let ret = self.opus_encode_native(
-            &pcm[..n],
+            &res[..n],
             frame_size,
             out,
             len_i32(out.len()),
-            MAX_ENCODING_DEPTH,
+            lsb_depth,
             Some(pcm),
             analysis_frame_size,
             0,
             -2,
             self.channels,
-            downmix_float,
+            downmix,
+            float_api,
+        );
+        code_to_result(ret)
+    }
+
+    /// An `opus_encode*` entry point that converts its input to `opus_res` (C: `ALLOC(in, ...)`
+    /// + `INT16TORES` / `INT24TORES` / `FLOAT2RES`) before `opus_encode_native` (`float_api` 1).
+    fn encode_converted<T: Copy>(
+        &mut self,
+        pcm: &[T],
+        analysis_frame_size: i32,
+        out: &mut [u8],
+        lsb_depth: i32,
+        downmix: DownmixFunc<T>,
+        conv: fn(T) -> OpusRes,
+    ) -> Result<usize> {
+        let frame_size = frame_size_select(
+            self.application,
+            analysis_frame_size,
+            self.variable_duration,
+            self.fs,
+        );
+        if frame_size <= 0 {
+            return Err(Error::BadArg);
+        }
+        let ch = self.channels as usize;
+        if pcm.len() < analysis_frame_size as usize * ch {
+            // Rust-only check (C reads out of bounds).
+            return Err(Error::BadArg);
+        }
+        let n = frame_size as usize * ch;
+        let mut input = core::mem::take(&mut self.scratch.input);
+        if input.len() < n {
+            input.resize(n, OpusRes::default());
+        }
+        for (d, &s) in input[..n].iter_mut().zip(&pcm[..n]) {
+            *d = conv(s);
+        }
+        let ret = self.opus_encode_native(
+            &input[..n],
+            frame_size,
+            out,
+            len_i32(out.len()),
+            lsb_depth,
+            Some(pcm),
+            analysis_frame_size,
+            0,
+            -2,
+            self.channels,
+            downmix,
             1,
         );
+        self.scratch.input = input;
         code_to_result(ret)
     }
 
@@ -1651,8 +2045,12 @@ impl Encoder {
         let mut analysis_info = AnalysisInfo::default();
         let mut analysis_read_pos_bak = -1;
         let mut analysis_read_subframe_bak = -1;
-        // FIXED_POINT: the analysis runs from complexity 10 in the fixed build (not ported).
-        if self.silk_mode.complexity >= 7
+        // The fixed-point build only runs the (float) analysis at complexity 10.
+        #[cfg(feature = "fixed-point")]
+        let analysis_complexity = 10;
+        #[cfg(not(feature = "fixed-point"))]
+        let analysis_complexity = 7;
+        if self.silk_mode.complexity >= analysis_complexity
             && self.fs >= 16000
             && self.fs <= 48000
             && self.application != OPUS_APPLICATION_RESTRICTED_SILK
@@ -1712,15 +2110,16 @@ impl Encoder {
         if (analysis_info.valid == 0 || analysis_info.activity_probability > DTX_ACTIVITY_THRESHOLD)
             && is_silence == 0
         {
-            self.peak_signal_energy = max32(
-                0.999f32 * self.peak_signal_energy,
-                compute_frame_energy(pcm, frame_size, ch),
-            );
+            #[cfg(feature = "fixed-point")]
+            let decayed = mult16_32_q15(qconst16(0.999f32 as f64, 15), self.peak_signal_energy);
+            #[cfg(not(feature = "fixed-point"))]
+            let decayed = 0.999f32 * self.peak_signal_energy;
+            self.peak_signal_energy = max32(decayed, compute_frame_energy(pcm, frame_size, ch));
         }
         let stereo_width: OpusVal16 = if ch == 2 && self.force_channels != 1 {
             compute_stereo_width(pcm, frame_size, self.fs, &mut self.width_mem)
         } else {
-            0.0
+            OpusVal16::default()
         };
         self.bitrate_bps = self.user_bitrate_to_bitrate(frame_size, max_data_bytes);
 
@@ -1884,9 +2283,22 @@ impl Encoder {
         } else if self.user_forced_mode == OPUS_AUTO {
             // FUZZING: random mode switching not ported.
             // Interpolate based on stereo width
+            #[cfg(feature = "fixed-point")]
+            let (mode_voice, mode_music) = {
+                let inv = i32::from(Q15ONE) - i32::from(stereo_width);
+                (
+                    mult16_32_q15(inv, MODE_THRESHOLDS[0][0])
+                        + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][0]),
+                    // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
+                    mult16_32_q15(inv, MODE_THRESHOLDS[1][1])
+                        + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][1]),
+                )
+            };
+            #[cfg(not(feature = "fixed-point"))]
             let mode_voice = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[0][0] as f32
                 + stereo_width * MODE_THRESHOLDS[1][0] as f32) as i32;
             // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
+            #[cfg(not(feature = "fixed-point"))]
             let mode_music = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[1][1] as f32
                 + stereo_width * MODE_THRESHOLDS[1][1] as f32) as i32;
             // Interpolate based on speech/music probability
@@ -2477,13 +2889,34 @@ impl Encoder {
             if activity == 0 {
                 // Mark as active if this noise frame is sufficiently loud
                 let noise_energy = compute_frame_energy(pcm, frame_size, ch);
-                activity = (self.peak_signal_energy < PSEUDO_SNR_THRESHOLD * noise_energy) as i32;
+                // C compares in float in both builds (PSEUDO_SNR_THRESHOLD is a float).
+                #[cfg(feature = "fixed-point")]
+                {
+                    activity = ((self.peak_signal_energy as f32)
+                        < PSEUDO_SNR_THRESHOLD * noise_energy as f32)
+                        as i32;
+                }
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    activity =
+                        (self.peak_signal_energy < PSEUDO_SNR_THRESHOLD * noise_energy) as i32;
+                }
             }
         } else if self.mode == MODE_CELT_ONLY {
             let noise_energy = compute_frame_energy(pcm, frame_size, ch);
             // Boosting peak energy a bit because we didn't just average the active frames.
-            activity =
-                (self.peak_signal_energy < PSEUDO_SNR_THRESHOLD * half32(noise_energy)) as i32;
+            // C: QCONST16(PSEUDO_SNR_THRESHOLD, 0) * (opus_val64)HALF32(noise_energy).
+            #[cfg(feature = "fixed-point")]
+            {
+                activity = (i64::from(self.peak_signal_energy)
+                    < i64::from(qconst16(f64::from(PSEUDO_SNR_THRESHOLD), 0))
+                        * i64::from(half32(noise_energy))) as i32;
+            }
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                activity =
+                    (self.peak_signal_energy < PSEUDO_SNR_THRESHOLD * half32(noise_energy)) as i32;
+            }
         }
 
         // For the first frame at a new SILK bandwidth
@@ -2580,6 +3013,7 @@ impl Encoder {
                 );
             }
         }
+        #[cfg(not(feature = "fixed-point"))]
         if float_api != 0 {
             let x = &pcm_buf[tb..tb + n];
             let sum = celt_inner_prod(x, x, n);
@@ -2590,7 +3024,8 @@ impl Encoder {
                 self.hp_mem = [0.0; 4];
             }
         }
-        // FIXED_POINT: `(void)float_api` branch not ported (float build).
+        #[cfg(feature = "fixed-point")]
+        let _ = float_api; // C: (void)float_api;
 
         // Compute the DRED features. Needs to be before SILK because of DTX.
         #[cfg(feature = "dred")]
@@ -2632,7 +3067,23 @@ impl Encoder {
                 if !self.has_energy_mask {
                     // Increasingly attenuate high band when it gets allocated fewer bits
                     let celt_rate = total_bit_rate - self.silk_mode.bit_rate;
-                    hb_gain = Q15ONE - celt_exp2((-celt_rate) as f32 * (1.0f32 / 1024.0));
+                    // C passes the int product to the `opus_val16` argument of celt_exp2 (Q10)
+                    // and stores the difference in the `opus_val16` HB_gain.
+                    #[cfg(feature = "fixed-point")]
+                    {
+                        hb_gain = (i32::from(Q15ONE)
+                            - shr32(
+                                celt_exp2(
+                                    (-celt_rate * i32::from(qconst16(1.0f32 as f64 / 1024.0, 10)))
+                                        as OpusVal16,
+                                ),
+                                1,
+                            )) as OpusVal16;
+                    }
+                    #[cfg(not(feature = "fixed-point"))]
+                    {
+                        hb_gain = Q15ONE - celt_exp2((-celt_rate) as f32 * (1.0f32 / 1024.0));
+                    }
                 }
             } else {
                 // SILK gets all bits
@@ -2640,6 +3091,46 @@ impl Encoder {
             }
 
             // Surround masking for SILK
+            #[cfg(feature = "fixed-point")]
+            if self.has_energy_mask && self.use_vbr != 0 && self.lfe == 0 {
+                let mut mask_sum: OpusVal32 = 0;
+                let mut end = 17;
+                let mut srate: i16 = 16000;
+                if self.bandwidth == OPUS_BANDWIDTH_NARROWBAND {
+                    end = 13;
+                    srate = 8000;
+                } else if self.bandwidth == OPUS_BANDWIDTH_MEDIUMBAND {
+                    end = 15;
+                    srate = 12000;
+                }
+                for c in 0..chu {
+                    for i in 0..end {
+                        let mut mask: CeltGlog = maxg(
+                            ming(self.energy_masking[21 * c + i], gconst(0.5)),
+                            -gconst(2.0),
+                        );
+                        if mask > 0 {
+                            mask = half32(mask);
+                        }
+                        mask_sum += mask;
+                    }
+                }
+                // Conservative rate reduction, we cut the masking in half
+                let mut masking_depth: CeltGlog = mask_sum / end as i32 * ch;
+                masking_depth += gconst(0.2);
+                let mut rate_offset =
+                    pshr32(mult16_16(srate, shr32(masking_depth, DB_SHIFT - 10)), 10);
+                rate_offset = max32(rate_offset, -2 * self.silk_mode.bit_rate / 3);
+                // Split the rate change between the SILK and CELT part for hybrid.
+                if self.bandwidth == OPUS_BANDWIDTH_SUPERWIDEBAND
+                    || self.bandwidth == OPUS_BANDWIDTH_FULLBAND
+                {
+                    self.silk_mode.bit_rate += 3 * rate_offset / 5;
+                } else {
+                    self.silk_mode.bit_rate += rate_offset;
+                }
+            }
+            #[cfg(not(feature = "fixed-point"))]
             if self.has_energy_mask && self.use_vbr != 0 && self.lfe == 0 {
                 let mut mask_sum: OpusVal32 = 0.0;
                 let mut end = 17;
@@ -2788,7 +3279,7 @@ impl Encoder {
                 let mode = celt.mode();
                 gain_fade(
                     &mut self.delay_buffer[prefill_offset..],
-                    0.0,
+                    OpusVal16::default(),
                     Q15ONE,
                     mode.overlap,
                     fs / 400,
@@ -2796,7 +3287,7 @@ impl Encoder {
                     &mode.window,
                     fs,
                 );
-                self.delay_buffer[..prefill_offset].fill(0.0);
+                self.delay_buffer[..prefill_offset].fill(OpusRes::default());
                 let silk = silk_of(&mut self.silk_enc)?;
                 // C passes a NULL range coder (never touched for a prefill) and ignores the
                 // return value.
@@ -2959,11 +3450,23 @@ impl Encoder {
             if self.hybrid_stereo_width_q14 < (1 << 14)
                 || self.silk_mode.stereo_width_q14 < (1 << 14)
             {
-                let mut g1: OpusVal16 = self.hybrid_stereo_width_q14 as f32;
-                let mut g2: OpusVal16 = self.silk_mode.stereo_width_q14 as f32;
-                // FIXED_POINT: Q15 conversion of g1/g2 not ported (float build).
-                g1 *= 1.0f32 / 16384.0;
-                g2 *= 1.0f32 / 16384.0;
+                #[cfg(feature = "fixed-point")]
+                let (g1, g2) = {
+                    let g1: OpusVal16 = self.hybrid_stereo_width_q14;
+                    let g2 = self.silk_mode.stereo_width_q14 as OpusVal16;
+                    (
+                        if g1 == 16384 { Q15ONE } else { shl16(g1, 1) },
+                        if g2 == 16384 { Q15ONE } else { shl16(g2, 1) },
+                    )
+                };
+                #[cfg(not(feature = "fixed-point"))]
+                let (g1, g2) = {
+                    let mut g1: OpusVal16 = self.hybrid_stereo_width_q14 as f32;
+                    let mut g2: OpusVal16 = self.silk_mode.stereo_width_q14 as f32;
+                    g1 *= 1.0f32 / 16384.0;
+                    g2 *= 1.0f32 / 16384.0;
+                    (g1, g2)
+                };
                 if let Some(celt) = self.celt_enc.as_deref() {
                     let mode = celt.mode();
                     stereo_fade(
@@ -3861,7 +4364,7 @@ impl Encoder {
             Some(m) => {
                 let n = m.len().min(self.energy_masking.len());
                 self.energy_masking[..n].copy_from_slice(&m[..n]);
-                self.energy_masking[n..].fill(0.0);
+                self.energy_masking[n..].fill(CeltGlog::default());
                 self.has_energy_mask = true;
             }
         }
@@ -3884,8 +4387,8 @@ impl Encoder {
         self.stream_channels = 0;
         self.hybrid_stereo_width_q14 = 0;
         self.variable_hp_smth2_q15 = 0;
-        self.prev_hb_gain = 0.0;
-        self.hp_mem = [0.0; 4];
+        self.prev_hb_gain = OpusVal16::default();
+        self.hp_mem = [OpusVal32::default(); 4];
         self.mode = 0;
         self.prev_mode = 0;
         self.prev_channels = 0;
@@ -3895,11 +4398,11 @@ impl Encoder {
         self.silk_bw_switch = 0;
         self.first = 0;
         self.has_energy_mask = false;
-        self.energy_masking = [0.0; 42];
+        self.energy_masking = [CeltGlog::default(); 42];
         self.width_mem = StereoWidthState::default();
         self.detected_bandwidth = 0;
         self.nb_no_activity_ms_q1 = 0;
-        self.peak_signal_energy = 0.0;
+        self.peak_signal_energy = OpusVal32::default();
         #[cfg(feature = "dred")]
         {
             self.dred_duration = 0;
@@ -3911,7 +4414,7 @@ impl Encoder {
         }
         self.nonfinal_frame = 0;
         self.range_final = 0;
-        self.delay_buffer.fill(0.0);
+        self.delay_buffer.fill(OpusRes::default());
 
         if let Some(celt) = self.celt_enc.as_deref_mut() {
             celt.reset();
@@ -3934,12 +4437,12 @@ impl Encoder {
     }
 
     /// Flat dump of the encoder state in the order of the oracle shim's `oracle_oe_dump`
-    /// (floats as bit patterns), plus the delay buffer (`encoder_buffer*channels` samples).
-    /// For differential tests only.
+    /// (floats as bit patterns, fixed-point values sign-extended to 32 bits), plus the delay
+    /// buffer (`encoder_buffer*channels` samples). For differential tests only.
     #[cfg(feature = "internals")]
     #[doc(hidden)]
     #[must_use]
-    pub fn debug_state_dump(&self) -> (Vec<u32>, Vec<f32>) {
+    pub fn debug_state_dump(&self) -> (Vec<u32>, Vec<OpusRes>) {
         let s = &self.silk_mode;
         let v = vec![
             self.application as u32,
@@ -3965,11 +4468,11 @@ impl Encoder {
             self.stream_channels as u32,
             self.hybrid_stereo_width_q14 as i32 as u32,
             self.variable_hp_smth2_q15 as u32,
-            self.prev_hb_gain.to_bits(),
-            self.hp_mem[0].to_bits(),
-            self.hp_mem[1].to_bits(),
-            self.hp_mem[2].to_bits(),
-            self.hp_mem[3].to_bits(),
+            dump_bits(self.prev_hb_gain),
+            dump_bits(self.hp_mem[0]),
+            dump_bits(self.hp_mem[1]),
+            dump_bits(self.hp_mem[2]),
+            dump_bits(self.hp_mem[3]),
             self.mode as u32,
             self.prev_mode as u32,
             self.prev_channels as u32,
@@ -3978,14 +4481,14 @@ impl Encoder {
             self.auto_bandwidth as u32,
             self.silk_bw_switch as u32,
             self.first as u32,
-            self.width_mem.xx.to_bits(),
-            self.width_mem.xy.to_bits(),
-            self.width_mem.yy.to_bits(),
-            self.width_mem.smoothed_width.to_bits(),
-            self.width_mem.max_follower.to_bits(),
+            dump_bits(self.width_mem.xx),
+            dump_bits(self.width_mem.xy),
+            dump_bits(self.width_mem.yy),
+            dump_bits(self.width_mem.smoothed_width),
+            dump_bits(self.width_mem.max_follower),
             self.detected_bandwidth as u32,
             self.nb_no_activity_ms_q1 as u32,
-            self.peak_signal_energy.to_bits(),
+            dump_bits(self.peak_signal_energy),
             self.nonfinal_frame as u32,
             self.range_final,
             s.bit_rate as u32,

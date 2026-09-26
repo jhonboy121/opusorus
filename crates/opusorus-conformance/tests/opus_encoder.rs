@@ -18,10 +18,12 @@
 //!
 //! `OPUSORUS_OE_DUP=1` runs every single-stream test against the dumpable C copy, which
 //! reports the first diverging state field (debugging aid).
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Shared by the float and the fixed-point builds (`fixed-point`, `fixed-res24`, with or
+//! without `qext` / `custom-modes`), each against the oracle built the same way: the helper
+//! inputs are generated as float values and converted to the build's types (`opus_res` with
+//! `FLOAT2RES`, Q15 gains, Q24 `celt_glog`), the encoders take the same i16 / i24 / float PCM,
+//! and every comparison is bit-exact.
 #![allow(
     clippy::too_many_arguments,
     clippy::needless_range_loop,
@@ -35,13 +37,14 @@
     reason = "test code: failures should panic"
 )]
 
+use opusorus::celt::arch::{CeltCoef, float2res};
 use opusorus::encoder::request::*;
 use opusorus::encoder::{self as oe, Encoder};
 use opusorus::ms_encoder::{self as me, MsEncoder};
 use opusorus::projection_encoder::ProjectionEncoder;
 use opusorus::{Application, Bandwidth, Bitrate, Error, FrameSize, Signal};
-use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq, signals};
-use opusorus_oracle::opus_encoder as oc;
+use opusorus_conformance::{Rng, assert_slice_eq, signals};
+use opusorus_oracle::opus_encoder::{self as oc, Glog, Res, Val16, Val32};
 
 const APP_VOIP: i32 = 2048;
 const APP_AUDIO: i32 = 2049;
@@ -58,6 +61,80 @@ const MODE_CELT: i32 = 1002;
 
 fn code<T>(r: Result<T, Error>) -> Result<T, i32> {
     r.map_err(Error::code)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Build-generic values
+// ---------------------------------------------------------------------------------------------
+
+/// Bit pattern of a value, for bit-exact comparisons of float and integer data alike.
+trait Bits: Copy + core::fmt::Debug {
+    fn bits(self) -> u64;
+}
+impl Bits for f32 {
+    fn bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+impl Bits for i32 {
+    fn bits(self) -> u64 {
+        u64::from(self as u32)
+    }
+}
+impl Bits for i16 {
+    fn bits(self) -> u64 {
+        u64::from(self as u16)
+    }
+}
+
+/// Asserts that two slices are bit-identical.
+#[track_caller]
+fn assert_v<T: Bits>(what: &str, rust: &[T], c: &[T]) {
+    assert_eq!(rust.len(), c.len(), "{what}: length mismatch");
+    if let Some(i) = rust.iter().zip(c).position(|(a, b)| a.bits() != b.bits()) {
+        panic!(
+            "{what}: first mismatch at {i}: rust={:?} c={:?}",
+            rust[i], c[i]
+        );
+    }
+}
+
+/// `opus_res` samples (`FLOAT2RES`) from float values.
+fn res(x: &[f32]) -> Vec<Res> {
+    x.iter().map(|&v| float2res(v)).collect()
+}
+
+/// An `opus_val16` Q15 gain in `[0, 1]` (the value itself in the float build).
+#[cfg(not(feature = "fixed-point"))]
+fn q15(x: f32) -> Val16 {
+    x
+}
+/// An `opus_val16` Q15 gain in `[0, 1]` (the value itself in the float build).
+#[cfg(feature = "fixed-point")]
+fn q15(x: f32) -> Val16 {
+    (f64::from(x) * 32768.0).round().min(32767.0) as Val16
+}
+
+/// A `celt_glog` in log2 units (Q24 in the fixed-point build).
+#[cfg(not(feature = "fixed-point"))]
+fn glog(x: f32) -> Glog {
+    x
+}
+/// A `celt_glog` in log2 units (Q24 in the fixed-point build).
+#[cfg(feature = "fixed-point")]
+fn glog(x: f32) -> Glog {
+    (f64::from(x) * 16_777_216.0).round() as Glog
+}
+
+/// Widens an `opus_val16` to `opus_val32` (C implicit conversion).
+#[cfg(not(feature = "fixed-point"))]
+fn wide(x: Val16) -> Val32 {
+    x
+}
+/// Widens an `opus_val16` to `opus_val32` (C implicit conversion).
+#[cfg(feature = "fixed-point")]
+fn wide(x: Val16) -> Val32 {
+    Val32::from(x)
 }
 
 /// All GET requests of `opus_encoder_ctl` taking an `opus_int32*` (plus some it rejects).
@@ -119,52 +196,55 @@ fn filters_and_fades() {
         let len = fs / 400 * [1, 2, 4, 8, 24][rng.range_i32(0, 4) as usize];
         let n = (len * ch) as usize;
         let amp = [1e-4f32, 0.3, 1.0, 3.0][rng.range_i32(0, 3) as usize];
-        let input: Vec<f32> = (0..n).map(|_| amp * rng.f32_sym()).collect();
+        let input: Vec<Res> = res(&(0..n).map(|_| amp * rng.f32_sym()).collect::<Vec<_>>());
 
-        // hp_cutoff / dc_reject over several frames with state.
-        let mut mem_r = [0f32; 4];
-        let mut mem_c = [0f32; 4];
+        // hp_cutoff / dc_reject over several frames with state (each filter has its own state:
+        // the encoder uses one or the other depending on the application).
+        let mut mem_r = [Val32::default(); 4];
+        let mut mem_c = [Val32::default(); 4];
+        let mut dc_r = [Val32::default(); 4];
+        let mut dc_c = [Val32::default(); 4];
         for _ in 0..3 {
             let cutoff = rng.range_i32(20, 200);
-            let mut out_r = vec![0f32; n];
-            let mut out_c = vec![0f32; n];
+            let mut out_r = vec![Res::default(); n];
+            let mut out_c = vec![Res::default(); n];
             oe::hp_cutoff(&input, cutoff, &mut out_r, &mut mem_r, len, ch, fs);
             oc::hp_cutoff(&input, cutoff, &mut out_c, &mut mem_c, len, ch, fs);
-            assert_bits_eq_f32("hp_cutoff", &out_r, &out_c);
-            assert_bits_eq_f32("hp_cutoff mem", &mem_r, &mem_c);
-            oe::dc_reject(&input, 3, &mut out_r, &mut mem_r, len, ch, fs);
-            oc::dc_reject(&input, 3, &mut out_c, &mut mem_c, len, ch, fs);
-            assert_bits_eq_f32("dc_reject", &out_r, &out_c);
-            assert_bits_eq_f32("dc_reject mem", &mem_r, &mem_c);
+            assert_v("hp_cutoff", &out_r, &out_c);
+            assert_v("hp_cutoff mem", &mem_r, &mem_c);
+            oe::dc_reject(&input, 3, &mut out_r, &mut dc_r, len, ch, fs);
+            oc::dc_reject(&input, 3, &mut out_c, &mut dc_c, len, ch, fs);
+            assert_v("dc_reject", &out_r, &out_c);
+            assert_v("dc_reject mem", &dc_r, &dc_c);
         }
 
         // gain_fade / stereo_fade in place (48 kHz mode window).
-        let window: Vec<f32> = window48();
-        let g1 = rng.f32_sym().abs();
-        let g2 = rng.f32_sym().abs();
+        let window = window48();
+        let g1 = q15(rng.f32_sym().abs());
+        let g2 = q15(rng.f32_sym().abs());
         let mut br = input.clone();
         let mut bc = input.clone();
         oe::gain_fade(&mut br, g1, g2, 120, len, ch, &window, fs);
         oc::gain_fade(&mut bc, g1, g2, false, len, ch, fs);
-        assert_bits_eq_f32("gain_fade", &br, &bc);
+        assert_v("gain_fade", &br, &bc);
         if ch == 2 {
             let mut br = input.clone();
             let mut bc = input.clone();
             oe::stereo_fade(&mut br, g1, g2, 120, len, ch, &window, fs);
             oc::stereo_fade(&mut bc, g1, g2, false, len, ch, fs);
-            assert_bits_eq_f32("stereo_fade", &br, &bc);
+            assert_v("stereo_fade", &br, &bc);
         }
 
         // compute_frame_energy
         assert_eq!(
-            oe::compute_frame_energy(&input, len, ch).to_bits(),
-            oc::compute_frame_energy(&input, len, ch).to_bits()
+            oe::compute_frame_energy(&input, len, ch).bits(),
+            oc::compute_frame_energy(&input, len, ch).bits()
         );
     }
 }
 
 /// The 48 kHz CELT mode window (via a fresh encoder's CELT mode).
-fn window48() -> Vec<f32> {
+fn window48() -> Vec<CeltCoef> {
     let m = opusorus::celt::modes::opus_custom_mode_create(48000, 960).unwrap();
     m.window.to_vec()
 }
@@ -177,18 +257,18 @@ fn fades_96k() {
     let window = m.window.to_vec();
     for _ in 0..50 {
         let len: i32 = 1920;
-        let input: Vec<f32> = (0..2 * len).map(|_| rng.f32_sym()).collect();
-        let (g1, g2) = (rng.f32_sym().abs(), rng.f32_sym().abs());
+        let input: Vec<Res> = res(&(0..2 * len).map(|_| rng.f32_sym()).collect::<Vec<_>>());
+        let (g1, g2) = (q15(rng.f32_sym().abs()), q15(rng.f32_sym().abs()));
         let mut br = input.clone();
         let mut bc = input.clone();
         oe::gain_fade(&mut br, g1, g2, m.overlap, len, 2, &window, 96000);
         oc::gain_fade(&mut bc, g1, g2, true, len, 2, 96000);
-        assert_bits_eq_f32("gain_fade 96k", &br, &bc);
+        assert_v("gain_fade 96k", &br, &bc);
         let mut br = input.clone();
         let mut bc = input.clone();
         oe::stereo_fade(&mut br, g1, g2, m.overlap, len, 2, &window, 96000);
         oc::stereo_fade(&mut bc, g1, g2, true, len, 2, 96000);
-        assert_bits_eq_f32("stereo_fade 96k", &br, &bc);
+        assert_v("stereo_fade 96k", &br, &bc);
     }
 }
 
@@ -224,7 +304,7 @@ fn stereo_width_streams() {
             let frame = fs * ms / 10000;
             let sig = signals::music_like(frame as usize * 40, 2, fs as u32, 7 + k as u64);
             let mut mem_r = oe::StereoWidthState::default();
-            let mut mem_c = [0f32; 5];
+            let mut mem_c = [Val32::default(); 5];
             for f in 0..40 {
                 let mut x = sig[f * 2 * frame as usize..(f + 1) * 2 * frame as usize].to_vec();
                 // Vary the width: identical, inverted, scaled, huge.
@@ -237,17 +317,18 @@ fn stereo_width_streams() {
                         _ => {}
                     }
                 }
+                let x = res(&x);
                 let r = oe::compute_stereo_width(&x, frame, fs, &mut mem_r);
                 let c = oc::compute_stereo_width(&x, frame, fs, &mut mem_c);
-                assert_eq!(r.to_bits(), c.to_bits(), "fs {fs} ms {ms} frame {f}");
+                assert_eq!(r.bits(), c.bits(), "fs {fs} ms {ms} frame {f}");
                 let m = [
                     mem_r.xx,
                     mem_r.xy,
                     mem_r.yy,
-                    mem_r.smoothed_width,
-                    mem_r.max_follower,
+                    wide(mem_r.smoothed_width),
+                    wide(mem_r.max_follower),
                 ];
-                assert_bits_eq_f32("width mem", &m, &mem_c);
+                assert_v("width mem", &m, &mem_c);
             }
         }
     }
@@ -318,14 +399,15 @@ fn decision_helpers() {
 fn surround_helpers() {
     let mut rng = Rng::new(0x0E03);
     for _ in 0..20000 {
-        let a = rng.f32_sym() * 40.0;
-        let b = rng.f32_sym() * 40.0;
+        let a = glog(rng.f32_sym() * 40.0);
+        let b = glog(rng.f32_sym() * 40.0);
         assert_eq!(
-            me::log_sum(a, b).to_bits(),
-            oc::log_sum(a, b).to_bits(),
-            "{a} {b}"
+            me::log_sum(a, b).bits(),
+            oc::log_sum(a, b).bits(),
+            "{a:?} {b:?}"
         );
     }
+    #[cfg(not(feature = "fixed-point"))]
     assert_eq!(
         me::log_sum(f32::NAN, 1.0).to_bits(),
         oc::log_sum(f32::NAN, 1.0).to_bits()
@@ -471,7 +553,7 @@ impl CEnc {
             (Self::Dup(e), Input::F32) => e.encode_float(x, n, out),
         }
     }
-    fn dump(&self) -> Option<(Vec<u32>, Vec<f32>)> {
+    fn dump(&self) -> Option<(Vec<u32>, Vec<Res>)> {
         match self {
             Self::Lib(_) => None,
             Self::Dup(e) => Some(e.dump()),
@@ -556,7 +638,7 @@ fn compare_dump(r: &Encoder, c: &CEnc, ctx: &str) {
             DUMP_NAMES[i], rv[i], cv[i]
         );
     }
-    assert_bits_eq_f32(&format!("{ctx}: delay_buffer"), &rd, &cd);
+    assert_v(&format!("{ctx}: delay_buffer"), &rd, &cd);
 }
 
 fn rust_encode(
@@ -573,8 +655,17 @@ fn rust_encode(
     })
 }
 
-/// A random CTL (mostly valid values, some invalid).
-fn random_ctl(rng: &mut Rng, fs: i32) -> (i32, i32) {
+/// Whether `OPUS_SET_LFE(1)` may be used on an encoder with `ch` channels. In the fixed-point
+/// build, CELT's LFE band-energy clamp on a *stereo* stream (a configuration the multistream
+/// encoder never creates) makes the normalized bands overflow 32 bits in `stereo_itheta`:
+/// undefined behaviour in C (it wraps in practice, and the port matches it bit for bit when
+/// built without overflow checks), a panic in debug builds of the port.
+const fn lfe_allowed(ch: i32) -> bool {
+    !cfg!(feature = "fixed-point") || ch == 1
+}
+
+/// A random CTL (mostly valid values, some invalid) for an encoder with `ch` channels.
+fn random_ctl(rng: &mut Rng, fs: i32, ch: i32) -> (i32, i32) {
     let pick = |rng: &mut Rng, v: &[i32]| v[rng.range_i32(0, v.len() as i32 - 1) as usize];
     match rng.range_i32(0, 24) {
         0..=3 => (
@@ -636,7 +727,10 @@ fn random_ctl(rng: &mut Rng, fs: i32) -> (i32, i32) {
         ),
         20 => (OPUS_SET_VOICE_RATIO_REQUEST, rng.range_i32(-2, 101)),
         21 => (OPUS_RESET_STATE, 0),
-        22 => (OPUS_SET_LFE_REQUEST, pick(rng, &[0, 0, 0, 1])),
+        22 => (
+            OPUS_SET_LFE_REQUEST,
+            pick(rng, &[0, 0, 0, 1]) * i32::from(lfe_allowed(ch)),
+        ),
         23 => (
             OPUS_SET_QEXT_REQUEST,
             if fs >= 48000 {
@@ -699,7 +793,7 @@ fn run_stream(s: &Stream, dup: bool) {
     for f in 0..s.frames {
         let ctx = format!("{ctx0} frame {f}");
         if s.ctl_rate > 0 && rng.range_i32(0, s.ctl_rate - 1) == 0 {
-            let (req, val) = random_ctl(&mut rng, s.fs);
+            let (req, val) = random_ctl(&mut rng, s.fs, s.ch);
             assert_eq!(
                 code(r.ctl_set(req, val)),
                 c.ctl_set(req, val),
@@ -954,7 +1048,10 @@ fn streams_features() {
     for (k, feat) in features.iter().enumerate() {
         for variant in 0..4 {
             let fs = [16000, 48000, 24000, 8000][variant];
-            let ch = 1 + ((k + variant) % 2) as i32;
+            let mut ch = 1 + ((k + variant) % 2) as i32;
+            if feat[0].0 == OPUS_SET_LFE_REQUEST && !lfe_allowed(ch) {
+                ch = 1;
+            }
             let app = [APP_VOIP, APP_AUDIO, APP_AUDIO, APP_VOIP][variant];
             let is_expert = feat[0].0 == OPUS_SET_EXPERT_FRAME_DURATION_REQUEST;
             let fsz = if is_expert {
@@ -1121,7 +1218,9 @@ fn energy_mask_streams() {
                 r.set_energy_mask(None);
                 c.set_energy_mask(None).unwrap();
             } else {
-                let mask: Vec<f32> = (0..21 * ch as usize).map(|_| 3.0 * rng.f32_sym()).collect();
+                let mask: Vec<Glog> = (0..21 * ch as usize)
+                    .map(|_| glog(3.0 * rng.f32_sym()))
+                    .collect();
                 r.set_energy_mask(Some(&mask));
                 c.set_energy_mask(Some(&mask)).unwrap();
             }
@@ -1920,9 +2019,9 @@ fn ms_surround_analysis_direct() {
             for ms10 in [25, 50, 100, 200, 400, 600, 1200] {
                 let len = fs as usize * ms10 / 10000;
                 let sig = program(len * 4, ch, fs, rng.next_u64());
-                let mut mem_c = vec![0f32; ch * 120];
-                let mut pre_c = vec![0f32; ch];
-                let mut ble_c = vec![0f32; 21 * ch];
+                let mut mem_c = vec![Val32::default(); ch * 120];
+                let mut pre_c = vec![Val32::default(); ch];
+                let mut ble_c = vec![Glog::default(); 21 * ch];
                 let mut mem_r = mem_c.clone();
                 let mut pre_r = pre_c.clone();
                 let mut ble_r = ble_c.clone();
@@ -1935,9 +2034,9 @@ fn ms_surround_analysis_direct() {
                         x, &mut ble_r, &mut mem_r, &mut pre_r, len as i32, ch as i32, fs,
                     )
                     .unwrap();
-                    assert_bits_eq_f32("bandLogE", &ble_r, &ble_c);
-                    assert_bits_eq_f32("mem", &mem_r, &mem_c);
-                    assert_bits_eq_f32("preemph", &pre_r, &pre_c);
+                    assert_v("bandLogE", &ble_r, &ble_c);
+                    assert_v("mem", &mem_r, &mem_c);
+                    assert_v("preemph", &pre_r, &pre_c);
                 }
             }
         }

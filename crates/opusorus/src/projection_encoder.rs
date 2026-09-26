@@ -20,7 +20,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::analysis::{downmix_float, downmix_int};
-use crate::celt::arch::{MAX_ENCODING_DEPTH, OpusRes, OpusVal32};
+use crate::celt::arch::{MAX_ENCODING_DEPTH, OpusRes, OpusVal32, int16tosig};
 use crate::celt::mathops::isqrt32;
 use crate::encoder::code_to_result;
 use crate::encoder::request::{
@@ -131,7 +131,7 @@ fn opus_projection_copy_channel_in_int24(
 /// C quirk kept for bit-exactness: `opus_projection_encode24` passes `downmix_int` (not
 /// `downmix_int24`) to the tonality analysis, which then reads the 32-bit sample buffer as if
 /// it held 16-bit samples. This reproduces that memory reinterpretation (native byte order):
-/// 16-bit element `k` is half `k % 2` of 32-bit sample `k / 2`.
+/// 16-bit element `k` is half `k % 2` of 32-bit sample `k / 2`, converted with `INT16TOSIG`.
 fn downmix_int_on_int24(
     x: &[i32],
     y: &mut [OpusVal32],
@@ -145,7 +145,7 @@ fn downmix_int_on_int24(
         let k = k as usize;
         let b = x[k / 2].to_ne_bytes();
         let h = k % 2 * 2;
-        i16::from_ne_bytes([b[h], b[h + 1]]) as OpusVal32
+        int16tosig(i16::from_ne_bytes([b[h], b[h + 1]]))
     };
     let n = subframe as usize;
     let y = &mut y[..n];

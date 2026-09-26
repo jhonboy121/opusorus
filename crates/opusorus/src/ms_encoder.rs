@@ -35,10 +35,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::analysis::{DownmixFunc, downmix_float, downmix_int, downmix_int24};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::celt_isnan;
 use crate::celt::arch::{
-    CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, celt_isnan, half16, imax, imin,
-    int16tores, int24tores, max32, maxg, min32,
+    CeltGlog, MAX_ENCODING_DEPTH, OpusRes, OpusVal16, OpusVal32, extend32, float2res, half16, imax,
+    imin, int16tores, int24tores, max32, maxg, min32,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{DB_SHIFT, gconst, mult16_32_q15, qconst32, shl32, shr32, vshr32};
 use crate::celt::bands::compute_band_energies;
 use crate::celt::celt::{bitrate_to_bits, bits_to_bitrate, resampling_factor};
 use crate::celt::celt_encoder::celt_preemphasis;
@@ -46,6 +50,7 @@ use crate::celt::mathops::{celt_log2, isqrt32};
 use crate::celt::mdct::clt_mdct_forward;
 #[cfg(feature = "qext")]
 use crate::celt::modes::QEXT_PACKET_SIZE_CAP;
+#[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::celt_inner_prod;
 use crate::celt::quant_bands::amp2_log2;
 use crate::celt::static_modes::CeltMode;
@@ -320,8 +325,49 @@ pub const fn channel_pos(channels: i32, pos: &mut [i32; 8]) {
     }
 }
 
+/// Port of src/opus_multistream_encoder.c:logSum (fixed-point build): a rough approximation of
+/// `log2(2^a + 2^b)` (Q24 inputs).
+///
+/// C quirk kept for bit-exactness: the function returns an `opus_val16`, so the Q24 result is
+/// truncated to its low 16 bits.
+#[cfg(feature = "fixed-point")]
+#[must_use]
+#[doc(hidden)]
+pub fn log_sum(a: CeltGlog, b: CeltGlog) -> OpusVal16 {
+    static DIFF_TABLE: [CeltGlog; 17] = [
+        gconst(0.5000000f32 as f64),
+        gconst(0.2924813f32 as f64),
+        gconst(0.1609640f32 as f64),
+        gconst(0.0849625f32 as f64),
+        gconst(0.0437314f32 as f64),
+        gconst(0.0221971f32 as f64),
+        gconst(0.0111839f32 as f64),
+        gconst(0.0056136f32 as f64),
+        gconst(0.0028123f32 as f64),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ];
+    let (max, diff) = if a > b { (a, a - b) } else { (b, b - a) };
+    if !(diff < gconst(8.0)) {
+        // inverted to catch NaNs
+        return max as OpusVal16;
+    }
+    let low = shr32(diff, DB_SHIFT - 1);
+    let frac: CeltGlog = vshr32(diff - shl32(low, DB_SHIFT - 1), DB_SHIFT - 16);
+    let low = low as usize;
+    (max + DIFF_TABLE[low] + mult16_32_q15(frac, DIFF_TABLE[low + 1] - DIFF_TABLE[low]))
+        as OpusVal16
+}
+
 /// Port of src/opus_multistream_encoder.c:logSum (float build): a rough approximation of
 /// `log2(2^a + 2^b)`.
+#[cfg(not(feature = "fixed-point"))]
 #[must_use]
 #[doc(hidden)]
 pub fn log_sum(a: CeltGlog, b: CeltGlog) -> OpusVal16 {
@@ -334,7 +380,6 @@ pub fn log_sum(a: CeltGlog, b: CeltGlog) -> OpusVal16 {
         // inverted to catch NaNs
         return max;
     }
-    // FIXED_POINT: fixed-point low/frac split not ported (float build).
     let low = crate::math::floor((2.0f32 * diff) as f64) as i32;
     let frac: CeltGlog = 2.0f32 * diff - low as f32;
     let low = low as usize;
@@ -364,7 +409,7 @@ fn surround_analysis(
     scratch: &mut SurroundScratch,
 ) {
     let mut pos = [0i32; 8];
-    let mut mask_log_e = [[0.0 as CeltGlog; 21]; 3];
+    let mut mask_log_e = [[CeltGlog::default(); 21]; 3];
 
     let upsample = resampling_factor(rate);
     let frame_size = len * upsample;
@@ -383,13 +428,13 @@ fn surround_analysis(
     let ov = overlap as usize;
     let fq = freq_size as usize;
     if scratch.input.len() < fsz + ov {
-        scratch.input.resize(fsz + ov, 0.0);
+        scratch.input.resize(fsz + ov, OpusVal32::default());
     }
     if scratch.x.len() < len as usize {
-        scratch.x.resize(len as usize, 0.0);
+        scratch.x.resize(len as usize, OpusRes::default());
     }
     if scratch.freq.len() < fq {
-        scratch.freq.resize(fq, 0.0);
+        scratch.freq.resize(fq, OpusVal32::default());
     }
     let input = &mut scratch.input[..fsz + ov];
     let x = &mut scratch.x[..len as usize];
@@ -398,7 +443,7 @@ fn surround_analysis(
     channel_pos(channels, &mut pos);
 
     for m in &mut mask_log_e {
-        m.fill(-28.0);
+        m.fill(-glog(28.0));
     }
 
     for c in 0..channels as usize {
@@ -416,17 +461,19 @@ fn surround_analysis(
             &mut preemph_mem[c],
             false,
         );
-        let sum = celt_inner_prod(input, input, fsz + ov);
-        // This should filter out both NaNs and ridiculous signals that could cause NaNs
-        // further down.
-        if !(sum < 1e18f32) || celt_isnan(sum) {
-            input.fill(0.0);
-            preemph_mem[c] = 0.0;
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            let sum = celt_inner_prod(input, input, fsz + ov);
+            // This should filter out both NaNs and ridiculous signals that could cause NaNs
+            // further down.
+            if !(sum < 1e18f32) || celt_isnan(sum) {
+                input.fill(0.0);
+                preemph_mem[c] = 0.0;
+            }
         }
-        // FIXED_POINT: the fixed build skips this check (not ported).
-        let mut band_e = [0.0 as OpusVal32; 21];
+        let mut band_e = [OpusVal32::default(); 21];
         for frame in 0..nb_frames as usize {
-            let mut tmp_e = [0.0 as OpusVal32; 21];
+            let mut tmp_e = [OpusVal32::default(); 21];
             clt_mdct_forward(
                 &celt_mode.mdct,
                 &input[fq * frame..],
@@ -439,9 +486,16 @@ fn surround_analysis(
             if upsample != 1 {
                 let bound = (freq_size / upsample) as usize;
                 for f in &mut freq[..bound] {
-                    *f *= upsample as f32;
+                    #[cfg(feature = "fixed-point")]
+                    {
+                        *f *= upsample;
+                    }
+                    #[cfg(not(feature = "fixed-point"))]
+                    {
+                        *f *= upsample as f32;
+                    }
                 }
-                freq[bound..].fill(0.0);
+                freq[bound..].fill(OpusVal32::default());
             }
 
             compute_band_energies(celt_mode, freq, &mut tmp_e, 21, 1, lm);
@@ -454,23 +508,23 @@ fn surround_analysis(
         amp2_log2(celt_mode, 21, 21, &band_e, ble, 1);
         // Apply spreading function with -6 dB/band going up and -12 dB/band going down.
         for i in 1..21 {
-            ble[i] = maxg(ble[i], ble[i - 1] - 1.0f32);
+            ble[i] = maxg(ble[i], ble[i - 1] - glog(1.0));
         }
         for i in (0..=19).rev() {
-            ble[i] = maxg(ble[i], ble[i + 1] - 2.0f32);
+            ble[i] = maxg(ble[i], ble[i + 1] - glog(2.0));
         }
         if pos[c] == 1 {
             for i in 0..21 {
-                mask_log_e[0][i] = log_sum(mask_log_e[0][i], ble[i]);
+                mask_log_e[0][i] = extend32(log_sum(mask_log_e[0][i], ble[i]));
             }
         } else if pos[c] == 3 {
             for i in 0..21 {
-                mask_log_e[2][i] = log_sum(mask_log_e[2][i], ble[i]);
+                mask_log_e[2][i] = extend32(log_sum(mask_log_e[2][i], ble[i]));
             }
         } else if pos[c] == 2 {
             for i in 0..21 {
-                mask_log_e[0][i] = log_sum(mask_log_e[0][i], ble[i] - 0.5f32);
-                mask_log_e[2][i] = log_sum(mask_log_e[2][i], ble[i] - 0.5f32);
+                mask_log_e[0][i] = extend32(log_sum(mask_log_e[0][i], ble[i] - glog(0.5)));
+                mask_log_e[2][i] = extend32(log_sum(mask_log_e[2][i], ble[i] - glog(0.5)));
             }
         }
         mem[c * ov..(c + 1) * ov].copy_from_slice(&input[fsz..fsz + ov]);
@@ -478,10 +532,14 @@ fn surround_analysis(
     for i in 0..21 {
         mask_log_e[1][i] = min32(mask_log_e[0][i], mask_log_e[2][i]);
     }
+    // C quirk (fixed-point build): the Q10 log is added to the Q24 masks unscaled.
+    #[cfg(feature = "fixed-point")]
+    let channel_offset = half16(celt_log2(qconst32(2.0, 14) / (channels - 1))) as OpusVal16;
+    #[cfg(not(feature = "fixed-point"))]
     let channel_offset: OpusVal16 = half16(celt_log2(2.0f32 / (channels - 1) as f32));
     for m in &mut mask_log_e {
         for v in m.iter_mut() {
-            *v += channel_offset;
+            *v += extend32(channel_offset);
         }
     }
     for c in 0..channels as usize {
@@ -492,9 +550,21 @@ fn surround_analysis(
                 ble[i] -= mask[i];
             }
         } else {
-            ble.fill(0.0);
+            ble.fill(CeltGlog::default());
         }
     }
+}
+
+/// `GCONST(x)`: a `celt_glog` constant (log2 units; Q24 in the fixed-point build).
+#[cfg(feature = "fixed-point")]
+const fn glog(x: f32) -> CeltGlog {
+    gconst(x as f64)
+}
+
+/// `GCONST(x)`: a `celt_glog` constant (log2 units; Q24 in the fixed-point build).
+#[cfg(not(feature = "fixed-point"))]
+const fn glog(x: f32) -> CeltGlog {
+    x
 }
 
 /// [`surround_analysis`] on interleaved float input with the default CELT mode for `rate`
@@ -661,8 +731,7 @@ fn opus_copy_channel_in_float(
     _user_data: Option<&MappingMatrix>,
 ) {
     for i in 0..frame_size {
-        // FLOAT2RES is the identity in the float build.
-        dst[i * dst_stride] = src[i * src_stride + src_channel];
+        dst[i * dst_stride] = float2res(src[i * src_stride + src_channel]);
     }
 }
 
@@ -826,8 +895,8 @@ impl MsEncoder {
         let ch = channels as usize;
         let max_frame = (6 * fs / 50) as usize;
         let mut scratch = MsScratch {
-            buf: vec![0.0; 2 * max_frame],
-            band_smr: vec![0.0; 21 * ch],
+            buf: vec![OpusRes::default(); 2 * max_frame],
+            band_smr: vec![CeltGlog::default(); 21 * ch],
             tmp_data: vec![0; MS_FRAME_TMP],
             surround: SurroundScratch::default(),
         };
@@ -837,9 +906,9 @@ impl MsEncoder {
         {
             let mode_frame = (6 * mode.fs / 50) as usize;
             scratch.surround = SurroundScratch {
-                input: vec![0.0; mode_frame + mode.overlap as usize],
-                x: vec![0.0; max_frame],
-                freq: vec![0.0; (mode.short_mdct_size << mode.max_lm) as usize],
+                input: vec![OpusVal32::default(); mode_frame + mode.overlap as usize],
+                x: vec![OpusRes::default(); max_frame],
+                freq: vec![OpusVal32::default(); (mode.short_mdct_size << mode.max_lm) as usize],
             };
         }
         Ok(Self {
@@ -851,11 +920,15 @@ impl MsEncoder {
             bitrate_bps: OPUS_AUTO,
             encoders,
             window_mem: if surround {
-                vec![0.0; ch * MAX_OVERLAP]
+                vec![OpusVal32::default(); ch * MAX_OVERLAP]
             } else {
                 Vec::new()
             },
-            preemph_mem: if surround { vec![0.0; ch] } else { Vec::new() },
+            preemph_mem: if surround {
+                vec![OpusVal32::default(); ch]
+            } else {
+                Vec::new()
+            },
             scratch,
         })
     }
@@ -1170,7 +1243,7 @@ impl MsEncoder {
             ..
         } = self;
         if scratch.buf.len() < 2 * fsu {
-            scratch.buf.resize(2 * fsu, 0.0);
+            scratch.buf.resize(2 * fsu, OpusRes::default());
         }
         let surround = self.mapping_type == MappingType::Surround
             && self.application != OPUS_APPLICATION_RESTRICTED_SILK;
@@ -1258,7 +1331,7 @@ impl MsEncoder {
 
         // Counting ToC
         let mut tot_size: i32 = 0;
-        let mut band_log_e = [0.0 as CeltGlog; 42];
+        let mut band_log_e = [CeltGlog::default(); 42];
         let nb_streams = layout.nb_streams;
         for s in 0..nb_streams {
             let enc = &mut encoders[s as usize];
@@ -1767,8 +1840,8 @@ impl MsEncoder {
     /// `OPUS_RESET_STATE`: resets every stream encoder and the surround analysis memories.
     pub fn reset(&mut self) {
         if self.mapping_type == MappingType::Surround {
-            self.preemph_mem.fill(0.0);
-            self.window_mem.fill(0.0);
+            self.preemph_mem.fill(OpusVal32::default());
+            self.window_mem.fill(OpusVal32::default());
         }
         for e in &mut self.encoders {
             e.reset();

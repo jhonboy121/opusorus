@@ -106,7 +106,6 @@ pub(crate) mod analysis;
 pub mod decoder;
 #[cfg(all(not(feature = "fixed-point"), feature = "dred"))]
 pub mod dred;
-#[cfg(not(feature = "fixed-point"))]
 pub mod encoder;
 pub mod extensions;
 #[cfg(feature = "internals")]
@@ -120,23 +119,18 @@ pub mod mlp;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod mlp;
 pub mod ms_decoder;
-#[cfg(not(feature = "fixed-point"))]
 pub mod ms_encoder;
 pub mod multistream;
 pub mod packet;
 pub mod projection_decoder;
-#[cfg(not(feature = "fixed-point"))]
 pub mod projection_encoder;
 pub mod repacketizer;
 
 pub use decoder::Decoder;
-#[cfg(not(feature = "fixed-point"))]
 pub use encoder::Encoder;
 pub use ms_decoder::MsDecoder;
-#[cfg(not(feature = "fixed-point"))]
 pub use ms_encoder::MsEncoder;
 pub use packet::ParsedPacket;
 pub use projection_decoder::ProjectionDecoder;
-#[cfg(not(feature = "fixed-point"))]
 pub use projection_encoder::ProjectionEncoder;
 pub use repacketizer::Repacketizer;

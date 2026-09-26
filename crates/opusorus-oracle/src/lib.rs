@@ -26,6 +26,7 @@ pub mod celt_encoder;
 pub mod celt_fft;
 pub mod celt_modes;
 pub mod celt_pitch_lpc;
+pub mod opus_encoder;
 pub mod opus_packet;
 pub mod silk_common;
 pub mod silk_decoder;
@@ -45,8 +46,6 @@ pub mod dnn_osce;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_plc;
 pub mod opus_decoder;
-#[cfg(not(feature = "fixed-point"))]
-pub mod opus_encoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod silk_encoder_flp;
 #[cfg(not(feature = "fixed-point"))]

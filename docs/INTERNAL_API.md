@@ -1186,11 +1186,12 @@ crate::encoder:
     - in_dtx()->bool, reset()
     - cfg qext: set_qext(bool) / qext()
     - cfg dred: set_dred_duration->Result / dred_duration(), set_dnn_blob(&[u8])
-  - #[doc(hidden)] pub CTLs: set_voice_ratio / voice_ratio, set_force_mode(i32: 1000/1001/1002/-1000), set_lfe(i32), set_energy_mask(Option<&[f32]>) (copies up to 42 values).
+  - #[doc(hidden)] pub CTLs: set_voice_ratio / voice_ratio, set_force_mode(i32: 1000/1001/1002/-1000), set_lfe(i32), set_energy_mask(Option<&[CeltGlog]>) (copies up to 42 values; Q24 in fixed-point builds).
   - Numeric escape hatches: ctl_set(request, value)->Result<()> (all SET requests + OPUS_RESET_STATE); ctl_get(&self, request)->Result<i32> (all GET requests; FINAL_RANGE as u32 bits). Unknown requests and pointer requests (ENERGY_MASK, CELT_GET_MODE, DNN_BLOB) return Err(Unimplemented).
   - pub(crate) celt_mode()->Option<&CeltMode>.
-  - #[doc(hidden)] pub fn opus_encode_native<T>(&mut self, pcm: &[f32], frame_size, data: &mut [u8], out_data_bytes: i32, lsb_depth, analysis_pcm: Option<&[T]>, analysis_size, c1, c2, analysis_channels, downmix: DownmixFunc<T>, float_api) -> i32 (C semantics).
-  - #[cfg(internals)] debug_state_dump().
+  - #[doc(hidden)] pub fn opus_encode_native<T>(&mut self, pcm: &[OpusRes], frame_size, data: &mut [u8], out_data_bytes: i32, lsb_depth, analysis_pcm: Option<&[T]>, analysis_size, c1, c2, analysis_channels, downmix: DownmixFunc<T>, float_api) -> i32 (C semantics).
+  - #[cfg(internals)] debug_state_dump() -> (Vec<u32>, Vec<OpusRes>) (floats as bits, fixed-point values sign-extended).
+- Fixed-point builds (unit `fixed_opus_encoder`): the same API. encode() passes its i16 input through with 16-bit `opus_res` (encode24() with `fixed-res24`), the other entry points convert (INT16TORES / INT24TORES / FLOAT2RES); encode24/encode_float use MAX_ENCODING_DEPTH (16, or 24 with res24). The helpers take the build's types: hp_cutoff/dc_reject/silk_biquad_res on &[OpusRes] with `[OpusVal32; 4]` state, stereo_fade/gain_fade with Q15 `OpusVal16` gains and a `&[CeltCoef]` window, compute_stereo_width -> Q15, compute_frame_energy -> OpusVal32, ms_encoder::log_sum(CeltGlog, CeltGlog) -> OpusVal16 (C truncates the Q24 result to 16 bits), surround_analysis_float -> Q24 band log energies.
 - encoder::request: every CTL request constant (OPUS_*_REQUEST, OPUS_RESET_STATE, OPUS_SET_FORCE_MODE_REQUEST=11002, LFE, ENERGY_MASK, CELT_GET_MODE, MULTISTREAM/PROJECTION requests).
 - Free functions: encoder_get_size(ch)->usize, frame_size_select(app, n, vd, fs)->i32, and #[doc(hidden)] helpers gen_toc, hp_cutoff, dc_reject, stereo_fade/gain_fade (in place), compute_stereo_width + StereoWidthState, decide_fec, compute_silk_rate_for_hybrid, compute_equiv_rate, compute_frame_energy, decide_dtx_mode, compute_redundancy_bytes, silk_biquad_res.
 - pub(crate): code_to_result(i32)->Result<usize>, c_ignored(Result<()>), check_init_args(fs, ch, app), packet_pad_with(data, len, new_len, &mut Vec<u8>) (opus_packet_pad using a reusable copy buffer).
@@ -1221,6 +1222,7 @@ Oracle opusorus_oracle::opus_encoder:
 - DupEnc: private C copy with dump().
 - Wrappers for every static helper.
 - Symbols are prefixed oracle_oe_*; the shim compiles renamed copies of opus_encoder.c and opus_multistream_encoder.c.
+- `// oracle-build: any`: the wrappers take the build's types (`Res`, `Val16`, `Val32`, `Glog` aliases in the module); DupEnc::dump returns the delay buffer as `Res`.
 
 ### external needs
 

@@ -3,7 +3,11 @@
  *
  * Private copies of opus_encoder.c and opus_multistream_encoder.c are compiled here with their
  * exported symbols renamed (oracle_oe_dup_*), which gives access to their static helpers and to
- * the OpusEncoder struct (state dumps). The public API tests use the library itself. */
+ * the OpusEncoder struct (state dumps). The public API tests use the library itself.
+ *
+ * Built in the float and in the fixed-point oracle: every signal/state value uses the build's
+ * C type (opus_res, opus_val16/32, celt_glog). */
+// oracle-build: any
 #include <stddef.h>
 #include <string.h>
 #include "opus_types.h"
@@ -24,6 +28,8 @@
 #define opus_encode_float oracle_oe_dup_opus_encode_float
 #define opus_encoder_ctl oracle_oe_dup_opus_encoder_ctl
 #define opus_encoder_destroy oracle_oe_dup_opus_encoder_destroy
+/* Non-static in the fixed-point build (also defined by the library's opus_encoder.o). */
+#define silk_biquad_res oracle_oe_dup_silk_biquad_res
 #include "../../../vendor/libopus/src/opus_encoder.c"
 
 #define surround_analysis oracle_oe_dup_surround_analysis
@@ -52,24 +58,24 @@ int oracle_oe_gen_toc(int mode, int framerate, int bandwidth, int channels) {
   return gen_toc(mode, framerate, bandwidth, channels);
 }
 
-void oracle_oe_hp_cutoff(const float *in, int cutoff_hz, float *out, float *hp_mem, int len,
-                         int channels, int fs) {
+void oracle_oe_hp_cutoff(const opus_res *in, int cutoff_hz, opus_res *out, opus_val32 *hp_mem,
+                         int len, int channels, int fs) {
   hp_cutoff(in, cutoff_hz, out, hp_mem, len, channels, fs, 0);
 }
 
-void oracle_oe_dc_reject(const float *in, int cutoff_hz, float *out, float *hp_mem, int len,
-                         int channels, int fs) {
+void oracle_oe_dc_reject(const opus_res *in, int cutoff_hz, opus_res *out, opus_val32 *hp_mem,
+                         int len, int channels, int fs) {
   dc_reject(in, cutoff_hz, out, hp_mem, len, channels, fs);
 }
 
 /* In place, as the encoder calls them. The window is that of the 48 kHz (or 96 kHz) mode. */
-void oracle_oe_stereo_fade(float *buf, float g1, float g2, int fs96, int frame_size,
+void oracle_oe_stereo_fade(opus_res *buf, opus_val16 g1, opus_val16 g2, int fs96, int frame_size,
                            int channels, int fs) {
   const CELTMode *m = opus_custom_mode_create(fs96 ? 96000 : 48000, fs96 ? 1920 : 960, NULL);
   stereo_fade(buf, buf, g1, g2, m->overlap, frame_size, channels, m->window, fs);
 }
-void oracle_oe_gain_fade(float *buf, float g1, float g2, int fs96, int frame_size, int channels,
-                         int fs) {
+void oracle_oe_gain_fade(opus_res *buf, opus_val16 g1, opus_val16 g2, int fs96, int frame_size,
+                         int channels, int fs) {
   const CELTMode *m = opus_custom_mode_create(fs96 ? 96000 : 48000, fs96 ? 1920 : 960, NULL);
   gain_fade(buf, buf, g1, g2, m->overlap, frame_size, channels, m->window, fs);
 }
@@ -79,9 +85,10 @@ int oracle_oe_frame_size_select(int application, int frame_size, int variable_du
 }
 
 /* mem: XX, XY, YY, smoothed_width, max_follower */
-float oracle_oe_compute_stereo_width(const float *pcm, int frame_size, int fs, float *mem) {
+opus_val16 oracle_oe_compute_stereo_width(const opus_res *pcm, int frame_size, int fs,
+                                          opus_val32 *mem) {
   StereoWidthState s;
-  float r;
+  opus_val16 r;
   s.XX = mem[0];
   s.XY = mem[1];
   s.YY = mem[2];
@@ -110,7 +117,7 @@ int oracle_oe_compute_equiv_rate(int bitrate, int channels, int frame_rate, int 
   return compute_equiv_rate(bitrate, channels, frame_rate, vbr, mode, complexity, loss);
 }
 
-float oracle_oe_compute_frame_energy(const float *pcm, int frame_size, int channels) {
+opus_val32 oracle_oe_compute_frame_energy(const opus_res *pcm, int frame_size, int channels) {
   return compute_frame_energy(pcm, frame_size, channels, 0);
 }
 
@@ -127,7 +134,7 @@ int oracle_oe_compute_redundancy_bytes(int max_data_bytes, int bitrate_bps, int 
 /* Static helpers of opus_multistream_encoder.c                                                 */
 /* ------------------------------------------------------------------------------------------ */
 
-float oracle_oe_log_sum(float a, float b) { return logSum(a, b); }
+opus_val16 oracle_oe_log_sum(celt_glog a, celt_glog b) { return logSum(a, b); }
 
 void oracle_oe_channel_pos(int channels, int *pos) { channel_pos(channels, pos); }
 
@@ -136,13 +143,13 @@ static void oe_copy_in_float(opus_res *dst, int dst_stride, const void *src, int
   const float *s = (const float *)src;
   int i;
   (void)user_data;
-  for (i = 0; i < frame_size; i++) dst[i * dst_stride] = s[i * src_stride + src_channel];
+  for (i = 0; i < frame_size; i++) dst[i * dst_stride] = FLOAT2RES(s[i * src_stride + src_channel]);
 }
 
 /* surround_analysis on float input with the mode for `rate` (48 kHz mode, or 96 kHz with QEXT).
  * mem: channels*overlap, preemph_mem: channels, band_log_e: 21*channels. */
-void oracle_oe_surround_analysis(const float *pcm, float *band_log_e, float *mem,
-                                 float *preemph_mem, int len, int channels, int rate) {
+void oracle_oe_surround_analysis(const float *pcm, celt_glog *band_log_e, opus_val32 *mem,
+                                 opus_val32 *preemph_mem, int len, int channels, int rate) {
   const CELTMode *m = opus_custom_mode_create(rate == 96000 ? 96000 : 48000,
                                               rate == 96000 ? 1920 : 960, NULL);
   oracle_oe_dup_surround_analysis(m, pcm, band_log_e, mem, preemph_mem, len, m->overlap,
@@ -177,12 +184,17 @@ int oracle_oe_ctl_get(OpusEncoder *st, int request, opus_int32 *value) {
 }
 
 #define OE_STATE_INTS 64
-/* Flat dump of the OpusEncoder fields (floats as bit patterns). Returns the number of values
- * written; delay_buffer (encoder_buffer*channels floats) goes to `delay`. */
-int oracle_oe_dump(const OpusEncoder *st, opus_uint32 *v, float *delay) {
+/* Flat dump of the OpusEncoder fields (floats as bit patterns, fixed-point values sign-extended
+ * to 32 bits). Returns the number of values written; delay_buffer (encoder_buffer*channels
+ * opus_res samples) goes to `delay`. */
+int oracle_oe_dump(const OpusEncoder *st, opus_uint32 *v, opus_res *delay) {
   int n = 0;
 #define I(x) v[n++] = (opus_uint32)(x)
+#ifdef FIXED_POINT
+#define F(x) I((opus_int32)(x))
+#else
 #define F(x) do { float f_ = (x); memcpy(&v[n++], &f_, 4); } while (0)
+#endif
   I(st->application);
   I(st->channels);
   I(st->delay_compensation);
@@ -248,6 +260,6 @@ int oracle_oe_dump(const OpusEncoder *st, opus_uint32 *v, float *delay) {
   I(st->silk_mode.switchReady);
 #undef I
 #undef F
-  if (delay) memcpy(delay, st->delay_buffer, sizeof(float) * st->encoder_buffer * st->channels);
+  if (delay) memcpy(delay, st->delay_buffer, sizeof(opus_res) * st->encoder_buffer * st->channels);
   return n;
 }
