@@ -59,7 +59,17 @@ pub const fn tansig_approx(x: f32) -> f32 {
     let mut num = fmadd(fmadd(N2, x2, N1), x2, N0);
     let den = fmadd(fmadd(D2, x2, D1), x2, D0);
     num = num * x / den;
-    crate::celt::arch::max32(-1.0, crate::celt::arch::min32(1.0, num))
+    #[cfg(not(feature = "fixed-point"))]
+    {
+        crate::celt::arch::max32(-1.0, crate::celt::arch::min32(1.0, num))
+    }
+    // The fixed-point `MAX32`/`MIN32` are the same C ternaries, applied to floats here (mlp.c
+    // stays float in fixed builds); the generic `arch` helpers are not `const`.
+    #[cfg(feature = "fixed-point")]
+    {
+        let num = if 1.0 < num { 1.0 } else { num };
+        if -1.0 > num { -1.0 } else { num }
+    }
 }
 
 /// Port of `src/mlp.c:sigmoid_approx`: sigmoid via [`tansig_approx`].

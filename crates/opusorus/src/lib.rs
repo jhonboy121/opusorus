@@ -110,15 +110,15 @@ pub mod dred;
 #[cfg(not(feature = "fixed-point"))]
 pub mod encoder;
 pub mod extensions;
-#[cfg(all(not(feature = "fixed-point"), feature = "internals"))]
+#[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod mapping_matrix;
-#[cfg(all(not(feature = "fixed-point"), not(feature = "internals")))]
+#[cfg(not(feature = "internals"))]
 pub(crate) mod mapping_matrix;
-#[cfg(all(not(feature = "fixed-point"), feature = "internals"))]
+#[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod mlp;
-#[cfg(all(not(feature = "fixed-point"), not(feature = "internals")))]
+#[cfg(not(feature = "internals"))]
 pub(crate) mod mlp;
 #[cfg(not(feature = "fixed-point"))]
 pub mod ms_decoder;

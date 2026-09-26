@@ -4,6 +4,9 @@
 //! (`src/opus_multistream.c`). Shims live in `csrc/opus_packet.c`.
 //!
 //! Public-API functions (`opus_packet_pad`, `opus_repacketizer_*`, ...) are in [`crate::api`].
+//!
+//! The shims compile in every oracle build (`// oracle-build: any`); the mapping-matrix
+//! wrappers take the build's `opus_res` ([`OpusRes`]).
 
 use core::ffi::{c_int, c_void};
 
@@ -544,6 +547,16 @@ pub fn pad_impl(data: &mut [u8], len: i32, pad: bool, exts: &[Ext], ext_buf: &[u
 
 // ------------------------------------------------------------------------------- mapping_matrix.c
 
+/// The C `opus_res` of the oracle build: `float`.
+#[cfg(not(feature = "fixed-point"))]
+pub type OpusRes = f32;
+/// The C `opus_res` of the oracle build: `opus_int16` (fixed point, 16-bit resolution).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type OpusRes = i16;
+/// The C `opus_res` of the oracle build: `opus_int32` (fixed point, `ENABLE_RES24`).
+#[cfg(feature = "fixed-res24")]
+pub type OpusRes = i32;
+
 /// `mapping_matrix_get_size`.
 pub fn mm_get_size(rows: i32, cols: i32) -> i32 {
     // SAFETY: pure function.
@@ -607,7 +620,7 @@ pub fn mm_in_float(
     m: Mm<'_>,
     input: &[f32],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -629,7 +642,7 @@ pub fn mm_in_float(
 /// `mapping_matrix_multiply_channel_out_float`.
 pub fn mm_out_float(
     m: Mm<'_>,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [f32],
@@ -655,7 +668,7 @@ pub fn mm_in_short(
     m: Mm<'_>,
     input: &[i16],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -677,7 +690,7 @@ pub fn mm_in_short(
 /// `mapping_matrix_multiply_channel_out_short`.
 pub fn mm_out_short(
     m: Mm<'_>,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [i16],
@@ -703,7 +716,7 @@ pub fn mm_in_int24(
     m: Mm<'_>,
     input: &[i32],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -725,7 +738,7 @@ pub fn mm_in_int24(
 /// `mapping_matrix_multiply_channel_out_int24`.
 pub fn mm_out_int24(
     m: Mm<'_>,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [i32],

@@ -1,12 +1,19 @@
 //! Ambisonics mixing/demixing matrices for the projection encoder/decoder.
 //!
-//! Port of `src/mapping_matrix.c` and `src/mapping_matrix.h` (float build; `opus_res` is
-//! `f32`). The C `MappingMatrix` is a header followed in memory by the column-major cell
-//! data; here the data is an owned `Vec<i16>`.
+//! Port of `src/mapping_matrix.c` and `src/mapping_matrix.h`, float and fixed-point builds
+//! (`opus_res` is `f32`, or `i16`/`i32` with `fixed-point`/`fixed-res24`). The C
+//! `MappingMatrix` is a header followed in memory by the column-major cell data; here the data
+//! is an owned `Vec<i16>`.
 
 use alloc::vec::Vec;
 
-use crate::celt::arch::{res2int16, res2int24};
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+use crate::celt::arch::saturate16;
+use crate::celt::arch::{OpusRes, OpusVal32, OpusVal64, res2int16, res2int24};
+#[cfg(feature = "fixed-res24")]
+use crate::celt::arch::{RES_SHIFT, shl32};
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{float2res, int24tores, res2float};
 use crate::packet::align;
 
 /// Port of `MATRIX_INDEX(nb_rows, row, col)`: column-major cell index.
@@ -98,7 +105,7 @@ pub fn mapping_matrix_multiply_channel_in_float(
     matrix: &MappingMatrix,
     input: &[f32],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -114,7 +121,14 @@ pub fn mapping_matrix_multiply_channel_in_float(
                 * input[matrix_index(input_rows, col, i)];
         }
         // FLOAT2RES is the identity in the float build.
-        output[output_rows * i] = (1.0 / 32768.0f32) * tmp;
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            output[output_rows * i] = (1.0 / 32768.0f32) * tmp;
+        }
+        #[cfg(feature = "fixed-point")]
+        {
+            output[output_rows * i] = float2res((1.0 / 32768.0f32) * tmp);
+        }
     }
 }
 
@@ -123,7 +137,7 @@ pub fn mapping_matrix_multiply_channel_in_float(
 /// `output_rows`-channel interleaved float `output`.
 pub fn mapping_matrix_multiply_channel_out_float(
     matrix: &MappingMatrix,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [f32],
@@ -136,7 +150,10 @@ pub fn mapping_matrix_multiply_channel_out_float(
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
         // RES2FLOAT is the identity in the float build.
+        #[cfg(not(feature = "fixed-point"))]
         let input_sample = input[input_rows * i];
+        #[cfg(feature = "fixed-point")]
+        let input_sample = res2float(input[input_rows * i]);
         for row in 0..output_rows {
             let tmp = (1.0 / 32768.0f32)
                 * matrix_data[matrix_index(rows, row, input_row)] as f32
@@ -146,13 +163,13 @@ pub fn mapping_matrix_multiply_channel_out_float(
     }
 }
 
-/// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_in_short` (float build):
-/// like [`mapping_matrix_multiply_channel_in_float`] with 16-bit input.
+/// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_in_short`: like
+/// [`mapping_matrix_multiply_channel_in_float`] with 16-bit input.
 pub fn mapping_matrix_multiply_channel_in_short(
     matrix: &MappingMatrix,
     input: &[i16],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -162,15 +179,33 @@ pub fn mapping_matrix_multiply_channel_in_short(
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
-        let mut tmp: f32 = 0.0;
+        let mut tmp = OpusVal32::default();
         for col in 0..input_rows {
-            // FIXED_POINT: not ported (float build)
+            #[cfg(feature = "fixed-point")]
+            {
+                tmp += (matrix_data[matrix_index(rows, output_row, col)] as i32
+                    * input[matrix_index(input_rows, col, i)] as i32)
+                    >> 8;
+            }
             // C: int16*int16 is an int product, converted to float by the accumulation.
-            tmp += (matrix_data[matrix_index(rows, output_row, col)] as i32
-                * input[matrix_index(input_rows, col, i)] as i32) as f32;
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                tmp += (matrix_data[matrix_index(rows, output_row, col)] as i32
+                    * input[matrix_index(input_rows, col, i)] as i32) as f32;
+            }
         }
-        // FIXED_POINT: not ported (float build)
-        output[output_rows * i] = (1.0 / (32768.0f32 * 32768.0f32)) * tmp;
+        #[cfg(feature = "fixed-res24")]
+        {
+            output[output_rows * i] = shl32(tmp, RES_SHIFT - 7);
+        }
+        #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+        {
+            output[output_rows * i] = saturate16((tmp + 64) >> 7);
+        }
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            output[output_rows * i] = (1.0 / (32768.0f32 * 32768.0f32)) * tmp;
+        }
     }
 }
 
@@ -179,7 +214,7 @@ pub fn mapping_matrix_multiply_channel_in_short(
 /// C `opus_int16 +=` conversion does).
 pub fn mapping_matrix_multiply_channel_out_short(
     matrix: &MappingMatrix,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [i16],
@@ -201,13 +236,13 @@ pub fn mapping_matrix_multiply_channel_out_short(
     }
 }
 
-/// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_in_int24` (float build):
-/// like [`mapping_matrix_multiply_channel_in_float`] with 24-bit integer input.
+/// Port of `src/mapping_matrix.c:mapping_matrix_multiply_channel_in_int24`: like
+/// [`mapping_matrix_multiply_channel_in_float`] with 24-bit integer input.
 pub fn mapping_matrix_multiply_channel_in_int24(
     matrix: &MappingMatrix,
     input: &[i32],
     input_rows: usize,
-    output: &mut [f32],
+    output: &mut [OpusRes],
     output_row: usize,
     output_rows: usize,
     frame_size: usize,
@@ -217,15 +252,32 @@ pub fn mapping_matrix_multiply_channel_in_int24(
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
-        // opus_val64 is float in the float build.
-        let mut tmp: f32 = 0.0;
+        // opus_val64 is float in the float build, opus_int64 in the fixed build.
+        let mut tmp = OpusVal64::default();
         for col in 0..input_rows {
-            tmp += matrix_data[matrix_index(rows, output_row, col)] as f32
-                * input[matrix_index(input_rows, col, i)] as f32;
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                tmp += matrix_data[matrix_index(rows, output_row, col)] as f32
+                    * input[matrix_index(input_rows, col, i)] as f32;
+            }
+            #[cfg(feature = "fixed-point")]
+            {
+                tmp += matrix_data[matrix_index(rows, output_row, col)] as i64
+                    * input[matrix_index(input_rows, col, i)] as i64;
+            }
         }
-        // FIXED_POINT: not ported (float build)
         // INT24TORES((1/(32768.f))*tmp) with a float argument.
-        output[output_rows * i] = (1.0 / 32768.0f32 / 256.0f32) * ((1.0 / 32768.0f32) * tmp);
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            output[output_rows * i] = (1.0 / 32768.0f32 / 256.0f32) * ((1.0 / 32768.0f32) * tmp);
+        }
+        // INT24TORES((tmp + 16384) >> 15): both INT24TORES forms first narrow the opus_int64
+        // to 32 bits (the res24 identity through the opus_res assignment, the res16 form
+        // through `ADD32` inside `PSHR32`).
+        #[cfg(feature = "fixed-point")]
+        {
+            output[output_rows * i] = int24tores(((tmp + 16384) >> 15) as i32);
+        }
     }
 }
 
@@ -234,7 +286,7 @@ pub fn mapping_matrix_multiply_channel_in_int24(
 /// wraps as the C `opus_int32 +=` conversion does).
 pub fn mapping_matrix_multiply_channel_out_int24(
     matrix: &MappingMatrix,
-    input: &[f32],
+    input: &[OpusRes],
     input_row: usize,
     input_rows: usize,
     output: &mut [i32],

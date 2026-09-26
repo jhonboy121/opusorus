@@ -2,10 +2,10 @@
 //! (`src/opus.c`), extensions (`src/extensions.c`), repacketizer and pad/unpad
 //! (`src/repacketizer.c`), mapping matrix (`src/mapping_matrix.c`), analysis MLP
 //! (`src/mlp.c`) and multistream layout helpers (`src/opus_multistream.c`) vs the C oracle.
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Runs in every build: in the fixed-point builds (`fixed-point`, `fixed-res24`) the mapping
+//! matrix takes the integer `opus_res` of the build; everything else is build-independent (soft
+//! clip and the MLP are float code in both builds, as in libopus with the float API).
 
 use opusorus::extensions::{self, Extension, ExtensionIterator};
 use opusorus::mapping_matrix as mm;
@@ -15,7 +15,7 @@ use opusorus::packet;
 use opusorus::repacketizer::{self, Repacketizer};
 use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq};
 use opusorus_oracle::api;
-use opusorus_oracle::opus_packet::{self as c, Ext, IterOp};
+use opusorus_oracle::opus_packet::{self as c, Ext, IterOp, OpusRes};
 
 // ------------------------------------------------------------------------------- helpers
 
@@ -996,6 +996,53 @@ fn mapping_matrix_static_and_size() {
     }
 }
 
+/// Amplitude classes of the random mapping-matrix inputs (float build: the scale of a
+/// `[-1, 1)` value).
+const AMPS: [f32; 4] = [0.1, 1.0, 1.9, 200.0];
+
+/// Random `opus_res` sample of amplitude class `amp_idx` (index into [`AMPS`]).
+#[cfg(not(feature = "fixed-point"))]
+fn rand_res(rng: &mut Rng, amp_idx: usize) -> OpusRes {
+    AMPS[amp_idx] * rng.f32_sym()
+}
+
+/// Random `opus_res` sample of amplitude class `amp_idx`: small, full-scale, full-scale with
+/// extremes, extremes only (16-bit `opus_res`).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+const fn rand_res(rng: &mut Rng, amp_idx: usize) -> OpusRes {
+    match amp_idx {
+        0 => rng.i16() >> 6,
+        1 => rng.i16(),
+        2 if rng.range_i32(0, 3) == 0 => [i16::MIN, i16::MAX, -1, 0][rng.range_i32(0, 3) as usize],
+        2 => rng.i16(),
+        _ => [i16::MIN, i16::MAX, i16::MIN + 1, 16384][rng.range_i32(0, 3) as usize],
+    }
+}
+
+/// Random `opus_res` sample of amplitude class `amp_idx` (24-bit `opus_res`, Q8 of 16-bit PCM):
+/// small, 24-bit, beyond 24 bits (saturating in `RES2INT16`), large (up to 2^30).
+#[cfg(feature = "fixed-res24")]
+const fn rand_res(rng: &mut Rng, amp_idx: usize) -> OpusRes {
+    match amp_idx {
+        0 => rng.range_i32(-(1 << 16), 1 << 16),
+        1 => rng.range_i32(-(1 << 23), (1 << 23) - 1),
+        2 => rng.range_i32(-(1 << 25), 1 << 25),
+        _ => rng.range_i32(-(1 << 30), 1 << 30),
+    }
+}
+
+/// Compares two `opus_res` buffers bit for bit.
+#[cfg(not(feature = "fixed-point"))]
+fn assert_res_eq(what: &str, rust: &[OpusRes], c: &[OpusRes]) {
+    assert_bits_eq_f32(what, rust, c);
+}
+
+/// Compares two `opus_res` buffers.
+#[cfg(feature = "fixed-point")]
+fn assert_res_eq(what: &str, rust: &[OpusRes], c: &[OpusRes]) {
+    assert_slice_eq(what, rust, c);
+}
+
 #[test]
 fn mapping_matrix_multiply() {
     let mut rng = Rng::new(0x3a7);
@@ -1015,7 +1062,8 @@ fn mapping_matrix_multiply() {
             data: &data,
         };
         let frame_size = rng.range_i32(0, 120) as usize;
-        let amp = [0.1f32, 1.0, 1.9, 200.0][rng.range_i32(0, 3) as usize];
+        let amp_idx = rng.range_i32(0, 3) as usize;
+        let amp = AMPS[amp_idx];
 
         // channel_in: input_rows <= cols, output_row < rows, output stride output_rows.
         let input_rows = rng.range_i32(1, cols as i32) as usize;
@@ -1025,8 +1073,8 @@ fn mapping_matrix_multiply() {
         let fin: Vec<f32> = (0..input_rows * frame_size)
             .map(|_| amp * rng.f32_sym())
             .collect();
-        let mut or = vec![0.0f32; olen];
-        let mut oc = vec![0.0f32; olen];
+        let mut or = vec![OpusRes::default(); olen];
+        let mut oc = vec![OpusRes::default(); olen];
         mm::mapping_matrix_multiply_channel_in_float(
             &m,
             &fin,
@@ -1045,11 +1093,11 @@ fn mapping_matrix_multiply() {
             output_rows,
             frame_size,
         );
-        assert_bits_eq_f32("in_float", &or, &oc);
+        assert_res_eq("in_float", &or, &oc);
 
         let sin: Vec<i16> = (0..input_rows * frame_size).map(|_| rng.i16()).collect();
-        let mut or = vec![0.0f32; olen];
-        let mut oc = vec![0.0f32; olen];
+        let mut or = vec![OpusRes::default(); olen];
+        let mut oc = vec![OpusRes::default(); olen];
         mm::mapping_matrix_multiply_channel_in_short(
             &m,
             &sin,
@@ -1068,13 +1116,13 @@ fn mapping_matrix_multiply() {
             output_rows,
             frame_size,
         );
-        assert_bits_eq_f32("in_short", &or, &oc);
+        assert_res_eq("in_short", &or, &oc);
 
         let iin: Vec<i32> = (0..input_rows * frame_size)
             .map(|_| rng.range_i32(-(1 << 23), (1 << 23) - 1))
             .collect();
-        let mut or = vec![0.0f32; olen];
-        let mut oc = vec![0.0f32; olen];
+        let mut or = vec![OpusRes::default(); olen];
+        let mut oc = vec![OpusRes::default(); olen];
         mm::mapping_matrix_multiply_channel_in_int24(
             &m,
             &iin,
@@ -1093,7 +1141,7 @@ fn mapping_matrix_multiply() {
             output_rows,
             frame_size,
         );
-        assert_bits_eq_f32("in_int24", &or, &oc);
+        assert_res_eq("in_int24", &or, &oc);
 
         // channel_out: input stride input_rows (<= cols), input_row < cols,
         // output_rows <= rows, accumulate into output.
@@ -1101,7 +1149,7 @@ fn mapping_matrix_multiply() {
         let input_row = rng.range_i32(0, cols as i32 - 1) as usize;
         let output_rows = rng.range_i32(1, rows as i32) as usize;
         let ilen = input_rows * frame_size.max(1);
-        let fin: Vec<f32> = (0..ilen).map(|_| amp * rng.f32_sym()).collect();
+        let rin: Vec<OpusRes> = (0..ilen).map(|_| rand_res(&mut rng, amp_idx)).collect();
         let init: Vec<f32> = (0..output_rows * frame_size)
             .map(|_| rng.f32_sym())
             .collect();
@@ -1109,7 +1157,7 @@ fn mapping_matrix_multiply() {
         let mut oc = init;
         mm::mapping_matrix_multiply_channel_out_float(
             &m,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut or,
@@ -1118,7 +1166,7 @@ fn mapping_matrix_multiply() {
         );
         c::mm_out_float(
             cm,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut oc,
@@ -1140,7 +1188,7 @@ fn mapping_matrix_multiply() {
         let mut oc = init;
         mm::mapping_matrix_multiply_channel_out_short(
             &m,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut or,
@@ -1149,7 +1197,7 @@ fn mapping_matrix_multiply() {
         );
         c::mm_out_short(
             cm,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut oc,
@@ -1171,7 +1219,7 @@ fn mapping_matrix_multiply() {
         let mut oc = init;
         mm::mapping_matrix_multiply_channel_out_int24(
             &m,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut or,
@@ -1180,7 +1228,7 @@ fn mapping_matrix_multiply() {
         );
         c::mm_out_int24(
             cm,
-            &fin,
+            &rin,
             input_row,
             input_rows,
             &mut oc,
@@ -1188,6 +1236,83 @@ fn mapping_matrix_multiply() {
             frame_size,
         );
         assert_slice_eq("out_int24", &or, &oc);
+    }
+}
+
+/// The projection matrices at full size (up to 38x38) with full-scale inputs: every row
+/// (channel_in) and column (channel_out) of every static mixing/demixing matrix, as the
+/// projection encoder and decoder use them.
+#[test]
+fn mapping_matrix_static_multiply() {
+    let mut rng = Rng::new(0x57a7);
+    for idx in 0..10 {
+        let (rows, cols, gain, data) = c::mm_static(idx);
+        let m = mm::MappingMatrix::new(rows, cols, gain, &data);
+        let cm = c::Mm {
+            rows,
+            cols,
+            data: &data,
+        };
+        let (rows, cols) = (rows as usize, cols as usize);
+        let frame_size = [120, 480, 960][rng.range_i32(0, 2) as usize];
+        let amp_idx = rng.range_i32(0, 3) as usize;
+        let fin: Vec<f32> = (0..cols * frame_size)
+            .map(|_| AMPS[amp_idx] * rng.f32_sym())
+            .collect();
+        let sin: Vec<i16> = (0..cols * frame_size)
+            .map(|_| match amp_idx {
+                3 => [i16::MIN, i16::MAX][rng.range_i32(0, 1) as usize],
+                _ => rng.i16(),
+            })
+            .collect();
+        let iin: Vec<i32> = (0..cols * frame_size)
+            .map(|_| rng.range_i32(-(1 << 23), (1 << 23) - 1))
+            .collect();
+        for row in 0..rows {
+            let mut or = vec![OpusRes::default(); rows * frame_size];
+            let mut oc = or.clone();
+            mm::mapping_matrix_multiply_channel_in_float(
+                &m, &fin, cols, &mut or, row, rows, frame_size,
+            );
+            c::mm_in_float(cm, &fin, cols, &mut oc, row, rows, frame_size);
+            assert_res_eq("static in_float", &or, &oc);
+            mm::mapping_matrix_multiply_channel_in_short(
+                &m, &sin, cols, &mut or, row, rows, frame_size,
+            );
+            c::mm_in_short(cm, &sin, cols, &mut oc, row, rows, frame_size);
+            assert_res_eq("static in_short", &or, &oc);
+            mm::mapping_matrix_multiply_channel_in_int24(
+                &m, &iin, cols, &mut or, row, rows, frame_size,
+            );
+            c::mm_in_int24(cm, &iin, cols, &mut oc, row, rows, frame_size);
+            assert_res_eq("static in_int24", &or, &oc);
+        }
+        let rin: Vec<OpusRes> = (0..cols * frame_size)
+            .map(|_| rand_res(&mut rng, amp_idx))
+            .collect();
+        let mut ofr = vec![0.0f32; rows * frame_size];
+        let mut ofc = ofr.clone();
+        let mut osr = vec![0i16; rows * frame_size];
+        let mut osc = osr.clone();
+        let mut oir = vec![0i32; rows * frame_size];
+        let mut oic = oir.clone();
+        for col in 0..cols {
+            mm::mapping_matrix_multiply_channel_out_float(
+                &m, &rin, col, cols, &mut ofr, rows, frame_size,
+            );
+            c::mm_out_float(cm, &rin, col, cols, &mut ofc, rows, frame_size);
+            mm::mapping_matrix_multiply_channel_out_short(
+                &m, &rin, col, cols, &mut osr, rows, frame_size,
+            );
+            c::mm_out_short(cm, &rin, col, cols, &mut osc, rows, frame_size);
+            mm::mapping_matrix_multiply_channel_out_int24(
+                &m, &rin, col, cols, &mut oir, rows, frame_size,
+            );
+            c::mm_out_int24(cm, &rin, col, cols, &mut oic, rows, frame_size);
+        }
+        assert_bits_eq_f32("static out_float", &ofr, &ofc);
+        assert_slice_eq("static out_short", &osr, &osc);
+        assert_slice_eq("static out_int24", &oir, &oic);
     }
 }
 

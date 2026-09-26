@@ -1,6 +1,8 @@
 /* Oracle C shims for unit opus_packet: packet parsing, extensions, repacketizer, mapping
    matrix, analysis MLP and multistream layout helpers. Pointers are converted to offsets so
-   the Rust side never sees C structs. */
+   the Rust side never sees C structs. The mapping-matrix shims take `opus_res` buffers
+   (float, or short/int in the fixed-point builds); the rest is build-independent. */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 #include "opus.h"
@@ -191,34 +193,35 @@ static MappingMatrix *mm_make(int rows, int cols, int gain, const short *data) {
 }
 
 /* kind: 0 in_float 1 out_float 2 in_short 3 out_short 4 in_int24 5 out_int24.
-   in_* : input is `in` (float/short/int per kind), row = output_row, stride = output_rows.
-   out_*: row = input_row, stride = input_rows. */
+   in_* : input is `in` (float/short/int per kind), output opus_res, row = output_row,
+          stride = output_rows.
+   out_*: input opus_res, row = input_row, stride = input_rows. */
 void oracle_mm_multiply(int kind, int rows, int cols, const short *mdata, const void *in,
                         int in_rows, void *out, int row, int out_rows, int frame_size) {
   MappingMatrix *m = mm_make(rows, cols, 0, mdata);
   switch (kind) {
     case 0:
-      mapping_matrix_multiply_channel_in_float(m, (const float *)in, in_rows, (float *)out, row,
-                                               out_rows, frame_size);
+      mapping_matrix_multiply_channel_in_float(m, (const float *)in, in_rows, (opus_res *)out,
+                                               row, out_rows, frame_size);
       break;
     case 1:
-      mapping_matrix_multiply_channel_out_float(m, (const float *)in, row, in_rows,
+      mapping_matrix_multiply_channel_out_float(m, (const opus_res *)in, row, in_rows,
                                                 (float *)out, out_rows, frame_size);
       break;
     case 2:
-      mapping_matrix_multiply_channel_in_short(m, (const opus_int16 *)in, in_rows, (float *)out,
-                                               row, out_rows, frame_size);
+      mapping_matrix_multiply_channel_in_short(m, (const opus_int16 *)in, in_rows,
+                                               (opus_res *)out, row, out_rows, frame_size);
       break;
     case 3:
-      mapping_matrix_multiply_channel_out_short(m, (const float *)in, row, in_rows,
+      mapping_matrix_multiply_channel_out_short(m, (const opus_res *)in, row, in_rows,
                                                 (opus_int16 *)out, out_rows, frame_size);
       break;
     case 4:
-      mapping_matrix_multiply_channel_in_int24(m, (const opus_int32 *)in, in_rows, (float *)out,
-                                               row, out_rows, frame_size);
+      mapping_matrix_multiply_channel_in_int24(m, (const opus_int32 *)in, in_rows,
+                                               (opus_res *)out, row, out_rows, frame_size);
       break;
     case 5:
-      mapping_matrix_multiply_channel_out_int24(m, (const float *)in, row, in_rows,
+      mapping_matrix_multiply_channel_out_int24(m, (const opus_res *)in, row, in_rows,
                                                 (opus_int32 *)out, out_rows, frame_size);
       break;
   }
