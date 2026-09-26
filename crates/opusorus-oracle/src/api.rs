@@ -853,3 +853,19 @@ impl Drop for ProjectionDecoder {
         unsafe { sys::opus_projection_decoder_destroy(self.ptr.as_ptr()) }
     }
 }
+
+/// `opus_decoder_get_size`.
+pub fn decoder_get_size(channels: i32) -> i32 {
+    // SAFETY: pure size query.
+    unsafe { sys::opus_decoder_get_size(channels) }
+}
+/// `opus_encoder_get_size`.
+pub fn encoder_get_size(channels: i32) -> i32 {
+    // SAFETY: pure size query.
+    unsafe { sys::opus_encoder_get_size(channels) }
+}
+/// `opus_multistream_decoder_get_size`.
+pub fn multistream_decoder_get_size(streams: i32, coupled: i32) -> i32 {
+    // SAFETY: pure size query.
+    unsafe { sys::opus_multistream_decoder_get_size(streams, coupled) }
+}

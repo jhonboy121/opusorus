@@ -74,6 +74,14 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C |
 | Rust port of libopus tests (`crates/opusorus/tests`, `libopus_unit.rs`) | ✅ | host + wasm |
 
+## Open follow-ups
+
+| Item | Notes |
+|---|---|
+| Memory footprint | `Decoder::get_size`: Rust 75 KB (1 ch) vs C 18 KB without DNN, 245–280 KB vs 192–200 KB with OSCE. Causes: preallocated 120 ms output scratch (C uses stack), inline OSCE state. Plan: allocate DNN state lazily when weights load, shrink scratch. |
+| DNN fuzz targets, custom-modes fuzz target | fuzz crate has no DNN/OpusCustom targets yet |
+| Shared parsed DNN models | each Decoder/Encoder re-parses the embedded 4 MB blob; share via `Arc` |
+
 ## Performance log
 
 | Date | Item | Result |
