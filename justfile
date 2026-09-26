@@ -56,6 +56,10 @@ test: dnn-blob
         cargo test -p opusorus --features "$f"
         cargo test -p opusorus-conformance --features "$f" --test vectors --test libopus_unit --test api_overflow
     done
+    # C ABI harness (upstream C test suite + opus_demo vectors) and bench parity, fixed-point.
+    cargo test -p opusorus-capi --features fixed-point,custom-modes
+    cargo test -p opusorus-capi --features fixed-res24,qext,custom-modes
+    cargo test -p opusorus-bench --features fixed-res24,qext --test parity
 
 # Full-length libopus runs, exhaustive sweeps and timing tests, default and QEXT + custom-modes.
 # All tests including the ignored long ones (OPUS_TEST_FULL=1, --include-ignored).
@@ -137,6 +141,10 @@ vectors:
 bench:
     cargo bench -p opusorus-bench
 
+# Markdown benchmark report: float (default), `--fixed`, `--fixed-res24`, `--qext`, `--runs N`.
+bench-report *args:
+    scripts/bench_report.sh {{args}}
+
 # Shared-library size comparison (Rust cdylib vs libopus.so).
 size:
     ./scripts/size_report.sh
@@ -153,6 +161,8 @@ fuzz-seed:
 # Full fuzz campaign (SECS=, FORK=, TARGETS=, FEATURES=qext knobs).
 fuzz-all:
     fuzz/run_all.sh
+    FEATURES=fixed-point fuzz/run_all.sh
+    FEATURES=fixed-res24,qext fuzz/run_all.sh
 
 # Everything CI runs.
 ci: fmt clippy doc test cross cross-capi test-wasm

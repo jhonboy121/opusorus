@@ -404,20 +404,14 @@ fn cycle<T: Copy + Default>(s: &[T], total: usize) -> Vec<T> {
     s.iter().copied().cycle().take(total).collect()
 }
 
-/// Input classes that are undefined behaviour in C and panic in debug builds of the port (the
-/// overflow checks cargo-fuzz enables), avoided until the port hardens them:
-///
-/// * fixed-point: a stereo encoder with `OPUS_SET_LFE(1)` overflows in CELT's `stereo_itheta`
-///   (C wraps; docs/FIXED_POINT.md, FX4). Multistream LFE streams are mono, and
-///   `opus_multistream_encoder_ctl` does not forward `OPUS_SET_LFE`, so only single-stream
-///   stereo encoders are affected: their `OPUS_SET_LFE` value is forced to 0.
+/// Hook for input classes that are undefined behaviour in C and would panic in debug builds of
+/// the port. Currently none: the stereo-LFE overflow in fixed-point builds (formerly forced to
+/// `OPUS_SET_LFE(0)` here) now wraps exactly like C (docs/FIXED_POINT.md, overflow hardening).
 #[must_use]
-pub const fn avoid_known_ub(req: i32, value: i32, h: &EncHeader) -> i32 {
-    if cfg!(feature = "fixed-point") && req == OPUS_SET_LFE_REQUEST && h.channels == 2 {
-        0
-    } else {
-        value
-    }
+pub const fn avoid_known_ub(_req: i32, value: i32, _h: &EncHeader) -> i32 {
+    // Stereo LFE in fixed-point builds (C UB) is now handled by wrapping in the port exactly
+    // like C, so nothing needs to be avoided any more.
+    value
 }
 
 /// A raw 24-bit input sample. Float builds take any 32-bit pattern (out-of-range values are
