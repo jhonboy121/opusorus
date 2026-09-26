@@ -1,6 +1,9 @@
 //! Oracle bindings for unit `celt_bands`: celt/vq.c, celt/quant_bands.c, celt/bands.c and
-//! celt/celt.c (float build).
+//! celt/celt.c, in the float and in the fixed-point oracle (`csrc/celt_bands.c` is
+//! `// oracle-build: any`).
 //!
+//! The libopus types are mirrored by [`Norm`], [`Sig`], [`Ener`], [`Glog`], [`Val16`],
+//! [`Val32`] and [`EMean`] (float in the float build, integers in the fixed-point build).
 //! Modes are selected by sampling rate (`48000`, or `96000` with QEXT) plus a `qext` flag that
 //! substitutes `compute_qext_mode(mode)`. Wrappers assert the slice lengths the C code touches.
 
@@ -11,21 +14,64 @@
 
 use core::ffi::c_int;
 
+/// `celt_norm`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Norm = f32;
+/// `celt_sig`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Sig = f32;
+/// `celt_ener`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Ener = f32;
+/// `celt_glog`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Glog = f32;
+/// `opus_val16`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val16 = f32;
+/// `opus_val32`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val32 = f32;
+/// Element type of `eMeans` (`opus_val16`).
+#[cfg(not(feature = "fixed-point"))]
+pub type EMean = f32;
+/// `celt_norm` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Norm = i32;
+/// `celt_sig`.
+#[cfg(feature = "fixed-point")]
+pub type Sig = i32;
+/// `celt_ener`.
+#[cfg(feature = "fixed-point")]
+pub type Ener = i32;
+/// `celt_glog` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Glog = i32;
+/// `opus_val16`.
+#[cfg(feature = "fixed-point")]
+pub type Val16 = i16;
+/// `opus_val32`.
+#[cfg(feature = "fixed-point")]
+pub type Val32 = i32;
+/// Element type of `eMeans` (Q4 `signed char`).
+#[cfg(feature = "fixed-point")]
+pub type EMean = i8;
+
 unsafe extern "C" {
     fn oracle_cb_has_qext() -> c_int;
     fn oracle_resampling_factor(rate: c_int) -> c_int;
     fn oracle_init_caps(fs: c_int, qext: c_int, cap: *mut c_int, lm: c_int, c: c_int);
     fn oracle_celt_tables(tf: *mut i8, trim: *mut u8, spread: *mut u8, tapset: *mut u8);
     fn oracle_comb_filter(
-        y: *mut f32,
-        x_base: *mut f32,
+        y: *mut Val32,
+        x_base: *mut Val32,
         x_off: c_int,
         inplace: c_int,
         t0: c_int,
         t1: c_int,
         n: c_int,
-        g0: f32,
-        g1: f32,
+        g0: Val16,
+        g1: Val16,
         tapset0: c_int,
         tapset1: c_int,
         fs: c_int,
@@ -33,23 +79,23 @@ unsafe extern "C" {
         overlap: c_int,
     );
     fn oracle_exp_rotation(
-        x: *mut f32,
+        x: *mut Norm,
         len: c_int,
         dir: c_int,
         stride: c_int,
         k: c_int,
         spread: c_int,
     );
-    fn oracle_op_pvq_search(x: *mut f32, iy: *mut c_int, k: c_int, n: c_int) -> f32;
+    fn oracle_op_pvq_search(x: *mut Norm, iy: *mut c_int, k: c_int, n: c_int) -> Val16;
     fn oracle_alg_quant(
-        x: *mut f32,
+        x: *mut Norm,
         n: c_int,
         k: c_int,
         spread: c_int,
         b: c_int,
         buf: *mut u8,
         size: c_int,
-        gain: f32,
+        gain: Val32,
         resynth: c_int,
         ext_buf: *mut u8,
         ext_size: c_int,
@@ -57,46 +103,46 @@ unsafe extern "C" {
         out: *mut u32,
     );
     fn oracle_alg_unquant(
-        x: *mut f32,
+        x: *mut Norm,
         n: c_int,
         k: c_int,
         spread: c_int,
         b: c_int,
         buf: *mut u8,
         size: c_int,
-        gain: f32,
+        gain: Val32,
         ext_buf: *mut u8,
         ext_size: c_int,
         extra_bits: c_int,
         out: *mut u32,
     );
-    fn oracle_renormalise_vector(x: *mut f32, n: c_int, gain: f32);
-    fn oracle_stereo_itheta(x: *const f32, y: *const f32, stereo: c_int, n: c_int) -> c_int;
+    fn oracle_renormalise_vector(x: *mut Norm, n: c_int, gain: Val32);
+    fn oracle_stereo_itheta(x: *const Norm, y: *const Norm, stereo: c_int, n: c_int) -> c_int;
     fn oracle_cubic_quant(
-        x: *mut f32,
+        x: *mut Norm,
         n: c_int,
         res: c_int,
         b: c_int,
         buf: *mut u8,
         size: c_int,
-        gain: f32,
+        gain: Val32,
         resynth: c_int,
         out: *mut u32,
     );
     fn oracle_cubic_unquant(
-        x: *mut f32,
+        x: *mut Norm,
         n: c_int,
         res: c_int,
         b: c_int,
         buf: *mut u8,
         size: c_int,
-        gain: f32,
+        gain: Val32,
         out: *mut u32,
     );
     fn oracle_hysteresis_decision(
-        val: f32,
-        thresholds: *const f32,
-        hysteresis: *const f32,
+        val: Val16,
+        thresholds: *const Val16,
+        hysteresis: *const Val16,
         n: c_int,
         prev: c_int,
     ) -> c_int;
@@ -106,8 +152,8 @@ unsafe extern "C" {
     fn oracle_compute_band_energies(
         fs: c_int,
         qext: c_int,
-        x: *const f32,
-        band_e: *mut f32,
+        x: *const Sig,
+        band_e: *mut Ener,
         end: c_int,
         c: c_int,
         lm: c_int,
@@ -115,9 +161,9 @@ unsafe extern "C" {
     fn oracle_normalise_bands(
         fs: c_int,
         qext: c_int,
-        freq: *const f32,
-        x: *mut f32,
-        band_e: *const f32,
+        freq: *const Sig,
+        x: *mut Norm,
+        band_e: *const Ener,
         end: c_int,
         c: c_int,
         m: c_int,
@@ -125,9 +171,9 @@ unsafe extern "C" {
     fn oracle_denormalise_bands(
         fs: c_int,
         qext: c_int,
-        x: *const f32,
-        freq: *mut f32,
-        band_log_e: *const f32,
+        x: *const Norm,
+        freq: *mut Sig,
+        band_log_e: *const Glog,
         start: c_int,
         end: c_int,
         m: c_int,
@@ -137,23 +183,23 @@ unsafe extern "C" {
     fn oracle_anti_collapse(
         fs: c_int,
         qext: c_int,
-        x: *mut f32,
+        x: *mut Norm,
         cm: *mut u8,
         lm: c_int,
         c: c_int,
         size: c_int,
         start: c_int,
         end: c_int,
-        log_e: *const f32,
-        prev1: *const f32,
-        prev2: *const f32,
+        log_e: *const Glog,
+        prev1: *const Glog,
+        prev2: *const Glog,
         pulses: *const c_int,
         seed: u32,
         encode: c_int,
     );
     fn oracle_spreading_decision(
         fs: c_int,
-        x: *const f32,
+        x: *const Norm,
         io: *mut c_int,
         last_decision: c_int,
         update_hf: c_int,
@@ -162,12 +208,12 @@ unsafe extern "C" {
         m: c_int,
         spread_weight: *const c_int,
     ) -> c_int;
-    fn oracle_haar1(x: *mut f32, n0: c_int, stride: c_int);
+    fn oracle_haar1(x: *mut Norm, n0: c_int, stride: c_int);
     fn oracle_quant_all_bands(
         ip: *const c_int,
-        x: *mut f32,
+        x: *mut Norm,
         collapse_masks: *mut u8,
-        band_e: *const f32,
+        band_e: *const Ener,
         pulses: *mut c_int,
         tf_res: *const c_int,
         offsets: *const c_int,
@@ -178,23 +224,23 @@ unsafe extern "C" {
         seed: *mut u32,
         out: *mut c_int,
     );
-    fn oracle_emeans(out: *mut f32);
+    fn oracle_emeans(out: *mut EMean);
     fn oracle_amp2log2(
         fs: c_int,
         qext: c_int,
         eff_end: c_int,
         end: c_int,
-        band_e: *mut f32,
-        band_log_e: *mut f32,
+        band_e: *mut Ener,
+        band_log_e: *mut Glog,
         c: c_int,
     );
     fn oracle_quant_energy(
         ip: *const c_int,
-        e_bands: *const f32,
-        old_e_bands: *mut f32,
-        error: *mut f32,
+        e_bands: *const Glog,
+        old_e_bands: *mut Glog,
+        error: *mut Glog,
         buf: *mut u8,
-        delayed_intra: *mut f32,
+        delayed_intra: *mut Val32,
         fine_quant: *mut c_int,
         prev_quant: *mut c_int,
         fine_priority: *mut c_int,
@@ -202,33 +248,44 @@ unsafe extern "C" {
     );
     fn oracle_unquant_energy(
         ip: *const c_int,
-        old_e_bands: *mut f32,
+        old_e_bands: *mut Glog,
         buf: *mut u8,
         fine_quant: *mut c_int,
         prev_quant: *mut c_int,
         fine_priority: *mut c_int,
         out: *mut c_int,
     );
-    fn oracle_exp_rotation1(x: *mut f32, len: c_int, stride: c_int, c: f32, s: f32);
-    fn oracle_normalise_residual(iy: *mut c_int, x: *mut f32, n: c_int, ryy: f32, gain: f32);
+    fn oracle_exp_rotation1(x: *mut Norm, len: c_int, stride: c_int, c: Val16, s: Val16);
+    fn oracle_normalise_residual(
+        iy: *mut c_int,
+        x: *mut Norm,
+        n: c_int,
+        ryy: Val32,
+        gain: Val32,
+        shift: c_int,
+    );
+    fn oracle_celt_inner_prod_norm(x: *const Norm, y: *const Norm, len: c_int) -> Val32;
+    fn oracle_celt_inner_prod_norm_shift(x: *const Norm, y: *const Norm, len: c_int) -> Val32;
     fn oracle_extract_collapse_mask(iy: *mut c_int, n: c_int, b: c_int) -> u32;
     fn oracle_op_pvq_search_n2(
-        x: *const f32,
+        x: *const Norm,
         iy: *mut c_int,
         up_iy: *mut c_int,
         k: c_int,
         up: c_int,
         refine: *mut c_int,
-    ) -> f32;
+        shift: c_int,
+    ) -> Val32;
     fn oracle_op_pvq_search_extra(
-        x: *const f32,
+        x: *const Norm,
         iy: *mut c_int,
         up_iy: *mut c_int,
         k: c_int,
         up: c_int,
         refine: *mut c_int,
         n: c_int,
-    ) -> f32;
+        shift: c_int,
+    ) -> Val32;
     fn oracle_compute_qn(
         n: c_int,
         b: c_int,
@@ -236,27 +293,27 @@ unsafe extern "C" {
         pulse_cap: c_int,
         stereo: c_int,
     ) -> c_int;
-    fn oracle_compute_channel_weights(ex: f32, ey: f32, w: *mut f32);
+    fn oracle_compute_channel_weights(ex: Ener, ey: Ener, w: *mut Val16);
     fn oracle_intensity_stereo(
         fs: c_int,
-        x: *mut f32,
-        y: *const f32,
-        band_e: *const f32,
+        x: *mut Norm,
+        y: *const Norm,
+        band_e: *const Ener,
         band_id: c_int,
         n: c_int,
     );
-    fn oracle_stereo_split(x: *mut f32, y: *mut f32, n: c_int);
-    fn oracle_stereo_merge(x: *mut f32, y: *mut f32, mid: f32, n: c_int);
-    fn oracle_deinterleave_hadamard(x: *mut f32, n0: c_int, stride: c_int, hadamard: c_int);
-    fn oracle_interleave_hadamard(x: *mut f32, n0: c_int, stride: c_int, hadamard: c_int);
+    fn oracle_stereo_split(x: *mut Norm, y: *mut Norm, n: c_int);
+    fn oracle_stereo_merge(x: *mut Norm, y: *mut Norm, mid: Val32, n: c_int);
+    fn oracle_deinterleave_hadamard(x: *mut Norm, n0: c_int, stride: c_int, hadamard: c_int);
+    fn oracle_interleave_hadamard(x: *mut Norm, n0: c_int, stride: c_int, hadamard: c_int);
     fn oracle_loss_distortion(
-        e_bands: *const f32,
-        old_e_bands: *mut f32,
+        e_bands: *const Glog,
+        old_e_bands: *mut Glog,
         start: c_int,
         end: c_int,
         len: c_int,
         c: c_int,
-    ) -> f32;
+    ) -> Val32;
 }
 
 /// Whether the oracle was built with `ENABLE_QEXT`.
@@ -314,8 +371,8 @@ pub struct CombParams {
     pub t0: i32,
     pub t1: i32,
     pub n: i32,
-    pub g0: f32,
-    pub g1: f32,
+    pub g0: Val16,
+    pub g1: Val16,
     pub tapset0: i32,
     pub tapset1: i32,
     /// Mode whose window is used (`use_window`), or no window.
@@ -325,7 +382,7 @@ pub struct CombParams {
 }
 
 /// `comb_filter(y, x_base+x_off, ...)` (separate buffers).
-pub fn comb_filter(y: &mut [f32], x_base: &mut [f32], x_off: usize, p: CombParams) {
+pub fn comb_filter(y: &mut [Val32], x_base: &mut [Val32], x_off: usize, p: CombParams) {
     assert!(y.len() >= p.n as usize && x_base.len() >= x_off + p.n as usize);
     assert!(x_off >= 2 * 1024 + 2);
     // SAFETY: lengths checked, including enough history before x_off for any period.
@@ -350,9 +407,9 @@ pub fn comb_filter(y: &mut [f32], x_base: &mut [f32], x_off: usize, p: CombParam
 }
 
 /// `comb_filter(x, x, ...)` in place on `buf[off..off+n]`.
-pub fn comb_filter_inplace(buf: &mut [f32], off: usize, p: CombParams) {
+pub fn comb_filter_inplace(buf: &mut [Val32], off: usize, p: CombParams) {
     assert!(buf.len() >= off + p.n as usize && off >= 2 * 1024 + 2);
-    let mut dummy = [0.0f32; 1];
+    let mut dummy = [Val32::default(); 1];
     // SAFETY: lengths checked (see comb_filter).
     unsafe {
         oracle_comb_filter(
@@ -379,14 +436,14 @@ pub fn comb_filter_inplace(buf: &mut [f32], off: usize, p: CombParams) {
 // ---------------------------------------------------------------------------------------------
 
 /// `exp_rotation`.
-pub fn exp_rotation(x: &mut [f32], len: i32, dir: i32, stride: i32, k: i32, spread: i32) {
+pub fn exp_rotation(x: &mut [Norm], len: i32, dir: i32, stride: i32, k: i32, spread: i32) {
     assert!(x.len() >= len as usize);
     // SAFETY: x has len elements.
     unsafe { oracle_exp_rotation(x.as_mut_ptr(), len, dir, stride, k, spread) }
 }
 
 /// `op_pvq_search_c`.
-pub fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: i32) -> f32 {
+pub fn op_pvq_search(x: &mut [Norm], iy: &mut [i32], k: i32, n: i32) -> Val16 {
     assert!(x.len() >= n as usize && iy.len() >= n as usize);
     // SAFETY: lengths checked.
     unsafe { oracle_op_pvq_search(x.as_mut_ptr(), iy.as_mut_ptr(), k, n) }
@@ -398,13 +455,13 @@ pub type VqOut = [u32; 7];
 
 /// `alg_quant` on fresh encoders over `buf`/`ext_buf` (finished with `ec_enc_done`).
 pub fn alg_quant(
-    x: &mut [f32],
+    x: &mut [Norm],
     n: i32,
     k: i32,
     spread: i32,
     b: i32,
     buf: &mut [u8],
-    gain: f32,
+    gain: Val32,
     resynth: bool,
     ext_buf: &mut [u8],
     extra_bits: i32,
@@ -434,13 +491,13 @@ pub fn alg_quant(
 
 /// `alg_unquant` on fresh decoders.
 pub fn alg_unquant(
-    x: &mut [f32],
+    x: &mut [Norm],
     n: i32,
     k: i32,
     spread: i32,
     b: i32,
     buf: &mut [u8],
-    gain: f32,
+    gain: Val32,
     ext_buf: &mut [u8],
     extra_bits: i32,
 ) -> VqOut {
@@ -467,14 +524,14 @@ pub fn alg_unquant(
 }
 
 /// `renormalise_vector`.
-pub fn renormalise_vector(x: &mut [f32], n: i32, gain: f32) {
+pub fn renormalise_vector(x: &mut [Norm], n: i32, gain: Val32) {
     assert!(x.len() >= n as usize);
     // SAFETY: length checked.
     unsafe { oracle_renormalise_vector(x.as_mut_ptr(), n, gain) }
 }
 
 /// `stereo_itheta`.
-pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: i32) -> i32 {
+pub fn stereo_itheta(x: &[Norm], y: &[Norm], stereo: bool, n: i32) -> i32 {
     assert!(x.len() >= n as usize && y.len() >= n as usize);
     // SAFETY: lengths checked.
     unsafe { oracle_stereo_itheta(x.as_ptr(), y.as_ptr(), i32::from(stereo), n) }
@@ -482,12 +539,12 @@ pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: i32) -> i32 {
 
 /// `cubic_quant` (QEXT) on a fresh encoder: `[cm, tell_frac, rng, error]`.
 pub fn cubic_quant(
-    x: &mut [f32],
+    x: &mut [Norm],
     n: i32,
     res: i32,
     b: i32,
     buf: &mut [u8],
-    gain: f32,
+    gain: Val32,
     resynth: bool,
 ) -> [u32; 4] {
     assert!(x.len() >= n as usize);
@@ -511,12 +568,12 @@ pub fn cubic_quant(
 
 /// `cubic_unquant` (QEXT) on a fresh decoder: `[cm, tell_frac, rng, error]`.
 pub fn cubic_unquant(
-    x: &mut [f32],
+    x: &mut [Norm],
     n: i32,
     res: i32,
     b: i32,
     buf: &mut [u8],
-    gain: f32,
+    gain: Val32,
 ) -> [u32; 4] {
     assert!(x.len() >= n as usize);
     let mut out = [0u32; 4];
@@ -537,17 +594,38 @@ pub fn cubic_unquant(
 }
 
 /// `exp_rotation1` (static).
-pub fn exp_rotation1(x: &mut [f32], len: i32, stride: i32, c: f32, s: f32) {
+pub fn exp_rotation1(x: &mut [Norm], len: i32, stride: i32, c: Val16, s: Val16) {
     assert!(x.len() >= len as usize);
     // SAFETY: length checked.
     unsafe { oracle_exp_rotation1(x.as_mut_ptr(), len, stride, c, s) }
 }
 
 /// `normalise_residual` (static).
-pub fn normalise_residual(iy: &mut [i32], x: &mut [f32], n: i32, ryy: f32, gain: f32) {
+pub fn normalise_residual(
+    iy: &mut [i32],
+    x: &mut [Norm],
+    n: i32,
+    ryy: Val32,
+    gain: Val32,
+    shift: i32,
+) {
     assert!(x.len() >= n as usize && iy.len() >= n as usize);
     // SAFETY: lengths checked.
-    unsafe { oracle_normalise_residual(iy.as_mut_ptr(), x.as_mut_ptr(), n, ryy, gain) }
+    unsafe { oracle_normalise_residual(iy.as_mut_ptr(), x.as_mut_ptr(), n, ryy, gain, shift) }
+}
+
+/// `celt_inner_prod_norm` (`celt_inner_prod` in the float build).
+pub fn celt_inner_prod_norm(x: &[Norm], y: &[Norm], len: usize) -> Val32 {
+    assert!(x.len() >= len && y.len() >= len);
+    // SAFETY: lengths checked.
+    unsafe { oracle_celt_inner_prod_norm(x.as_ptr(), y.as_ptr(), len as c_int) }
+}
+
+/// `celt_inner_prod_norm_shift` (`celt_inner_prod` in the float build).
+pub fn celt_inner_prod_norm_shift(x: &[Norm], y: &[Norm], len: usize) -> Val32 {
+    assert!(x.len() >= len && y.len() >= len);
+    // SAFETY: lengths checked.
+    unsafe { oracle_celt_inner_prod_norm_shift(x.as_ptr(), y.as_ptr(), len as c_int) }
 }
 
 /// `extract_collapse_mask` (static).
@@ -559,12 +637,13 @@ pub fn extract_collapse_mask(iy: &mut [i32], n: i32, b: i32) -> u32 {
 
 /// `op_pvq_search_N2` (static, QEXT): `(yy, refine)`.
 pub fn op_pvq_search_n2(
-    x: &[f32],
+    x: &[Norm],
     iy: &mut [i32],
     up_iy: &mut [i32],
     k: i32,
     up: i32,
-) -> (f32, i32) {
+    shift: i32,
+) -> (Val32, i32) {
     assert!(x.len() >= 2 && iy.len() >= 2 && up_iy.len() >= 2);
     let mut refine = 0;
     // SAFETY: lengths checked.
@@ -576,6 +655,7 @@ pub fn op_pvq_search_n2(
             k,
             up,
             &mut refine,
+            shift,
         )
     };
     (yy, refine)
@@ -583,14 +663,15 @@ pub fn op_pvq_search_n2(
 
 /// `op_pvq_search_extra` (static, QEXT).
 pub fn op_pvq_search_extra(
-    x: &[f32],
+    x: &[Norm],
     iy: &mut [i32],
     up_iy: &mut [i32],
     k: i32,
     up: i32,
     refine: &mut [i32],
     n: i32,
-) -> f32 {
+    shift: i32,
+) -> Val32 {
     let nu = n as usize;
     assert!(x.len() >= nu && iy.len() >= nu && up_iy.len() >= nu && refine.len() >= nu);
     // SAFETY: lengths checked.
@@ -603,6 +684,7 @@ pub fn op_pvq_search_extra(
             up,
             refine.as_mut_ptr(),
             n,
+            shift,
         )
     }
 }
@@ -613,9 +695,9 @@ pub fn op_pvq_search_extra(
 
 /// `hysteresis_decision`.
 pub fn hysteresis_decision(
-    val: f32,
-    thresholds: &[f32],
-    hysteresis: &[f32],
+    val: Val16,
+    thresholds: &[Val16],
+    hysteresis: &[Val16],
     n: i32,
     prev: i32,
 ) -> i32 {
@@ -646,8 +728,8 @@ pub fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
 pub fn compute_band_energies(
     fs: i32,
     qext: bool,
-    x: &[f32],
-    band_e: &mut [f32],
+    x: &[Sig],
+    band_e: &mut [Ener],
     end: i32,
     c: i32,
     lm: i32,
@@ -670,9 +752,9 @@ pub fn compute_band_energies(
 pub fn normalise_bands(
     fs: i32,
     qext: bool,
-    freq: &[f32],
-    x: &mut [f32],
-    band_e: &[f32],
+    freq: &[Sig],
+    x: &mut [Norm],
+    band_e: &[Ener],
     end: i32,
     c: i32,
     m: i32,
@@ -697,9 +779,9 @@ pub fn normalise_bands(
 pub fn denormalise_bands(
     fs: i32,
     qext: bool,
-    x: &[f32],
-    freq: &mut [f32],
-    band_log_e: &[f32],
+    x: &[Norm],
+    freq: &mut [Sig],
+    band_log_e: &[Glog],
     start: i32,
     end: i32,
     m: i32,
@@ -727,16 +809,16 @@ pub fn denormalise_bands(
 pub fn anti_collapse(
     fs: i32,
     qext: bool,
-    x: &mut [f32],
+    x: &mut [Norm],
     cm: &mut [u8],
     lm: i32,
     c: i32,
     size: i32,
     start: i32,
     end: i32,
-    log_e: &[f32],
-    prev1: &[f32],
-    prev2: &[f32],
+    log_e: &[Glog],
+    prev1: &[Glog],
+    prev2: &[Glog],
     pulses: &[i32],
     seed: u32,
     encode: bool,
@@ -767,7 +849,7 @@ pub fn anti_collapse(
 /// `spreading_decision`; `io = [average, hf_average, tapset_decision]` (in/out).
 pub fn spreading_decision(
     fs: i32,
-    x: &[f32],
+    x: &[Norm],
     io: &mut [i32; 3],
     last_decision: i32,
     update_hf: bool,
@@ -793,7 +875,7 @@ pub fn spreading_decision(
 }
 
 /// `haar1`.
-pub fn haar1(x: &mut [f32], n0: i32, stride: i32) {
+pub fn haar1(x: &mut [Norm], n0: i32, stride: i32) {
     assert!(x.len() >= (n0 * stride) as usize);
     // SAFETY: length checked.
     unsafe { oracle_haar1(x.as_mut_ptr(), n0, stride) }
@@ -806,43 +888,50 @@ pub fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> 
 }
 
 /// `compute_channel_weights` (static).
-pub fn compute_channel_weights(ex: f32, ey: f32) -> [f32; 2] {
-    let mut w = [0.0f32; 2];
+pub fn compute_channel_weights(ex: Ener, ey: Ener) -> [Val16; 2] {
+    let mut w = [Val16::default(); 2];
     // SAFETY: w has 2 elements.
     unsafe { oracle_compute_channel_weights(ex, ey, w.as_mut_ptr()) };
     w
 }
 
 /// `intensity_stereo` (static).
-pub fn intensity_stereo(fs: i32, x: &mut [f32], y: &[f32], band_e: &[f32], band_id: i32, n: i32) {
+pub fn intensity_stereo(
+    fs: i32,
+    x: &mut [Norm],
+    y: &[Norm],
+    band_e: &[Ener],
+    band_id: i32,
+    n: i32,
+) {
     assert!(x.len() >= n as usize && y.len() >= n as usize && band_e.len() >= 42);
     // SAFETY: lengths checked.
     unsafe { oracle_intensity_stereo(fs, x.as_mut_ptr(), y.as_ptr(), band_e.as_ptr(), band_id, n) }
 }
 
 /// `stereo_split` (static).
-pub fn stereo_split(x: &mut [f32], y: &mut [f32], n: i32) {
+pub fn stereo_split(x: &mut [Norm], y: &mut [Norm], n: i32) {
     assert!(x.len() >= n as usize && y.len() >= n as usize);
     // SAFETY: lengths checked.
     unsafe { oracle_stereo_split(x.as_mut_ptr(), y.as_mut_ptr(), n) }
 }
 
 /// `stereo_merge` (static).
-pub fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: i32) {
+pub fn stereo_merge(x: &mut [Norm], y: &mut [Norm], mid: Val32, n: i32) {
     assert!(x.len() >= n as usize && y.len() >= n as usize);
     // SAFETY: lengths checked.
     unsafe { oracle_stereo_merge(x.as_mut_ptr(), y.as_mut_ptr(), mid, n) }
 }
 
 /// `deinterleave_hadamard` (static).
-pub fn deinterleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) {
+pub fn deinterleave_hadamard(x: &mut [Norm], n0: i32, stride: i32, hadamard: bool) {
     assert!(x.len() >= (n0 * stride) as usize);
     // SAFETY: length checked.
     unsafe { oracle_deinterleave_hadamard(x.as_mut_ptr(), n0, stride, i32::from(hadamard)) }
 }
 
 /// `interleave_hadamard` (static).
-pub fn interleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) {
+pub fn interleave_hadamard(x: &mut [Norm], n0: i32, stride: i32, hadamard: bool) {
     assert!(x.len() >= (n0 * stride) as usize);
     // SAFETY: length checked.
     unsafe { oracle_interleave_hadamard(x.as_mut_ptr(), n0, stride, i32::from(hadamard)) }
@@ -920,9 +1009,9 @@ impl QabParams {
 /// rng, ext error, tell_frac before quant_all_bands]`.
 pub fn quant_all_bands(
     p: &QabParams,
-    x: &mut [f32],
+    x: &mut [Norm],
     collapse_masks: &mut [u8],
-    band_e: &[f32],
+    band_e: &[Ener],
     pulses: &mut [i32],
     tf_res: &[i32],
     offsets: &[i32],
@@ -966,8 +1055,8 @@ pub fn quant_all_bands(
 // ---------------------------------------------------------------------------------------------
 
 /// `eMeans`.
-pub fn e_means() -> [f32; 25] {
-    let mut out = [0.0f32; 25];
+pub fn e_means() -> [EMean; 25] {
+    let mut out = [EMean::default(); 25];
     // SAFETY: out has 25 elements.
     unsafe { oracle_emeans(out.as_mut_ptr()) };
     out
@@ -979,8 +1068,8 @@ pub fn amp2log2(
     qext: bool,
     eff_end: i32,
     end: i32,
-    band_e: &mut [f32],
-    band_log_e: &mut [f32],
+    band_e: &mut [Ener],
+    band_log_e: &mut [Glog],
     c: i32,
 ) {
     assert!(band_e.len() >= 21 * c as usize && band_log_e.len() >= 21 * c as usize);
@@ -1025,11 +1114,11 @@ pub struct EnergyParams {
 /// rng, error]`.
 pub fn quant_energy(
     p: &EnergyParams,
-    e_bands: &[f32],
-    old_e_bands: &mut [f32],
-    error: &mut [f32],
+    e_bands: &[Glog],
+    old_e_bands: &mut [Glog],
+    error: &mut [Glog],
     buf: &mut [u8],
-    delayed_intra: &mut f32,
+    delayed_intra: &mut Val32,
     fine_quant: &mut [i32],
     prev_quant: Option<&mut [i32]>,
     fine_priority: &mut [i32],
@@ -1094,7 +1183,7 @@ pub fn unquant_energy(
     intra: i32,
     prefix_ft: i32,
     null_old: bool,
-    old_e_bands: &mut [f32],
+    old_e_bands: &mut [Glog],
     buf: &mut [u8],
     fine_quant: &mut [i32],
     prev_quant: Option<&mut [i32]>,
@@ -1138,13 +1227,13 @@ pub fn unquant_energy(
 
 /// `loss_distortion` (static).
 pub fn loss_distortion(
-    e_bands: &[f32],
-    old_e_bands: &mut [f32],
+    e_bands: &[Glog],
+    old_e_bands: &mut [Glog],
     start: i32,
     end: i32,
     len: i32,
     c: i32,
-) -> f32 {
+) -> Val32 {
     assert!(e_bands.len() >= (len * c) as usize && old_e_bands.len() >= (len * c) as usize);
     // SAFETY: lengths checked.
     unsafe {

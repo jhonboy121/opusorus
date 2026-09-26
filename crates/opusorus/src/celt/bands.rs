@@ -2,8 +2,8 @@
 //! shape (PVQ) quantisation driver `quant_all_bands` with its recursive band splitting, stereo
 //! coupling and spectral folding, anti-collapse and spreading decisions.
 //!
-//! Float build. Only the portable C paths are ported (no `MEASURE_NORM_MSE`, no `FUZZING`
-//! random decisions, `DISABLE_UPDATE_DRAFT` is not defined upstream so the "update draft"
+//! Float and fixed-point builds (`#ifdef FIXED_POINT` → `feature = "fixed-point"`). Only the
+//! portable C paths are ported (no `MEASURE_NORM_MSE`, no `FUZZING` random decisions, `DISABLE_UPDATE_DRAFT` is not defined upstream so the "update draft"
 //! folding is the one ported, `RESYNTH` is not defined).
 //!
 //! # Buffer aliasing
@@ -44,19 +44,31 @@ use alloc::vec::Vec;
 #[cfg(not(feature = "qext"))]
 use core::marker::PhantomData;
 
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::mac16_16;
 use crate::celt::arch::{
-    CeltEner, CeltGlog, CeltNorm, CeltSig, EPSILON, NORM_SCALING, OpusVal16, OpusVal32, Q31ONE,
-    add32, div32_16, extend32, half32, imax, imin, mac16_16, max32, maxg, min16, min32, ming,
-    mult16_16, mult16_16_q15, mult16_32_q15, mult32_32_q31, qconst16, qconst32, shl32, shr32,
-    sub32, vshr32,
+    CeltEner, CeltGlog, CeltNorm, CeltSig, DB_SHIFT, EPSILON, NORM_SCALING, OpusVal16, OpusVal32,
+    Q31ONE, add32, div32_16, extend32, extract16, half32, imax, imin, max32, maxg, min16, min32,
+    ming, mult16_16, mult16_16_q15, mult16_32_q15, mult32_32_q31, pshr32, shl32, shr32, sub32,
+    vshr32,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{NORM_SHIFT, mult16_16_q14, shl16, shr16};
 use crate::celt::entcode::{BITRES, EcCoder, celt_sudiv, celt_udiv, ec_ilog};
 use crate::celt::entenc::EcEncSnapshot;
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 use crate::celt::mathops::celt_cos_norm2;
+#[cfg(all(feature = "qext", feature = "fixed-point"))]
+use crate::celt::mathops::celt_cos_norm32;
+use crate::celt::mathops::{celt_exp2, celt_rsqrt_norm32, celt_sqrt, frac_mul16, isqrt32};
+#[cfg(feature = "fixed-point")]
 use crate::celt::mathops::{
-    celt_exp2, celt_exp2_db, celt_rsqrt, celt_rsqrt_norm32, celt_sqrt, frac_mul16, isqrt32,
+    celt_exp2_db, celt_exp2_db_frac, celt_ilog2, celt_maxabs32, celt_rcp_norm32, celt_rsqrt_norm,
+    celt_sqrt32, celt_zlog2,
 };
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::mathops::{celt_exp2_db, celt_rsqrt};
+#[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::celt_inner_prod;
 use crate::celt::quant_bands::E_MEANS;
 use crate::celt::rate::{
@@ -64,7 +76,8 @@ use crate::celt::rate::{
 };
 use crate::celt::static_modes::CeltMode;
 use crate::celt::vq::{
-    MAX_BAND_SIZE, Scratch, alg_quant, alg_unquant, renormalise_vector, stereo_itheta,
+    MAX_BAND_SIZE, Scratch, alg_quant, alg_unquant, celt_inner_prod_norm_shift, qc16, qc32,
+    renormalise_vector, stereo_itheta, v32,
 };
 #[cfg(feature = "qext")]
 use crate::celt::vq::{cubic_quant, cubic_unquant};
@@ -79,7 +92,15 @@ pub const SPREAD_NORMAL: i32 = 2;
 pub const SPREAD_AGGRESSIVE: i32 = 3;
 
 /// `MIN_STEREO_ENERGY` (float build).
-const MIN_STEREO_ENERGY: f32 = 1e-10;
+#[cfg(not(feature = "fixed-point"))]
+const MIN_STEREO_ENERGY: CeltEner = 1e-10;
+/// `MIN_STEREO_ENERGY` (fixed-point build).
+#[cfg(feature = "fixed-point")]
+const MIN_STEREO_ENERGY: CeltEner = 2;
+
+/// `NORM_SHIFT` (celt/arch.h); the shifts it appears in are no-ops in the float build.
+#[cfg(not(feature = "fixed-point"))]
+const NORM_SHIFT: i32 = 24;
 
 /// Port of celt/bands.c:hysteresis_decision.
 #[must_use]
@@ -98,10 +119,11 @@ pub fn hysteresis_decision(
         i += 1;
     }
     let p = prev as usize;
-    if i > prev && val < thresholds[p] + hysteresis[p] {
+    // C: `opus_val16` sums are computed in `int` in the fixed-point build.
+    if i > prev && extend32(val) < add32(thresholds[p], hysteresis[p]) {
         i = prev;
     }
-    if i < prev && val > thresholds[p - 1] - hysteresis[p - 1] {
+    if i < prev && extend32(val) > sub32(thresholds[p - 1], hysteresis[p - 1]) {
         i = prev;
     }
     i
@@ -140,8 +162,48 @@ pub const fn bitexact_log2tan(mut isin: i32, mut icos: i32) -> i32 {
         - frac_mul16(icos, frac_mul16(icos, -2597) + 7932)
 }
 
+/// Port of celt/bands.c:compute_band_energies (fixed-point build): the amplitude (sqrt energy)
+/// of each band `0..end` of each channel.
+#[cfg(feature = "fixed-point")]
+pub fn compute_band_energies(
+    m: &CeltMode,
+    x: &[CeltSig],
+    band_e: &mut [CeltEner],
+    end: i32,
+    c: i32,
+    lm: i32,
+) {
+    let e_bands = &m.e_bands;
+    let n = m.short_mdct_size << lm;
+    for ch in 0..c {
+        for i in 0..end {
+            let iu = i as usize;
+            let lo = (ch * n + (i32::from(e_bands[iu]) << lm)) as usize;
+            let len = ((i32::from(e_bands[iu + 1]) - i32::from(e_bands[iu])) << lm) as usize;
+            let xs = &x[lo..lo + len];
+            let maxval: OpusVal32 = celt_maxabs32(xs);
+            band_e[(i + ch * m.nb_ebands) as usize] = if maxval > 0 {
+                let shift = imax(
+                    0,
+                    30 - celt_ilog2(maxval + (maxval >> 14) + 1)
+                        - ((((i32::from(m.log_n[iu]) + 7) >> BITRES) + lm + 1) >> 1),
+                );
+                let mut sum: OpusVal32 = 0;
+                for &v in xs {
+                    let xv: OpusVal32 = shl32(v, shift);
+                    sum = add32(sum, mult32_32_q31(xv, xv));
+                }
+                max32(maxval, pshr32(celt_sqrt32(shr32(sum, 1)), shift))
+            } else {
+                EPSILON
+            };
+        }
+    }
+}
+
 /// Port of celt/bands.c:compute_band_energies (float build): the amplitude (sqrt energy) of
 /// each band `0..end` of each channel.
+#[cfg(not(feature = "fixed-point"))]
 pub fn compute_band_energies(
     m: &CeltMode,
     x: &[CeltSig],
@@ -185,8 +247,44 @@ pub fn compute_band_energies(
     }
 }
 
+/// Port of celt/bands.c:normalise_bands (fixed-point build): normalises each band such that the
+/// energy is one.
+#[cfg(feature = "fixed-point")]
+pub fn normalise_bands(
+    m: &CeltMode,
+    freq: &[CeltSig],
+    x: &mut [CeltNorm],
+    band_e: &[CeltEner],
+    end: i32,
+    c: i32,
+    mm: i32,
+) {
+    let e_bands = &m.e_bands;
+    let n = mm * m.short_mdct_size;
+    for ch in 0..c {
+        for i in 0..end {
+            let iu = i as usize;
+            let mut e: OpusVal32 = band_e[(i + ch * m.nb_ebands) as usize];
+            // For very low energies, we need this to make sure not to prevent energy rounding
+            // from blowing up the normalized signal.
+            if e < 10 {
+                e += EPSILON;
+            }
+            let shift = 30 - celt_zlog2(e);
+            e = shl32(e, shift);
+            let g: OpusVal32 = celt_rcp_norm32(e);
+            let lo = (mm * i32::from(e_bands[iu]) + ch * n) as usize;
+            let hi = (mm * i32::from(e_bands[iu + 1]) + ch * n) as usize;
+            for j in lo..hi {
+                x[j] = pshr32(mult32_32_q31(g, shl32(freq[j], shift)), 30 - NORM_SHIFT);
+            }
+        }
+    }
+}
+
 /// Port of celt/bands.c:normalise_bands (float build): normalises each band such that the
 /// energy is one.
+#[cfg(not(feature = "fixed-point"))]
 pub fn normalise_bands(
     m: &CeltMode,
     freq: &[CeltSig],
@@ -240,7 +338,7 @@ pub fn denormalise_bands(
     let mut xi: usize = (mm * eb(start)) as usize;
     if start != 0 {
         for _ in 0..mm * eb(start) {
-            freq[f] = 0.0;
+            freq[f] = CeltSig::default();
             f += 1;
         }
     } else {
@@ -248,12 +346,37 @@ pub fn denormalise_bands(
     }
     for i in start..end {
         let band_end = mm * eb(i + 1);
-        let lg: CeltGlog = add32(band_log_e[i as usize], shl32(E_MEANS[i as usize], 24 - 4));
-        let g: OpusVal32 = celt_exp2_db(min32(32.0, lg));
-        // FIXED_POINT: integer/fractional split not ported (float build).
+        let lg: CeltGlog = add32(
+            band_log_e[i as usize],
+            shl32(E_MEANS[i as usize], DB_SHIFT - 4),
+        );
+        #[cfg(not(feature = "fixed-point"))]
+        let (g, shift): (OpusVal32, i32) = (celt_exp2_db(min32(32.0, lg)), 0);
+        #[cfg(feature = "fixed-point")]
+        let (g, shift): (OpusVal32, i32) = {
+            // Handle the integer part of the log energy
+            let mut shift = 17 - (lg >> DB_SHIFT);
+            let mut g: OpusVal32;
+            if shift >= 31 {
+                shift = 0;
+                g = 0;
+            } else {
+                // Handle the fractional part.
+                g = shl32(celt_exp2_db_frac(lg & ((1 << DB_SHIFT) - 1)), 2);
+            }
+            // Handle extreme gains with negative shift.
+            if shift < 0 {
+                // To avoid overflow, we're capping the gain here, which is equivalent to a cap
+                // of 18 on lg. This shouldn't trigger unless the bitstream is already
+                // corrupted.
+                g = 2147483647;
+                shift = 0;
+            }
+            (g, shift)
+        };
         let mut j = mm * eb(i);
         loop {
-            freq[f] = mult32_32_q31(shl32(x[xi], 0), g);
+            freq[f] = pshr32(mult32_32_q31(shl32(x[xi], 30 - NORM_SHIFT), g), shift);
             f += 1;
             xi += 1;
             j += 1;
@@ -263,7 +386,7 @@ pub fn denormalise_bands(
         }
     }
     debug_assert!(start <= end);
-    freq[bound as usize..n as usize].fill(0.0);
+    freq[bound as usize..n as usize].fill(CeltSig::default());
 }
 
 /// Port of celt/bands.c:anti_collapse: prevents energy collapse for transients with multiple
@@ -293,9 +416,24 @@ pub fn anti_collapse(
         debug_assert!(pulses[iu] >= 0);
         let depth: i32 = (celt_udiv((1 + pulses[iu]) as u32, n0 as u32) >> lm) as i32;
 
-        // FIXED_POINT: not ported (float build).
-        let thresh: OpusVal16 = 0.5f32 * celt_exp2(-0.125f32 * depth as f32);
-        let sqrt_1: OpusVal16 = celt_rsqrt((n0 << lm) as f32);
+        #[cfg(feature = "fixed-point")]
+        let (thresh, sqrt_1, shift): (OpusVal16, OpusVal16, i32) = {
+            // C: `-SHL16(...)` is an `int` passed to an `opus_val16` parameter.
+            let thresh32: OpusVal32 = shr32(
+                celt_exp2(extract16(-i32::from(shl16(depth, 10 - BITRES)))),
+                1,
+            );
+            let thresh: OpusVal16 = extract16(mult16_32_q15(qc16(0.5, 15), min32(32767, thresh32)));
+            let mut t: OpusVal32 = n0 << lm;
+            let shift = celt_ilog2(t) >> 1;
+            t = shl32(t, (7 - shift) << 1);
+            (thresh, celt_rsqrt_norm(t), shift)
+        };
+        #[cfg(not(feature = "fixed-point"))]
+        let (thresh, sqrt_1): (OpusVal16, OpusVal16) = (
+            0.5f32 * celt_exp2(-0.125f32 * depth as f32),
+            celt_rsqrt((n0 << lm) as f32),
+        );
 
         for ch in 0..c {
             let mut renormalize = false;
@@ -306,16 +444,33 @@ pub fn anti_collapse(
                 prev2 = maxg(prev2, prev2log_e[(nb + i) as usize]);
             }
             let mut ediff: OpusVal32 = log_e[(ch * nb + i) as usize] - ming(prev1, prev2);
-            ediff = max32(0.0, ediff);
+            ediff = max32(OpusVal32::default(), ediff);
 
+            #[cfg(feature = "fixed-point")]
+            let r: CeltNorm = {
+                let mut r: CeltNorm = if ediff < crate::celt::arch::gconst(16.0) {
+                    let r32: OpusVal32 = shr32(celt_exp2_db(-ediff), 1);
+                    2 * min16(16383, r32)
+                } else {
+                    0
+                };
+                if lm == 3 {
+                    r = mult16_16_q14(23170, min32(23169, r));
+                }
+                r = shr16(min16(extend32(thresh), r), 1);
+                vshr32(mult16_16_q15(sqrt_1, r), shift + 14 - NORM_SHIFT)
+            };
             // r needs to be multiplied by 2 or 2*sqrt(2) depending on LM because short blocks
             // don't have the same energy as long
-            let mut r: CeltNorm = 2.0f32 * celt_exp2_db(-ediff);
-            if lm == 3 {
-                r *= 1.41421356f32;
-            }
-            r = min16(thresh, r);
-            r *= sqrt_1;
+            #[cfg(not(feature = "fixed-point"))]
+            let r: CeltNorm = {
+                let mut r: CeltNorm = 2.0f32 * celt_exp2_db(-ediff);
+                if lm == 3 {
+                    r *= 1.41421356f32;
+                }
+                r = min16(thresh, r);
+                r * sqrt_1
+            };
             let xoff = (ch * size + (i32::from(m.e_bands[iu]) << lm)) as usize;
             let x = &mut x_[xoff..];
             for k in 0..(1 << lm) {
@@ -343,10 +498,13 @@ pub fn anti_collapse(
 pub fn compute_channel_weights(mut ex: CeltEner, mut ey: CeltEner) -> [OpusVal16; 2] {
     let min_e: CeltEner = min32(ex, ey);
     // Adjustment to make the weights a bit more conservative.
-    ex = add32(ex, min_e / 3.0);
-    ey = add32(ey, min_e / 3.0);
-    // FIXED_POINT: shift not ported (float build).
-    [vshr32(ex, 0), vshr32(ey, 0)]
+    ex = add32(ex, min_e / v32(3));
+    ey = add32(ey, min_e / v32(3));
+    #[cfg(feature = "fixed-point")]
+    let shift: i32 = celt_ilog2(EPSILON + max32(ex, ey)) - 14;
+    #[cfg(not(feature = "fixed-point"))]
+    let shift: i32 = 0;
+    [extract16(vshr32(ex, shift)), extract16(vshr32(ey, shift))]
 }
 
 /// Port of celt/bands.c:intensity_stereo: `X = a1*X + a2*Y` (side is not coded).
@@ -359,11 +517,22 @@ pub fn intensity_stereo(
     n: i32,
 ) {
     let i = band_id as usize;
-    // FIXED_POINT: shift not ported (float build).
-    let left: OpusVal16 = vshr32(band_e[i], 0);
-    let right: OpusVal16 = vshr32(band_e[i + m.nb_ebands as usize], 0);
+    let nb = m.nb_ebands as usize;
+    #[cfg(feature = "fixed-point")]
+    let shift: i32 = celt_zlog2(max32(band_e[i], band_e[i + nb])) - 13;
+    #[cfg(not(feature = "fixed-point"))]
+    let shift: i32 = 0;
+    #[allow(unused_mut, reason = "only clamped in the fixed-point build")]
+    let mut left: OpusVal16 = extract16(vshr32(band_e[i], shift));
+    #[allow(unused_mut, reason = "only clamped in the fixed-point build")]
+    let mut right: OpusVal16 = extract16(vshr32(band_e[i + nb], shift));
     let norm: OpusVal16 =
-        EPSILON + celt_sqrt(EPSILON + mult16_16(left, left) + mult16_16(right, right));
+        extract16(EPSILON + celt_sqrt(EPSILON + mult16_16(left, left) + mult16_16(right, right)));
+    #[cfg(feature = "fixed-point")]
+    {
+        left = extract16(min32(i32::from(left), i32::from(norm) - 1));
+        right = extract16(min32(i32::from(right), i32::from(norm) - 1));
+    }
     let a1: OpusVal16 = div32_16(shl32(extend32(left), 15), norm);
     let a2: OpusVal16 = div32_16(shl32(extend32(right), 15), norm);
     let n = n as usize;
@@ -377,8 +546,8 @@ pub fn intensity_stereo(
 pub fn stereo_split(x: &mut [CeltNorm], y: &mut [CeltNorm], n: i32) {
     let n = n as usize;
     for j in 0..n {
-        let l: OpusVal32 = mult32_32_q31(qconst32(0.70710678, 31), x[j]);
-        let r: OpusVal32 = mult32_32_q31(qconst32(0.70710678, 31), y[j]);
+        let l: OpusVal32 = mult32_32_q31(qc32(0.70710678, 31), x[j]);
+        let r: OpusVal32 = mult32_32_q31(qc32(0.70710678, 31), y[j]);
         x[j] = add32(l, r);
         y[j] = sub32(r, l);
     }
@@ -388,30 +557,44 @@ pub fn stereo_split(x: &mut [CeltNorm], y: &mut [CeltNorm], n: i32) {
 pub fn stereo_merge(x: &mut [CeltNorm], y: &mut [CeltNorm], mid: OpusVal32, n: i32) {
     let nu = n as usize;
     // Compute the norm of X+Y and X-Y as |X|^2 + |Y|^2 +/- sum(xy)
-    let mut xp: OpusVal32 = celt_inner_prod(y, x, nu);
-    let side: OpusVal32 = celt_inner_prod(y, y, nu);
+    let mut xp: OpusVal32 = celt_inner_prod_norm_shift(y, x, nu);
+    let side: OpusVal32 = celt_inner_prod_norm_shift(y, y, nu);
     // Compensating for the mid normalization
     xp = mult32_32_q31(mid, xp);
     // mid and side are in Q15, not Q14 like X and Y
-    let el: OpusVal32 = shr32(mult32_32_q31(mid, mid), 3) + side - 2.0 * xp;
-    let er: OpusVal32 = shr32(mult32_32_q31(mid, mid), 3) + side + 2.0 * xp;
-    if er < qconst32(6e-4, 28) || el < qconst32(6e-4, 28) {
+    let el: OpusVal32 = shr32(mult32_32_q31(mid, mid), 3) + side - v32(2) * xp;
+    let er: OpusVal32 = shr32(mult32_32_q31(mid, mid), 3) + side + v32(2) * xp;
+    if er < qc32(6e-4, 28) || el < qc32(6e-4, 28) {
         y[..nu].copy_from_slice(&x[..nu]);
         return;
     }
 
-    // FIXED_POINT: kl/kr not ported (float build).
-    let t: OpusVal32 = vshr32(el, 0);
+    #[cfg(feature = "fixed-point")]
+    let (mut kl, mut kr): (i32, i32) = (celt_ilog2(el) >> 1, celt_ilog2(er) >> 1);
+    // C: `kl`/`kr` only appear in shifts, which are no-ops in the float build.
+    #[cfg(not(feature = "fixed-point"))]
+    let (kl, kr): (i32, i32) = (0, 0);
+    let t: OpusVal32 = vshr32(el, (kl << 1) - 29);
     let lgain: OpusVal32 = celt_rsqrt_norm32(t);
-    let t: OpusVal32 = vshr32(er, 0);
+    let t: OpusVal32 = vshr32(er, (kr << 1) - 29);
     let rgain: OpusVal32 = celt_rsqrt_norm32(t);
+
+    #[cfg(feature = "fixed-point")]
+    {
+        if kl < 7 {
+            kl = 7;
+        }
+        if kr < 7 {
+            kr = 7;
+        }
+    }
 
     for j in 0..nu {
         // Apply mid scaling (side is already scaled)
         let l: CeltNorm = mult32_32_q31(mid, x[j]);
         let r: CeltNorm = y[j];
-        x[j] = vshr32(mult32_32_q31(lgain, sub32(l, r)), 0);
-        y[j] = vshr32(mult32_32_q31(rgain, add32(l, r)), 0);
+        x[j] = vshr32(mult32_32_q31(lgain, sub32(l, r)), kl - 15);
+        y[j] = vshr32(mult32_32_q31(rgain, add32(l, r)), kr - 15);
     }
 }
 
@@ -455,14 +638,17 @@ pub fn spreading_decision(
             // Compute rough CDF of |x[j]|
             for &xj in xs {
                 // Q13
-                let x2n: OpusVal32 = mult16_16(mult16_16_q15(shr32(xj, 0), shr32(xj, 0)), n as f32);
-                if x2n < qconst16(0.25, 13) {
+                let x2n: OpusVal32 = mult16_16(
+                    mult16_16_q15(shr32(xj, NORM_SHIFT - 14), shr32(xj, NORM_SHIFT - 14)),
+                    v32(n),
+                );
+                if x2n < extend32(qc16(0.25, 13)) {
                     tcount[0] += 1;
                 }
-                if x2n < qconst16(0.0625, 13) {
+                if x2n < extend32(qc16(0.0625, 13)) {
                     tcount[1] += 1;
                 }
-                if x2n < qconst16(0.015625, 13) {
+                if x2n < extend32(qc16(0.015625, 13)) {
                     tcount[2] += 1;
                 }
             }
@@ -584,8 +770,8 @@ pub fn haar1(x: &mut [CeltNorm], n0: i32, stride: i32) {
         for j in 0..n0 {
             let a = stride * 2 * j + i;
             let b = stride * (2 * j + 1) + i;
-            let tmp1: OpusVal32 = mult32_32_q31(qconst32(0.70710678, 31), x[a]);
-            let tmp2: OpusVal32 = mult32_32_q31(qconst32(0.70710678, 31), x[b]);
+            let tmp1: OpusVal32 = mult32_32_q31(qc32(0.70710678, 31), x[a]);
+            let tmp2: OpusVal32 = mult32_32_q31(qc32(0.70710678, 31), x[b]);
             x[a] = add32(tmp1, tmp2);
             x[b] = sub32(tmp1, tmp2);
         }
@@ -1033,6 +1219,43 @@ fn compute_theta(
     }
 }
 
+/// The mid and side gains of a split (`mid`, `side` of quant_partition / quant_band_stereo):
+/// from `imid`/`iside` (Q15, scaled to Q31 in the fixed-point build), or from `itheta_q30` with
+/// QEXT.
+#[cfg(not(feature = "qext"))]
+#[inline]
+fn split_gains(sctx: &SplitCtx) -> (OpusVal32, OpusVal32) {
+    #[cfg(feature = "fixed-point")]
+    let g = (
+        shl32(extend32(sctx.imid), 16),
+        shl32(extend32(sctx.iside), 16),
+    );
+    #[cfg(not(feature = "fixed-point"))]
+    let g = (
+        (1.0f32 / 32768.0) * sctx.imid as f32,
+        (1.0f32 / 32768.0) * sctx.iside as f32,
+    );
+    g
+}
+/// The mid and side gains of a split (`mid`, `side` of quant_partition / quant_band_stereo):
+/// from `itheta_q30` with QEXT (`imid`/`iside` are unused).
+#[cfg(feature = "qext")]
+#[inline]
+fn split_gains(sctx: &SplitCtx) -> (OpusVal32, OpusVal32) {
+    let _ = (sctx.imid, sctx.iside);
+    #[cfg(feature = "fixed-point")]
+    let g = (
+        celt_cos_norm32(sctx.itheta_q30),
+        celt_cos_norm32((1 << 30) - sctx.itheta_q30),
+    );
+    #[cfg(not(feature = "fixed-point"))]
+    let g = (
+        celt_cos_norm2(sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
+        celt_cos_norm2(1.0f32 - sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
+    );
+    g
+}
+
 /// Port of celt/bands.c:quant_band_n1: the special case for one-sample bands (just a sign per
 /// channel).
 fn quant_band_n1(
@@ -1046,7 +1269,7 @@ fn quant_band_n1(
         if ctx.remaining_bits >= 1 << BITRES {
             match &mut ctx.ec {
                 EcCoder::Enc(e) => {
-                    sign = xs[0] < 0.0;
+                    sign = xs[0] < CeltNorm::default();
                     e.enc_bits(u32::from(sign), 1);
                 }
                 EcCoder::Dec(d) => {
@@ -1118,20 +1341,7 @@ fn quant_partition(
         let mut delta = sctx.delta;
         let itheta = sctx.itheta;
         let qalloc = sctx.qalloc;
-        #[cfg(not(feature = "qext"))]
-        let (mid, side): (OpusVal32, OpusVal32) = (
-            (1.0f32 / 32768.0) * sctx.imid as f32,
-            (1.0f32 / 32768.0) * sctx.iside as f32,
-        );
-        #[cfg(feature = "qext")]
-        let (mid, side): (OpusVal32, OpusVal32) = {
-            let _ = (sctx.imid, sctx.iside);
-            (
-                celt_cos_norm2(sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
-                celt_cos_norm2(1.0f32 - sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
-            )
-        };
-        // FIXED_POINT: not ported (float build).
+        let (mid, side) = split_gains(&sctx);
 
         // Give more bits to low-energy MDCTs than they would otherwise deserve
         if blk0 > 1 && (itheta & 0x3fff) != 0 {
@@ -1297,14 +1507,14 @@ fn quant_partition(
                 let cm_mask: u32 = ((1u64 << blk) as u32).wrapping_sub(1);
                 fill = (fill as u32 & cm_mask) as i32;
                 if fill == 0 {
-                    x.fill(0.0);
+                    x.fill(CeltNorm::default());
                 } else {
                     match lowband {
                         None => {
                             // Noise
                             for v in x.iter_mut() {
                                 ctx.seed = celt_lcg_rand(ctx.seed);
-                                *v = shl32(((ctx.seed as i32) >> 20) as CeltNorm, 0);
+                                *v = shl32(v32((ctx.seed as i32) >> 20), NORM_SHIFT - 14);
                             }
                             cm = cm_mask;
                         }
@@ -1313,9 +1523,9 @@ fn quant_partition(
                             for (v, &l) in x.iter_mut().zip(lowband) {
                                 ctx.seed = celt_lcg_rand(ctx.seed);
                                 // About 48 dB below the "normal" folding level
-                                let mut tmp: OpusVal16 = qconst16(1.0f32 / 256.0, 10);
+                                let mut tmp: OpusVal16 = qc16(1.0f32 / 256.0, NORM_SHIFT - 4);
                                 tmp = if ctx.seed & 0x8000 != 0 { tmp } else { -tmp };
-                                *v = l + tmp;
+                                *v = l + extend32(tmp);
                             }
                             cm = fill as u32;
                         }
@@ -1389,10 +1599,16 @@ fn cubic_quant_partition(
         b -= theta_res << BITRES;
         let delta = (n0 - 1) * 23 * ((itheta_q30 >> 16) - 8192) >> (17 - BITRES);
 
-        // FIXED_POINT: not ported (float build).
-        let g1: OpusVal32 = celt_cos_norm2(itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32));
-        let g2: OpusVal32 =
-            celt_cos_norm2(1.0f32 - itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32));
+        #[cfg(feature = "fixed-point")]
+        let (g1, g2): (OpusVal32, OpusVal32) = (
+            celt_cos_norm32(itheta_q30),
+            celt_cos_norm32((1 << 30) - itheta_q30),
+        );
+        #[cfg(not(feature = "fixed-point"))]
+        let (g1, g2): (OpusVal32, OpusVal32) = (
+            celt_cos_norm2(itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
+            celt_cos_norm2(1.0f32 - itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
+        );
         let (b1, b2) = if itheta_q30 == 0 {
             (b, 0)
         } else if itheta_q30 == 1073741824 {
@@ -1589,7 +1805,7 @@ fn quant_band(
 
         // Scale output for later folding
         if let Some(lo) = lowband_out {
-            let nn: OpusVal16 = celt_sqrt(shl32(extend32(n0 as f32), 22));
+            let nn: OpusVal16 = extract16(celt_sqrt(shl32(extend32(v32(n0)), 22)));
             for (o, &v) in lo[..nu].iter_mut().zip(x.iter()) {
                 *o = mult16_32_q15(nn, v);
             }
@@ -1658,20 +1874,7 @@ fn quant_band_stereo(
     let delta = sctx.delta;
     let itheta = sctx.itheta;
     let qalloc = sctx.qalloc;
-    #[cfg(not(feature = "qext"))]
-    let (mid, side): (OpusVal32, OpusVal32) = (
-        (1.0f32 / 32768.0) * sctx.imid as f32,
-        (1.0f32 / 32768.0) * sctx.iside as f32,
-    );
-    #[cfg(feature = "qext")]
-    let (mid, side): (OpusVal32, OpusVal32) = {
-        let _ = (sctx.imid, sctx.iside);
-        (
-            celt_cos_norm2(sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
-            celt_cos_norm2(1.0f32 - sctx.itheta_q30 as f32 * (1.0f32 / (1i32 << 30) as f32)),
-        )
-    };
-    // FIXED_POINT: not ported (float build).
+    let (mid, side) = split_gains(&sctx);
 
     // This is a special case for N=2 that only works for stereo and takes advantage of the
     // fact that mid and side are orthogonal to encode the side with just one bit.
@@ -1697,8 +1900,10 @@ fn quant_band_stereo(
                 EcCoder::Enc(e) => {
                     // Here we only need to encode a sign for the side.
                     // FIXME: Need to increase fixed-point precision?
-                    sign =
-                        i32::from(mult32_32_q31(x2[0], y2[1]) - mult32_32_q31(x2[1], y2[0]) < 0.0);
+                    sign = i32::from(
+                        mult32_32_q31(x2[0], y2[1]) - mult32_32_q31(x2[1], y2[0])
+                            < OpusVal32::default(),
+                    );
                     e.enc_bits(sign as u32, 1);
                 }
                 EcCoder::Dec(d) => {
@@ -1730,8 +1935,8 @@ fn quant_band_stereo(
         );
         // We don't split N=2 bands, so cm is either 1 or 0 (for a fold-collapse), and there's
         // no need to worry about mixing with the other channel.
-        y2[0] = (-sign) as f32 * x2[1];
-        y2[1] = sign as f32 * x2[0];
+        y2[0] = v32(-sign) * x2[1];
+        y2[1] = v32(sign) * x2[0];
         if ctx.resynth {
             x[0] = mult32_32_q31(mid, x[0]);
             x[1] = mult32_32_q31(mid, x[1]);
@@ -1946,7 +2151,7 @@ impl BandsScratch {
 /// Grows `v` to at least `n` elements.
 fn ensure_len(v: &mut Vec<CeltNorm>, n: usize) {
     if v.len() < n {
-        v.resize(n, 0.0);
+        v.resize(n, CeltNorm::default());
     }
 }
 
@@ -2420,8 +2625,9 @@ pub fn quant_all_bands(
                             )
                         },
                     );
-                    let dist0: OpusVal32 = mult16_32_q15(w[0], celt_inner_prod(x_save, xb, nu))
-                        + mult16_32_q15(w[1], celt_inner_prod(y_save, yb, nu));
+                    let dist0: OpusVal32 =
+                        mult16_32_q15(w[0], celt_inner_prod_norm_shift(x_save, xb, nu))
+                            + mult16_32_q15(w[1], celt_inner_prod_norm_shift(y_save, yb, nu));
 
                     // Save first result.
                     let cm2 = x_cm;
@@ -2477,8 +2683,9 @@ pub fn quant_all_bands(
                             )
                         },
                     );
-                    let dist1: OpusVal32 = mult16_32_q15(w[0], celt_inner_prod(x_save, xb, nu))
-                        + mult16_32_q15(w[1], celt_inner_prod(y_save, yb, nu));
+                    let dist1: OpusVal32 =
+                        mult16_32_q15(w[0], celt_inner_prod_norm_shift(x_save, xb, nu))
+                            + mult16_32_q15(w[1], celt_inner_prod_norm_shift(y_save, yb, nu));
                     if dist0 >= dist1 {
                         x_cm = cm2;
                         ec_restore(&mut ctx.ec, ec_save2.as_ref());

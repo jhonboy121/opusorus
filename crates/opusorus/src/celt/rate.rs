@@ -761,18 +761,9 @@ static LAST_CAP: [u8; 3] = [110, 60, 0];
 #[cfg(feature = "qext")]
 static LAST_OTHER: [u8; 4] = [120, 112, 70, 0];
 
-// `eMeans` lives in celt/quant_bands.rs (its C home).
-#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
+// `eMeans` lives in celt/quant_bands.rs (its C home; Q4 `i8` in the fixed-point build).
+#[cfg(feature = "qext")]
 use crate::celt::quant_bands::E_MEANS;
-
-/// `eMeans` of the fixed-point build (celt/quant_bands.c: Q4 `signed char`). Private copy until
-/// celt/quant_bands.rs is converted to fixed point (unit `fixed_bands`), which should then
-/// export it as `E_MEANS` so this copy can go.
-#[cfg(all(feature = "qext", feature = "fixed-point"))]
-static E_MEANS: [i8; 25] = [
-    103, 100, 92, 85, 81, 77, 72, 70, 78, 75, 73, 71, 78, 74, 69, 72, 70, 74, 76, 71, 60, 60, 60,
-    60, 60,
-];
 
 /// Port of celt/rate.c:ec_enc_depth.
 #[cfg(feature = "qext")]

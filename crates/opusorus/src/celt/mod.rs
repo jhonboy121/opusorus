@@ -5,9 +5,7 @@
 //! their unit converts them (see `docs/FIXED_POINT.md`).
 
 pub mod arch;
-#[cfg(not(feature = "fixed-point"))]
 pub mod bands;
-#[cfg(not(feature = "fixed-point"))]
 #[allow(clippy::module_inception, reason = "mirrors libopus celt/celt.c")]
 pub mod celt;
 #[cfg(not(feature = "fixed-point"))]
@@ -27,11 +25,9 @@ pub mod mdct;
 pub mod mini_kfft;
 pub mod modes;
 pub mod pitch;
-#[cfg(not(feature = "fixed-point"))]
 pub mod quant_bands;
 pub mod rate;
 pub mod static_modes;
 #[cfg(feature = "fixed-point")]
 pub mod static_modes_fixed;
-#[cfg(not(feature = "fixed-point"))]
 pub mod vq;

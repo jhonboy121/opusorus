@@ -15,9 +15,11 @@
 )]
 
 use crate::celt::arch::{
-    CeltCoef, OpusVal16, OpusVal32, add32, imax, mult_coef, mult_coef_32, mult_coef_taps, qconst16,
-    saturate,
+    COEF_ONE, CeltCoef, OpusVal16, OpusVal32, add32, imax, mult_coef, mult_coef_32, mult_coef_taps,
+    qconst16, saturate,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{SIG_SAT, sub32};
 use crate::celt::static_modes::CeltMode;
 
 /// `QEXT_EXTENSION_ID`: padding extension ID carrying the QEXT payload.
@@ -165,6 +167,24 @@ pub const fn resampling_factor(rate: i32) -> i32 {
     }
 }
 
+/// `SIG_SAT` (celt/arch.h): the saturation is a no-op in the float build.
+#[cfg(not(feature = "fixed-point"))]
+const SIG_SAT: i32 = 0;
+
+/// A `celt_coef` from the `int` result of a `MULT_COEF*` macro (implicit C conversion: the Q15
+/// `celt_coef` of the fixed-point build without QEXT truncates it to 16 bits).
+#[cfg(all(feature = "fixed-point", not(feature = "qext")))]
+#[inline(always)]
+const fn to_coef(x: i32) -> CeltCoef {
+    x as i16
+}
+/// A `celt_coef` from the result of a `MULT_COEF*` macro (same type).
+#[cfg(any(not(feature = "fixed-point"), feature = "qext"))]
+#[inline(always)]
+const fn to_coef(x: CeltCoef) -> CeltCoef {
+    x
+}
+
 /// Memory access for the comb filter: either separate input (`x`, with history before its
 /// origin) and output (`y`) buffers, or one buffer filtered in place (C `x == y`), where
 /// already-filtered output samples are read back as input.
@@ -242,8 +262,12 @@ fn comb_filter_const_c<B: CombIo>(
             + mult_coef_32(g10, x2)
             + mult_coef_32(g11, add32(x1, x3))
             + mult_coef_32(g12, add32(x0, x4));
-        // FIXED_POINT: bias not ported (float build).
-        y = saturate(y, 0);
+        // A bit of bias seems to help here.
+        #[cfg(feature = "fixed-point")]
+        {
+            y = sub32(y, 1);
+        }
+        y = saturate(y, SIG_SAT);
         io.set_y(i0 + i, y);
         x4 = x3;
         x3 = x2;
@@ -286,7 +310,7 @@ fn comb_filter_io<B: CombIo>(
     mut overlap: i32,
 ) {
     let nu = n as usize;
-    if g0 == 0.0 && g1 == 0.0 {
+    if g0 == OpusVal16::default() && g1 == OpusVal16::default() {
         // OPT: Happens to work without the OPUS_MOVE(), but only because the current encoder
         // already copies x to y
         io.copy_x_to_y(0, nu);
@@ -298,12 +322,12 @@ fn comb_filter_io<B: CombIo>(
     t1 = imax(t1, COMBFILTER_MINPERIOD);
     let gt0 = &COMB_GAINS[tapset0 as usize];
     let gt1 = &COMB_GAINS[tapset1 as usize];
-    let g00: CeltCoef = mult_coef_taps(g0, gt0[0]);
-    let g01: CeltCoef = mult_coef_taps(g0, gt0[1]);
-    let g02: CeltCoef = mult_coef_taps(g0, gt0[2]);
-    let g10: CeltCoef = mult_coef_taps(g1, gt1[0]);
-    let g11: CeltCoef = mult_coef_taps(g1, gt1[1]);
-    let g12: CeltCoef = mult_coef_taps(g1, gt1[2]);
+    let g00: CeltCoef = to_coef(mult_coef_taps(g0, gt0[0]));
+    let g01: CeltCoef = to_coef(mult_coef_taps(g0, gt0[1]));
+    let g02: CeltCoef = to_coef(mult_coef_taps(g0, gt0[2]));
+    let g10: CeltCoef = to_coef(mult_coef_taps(g1, gt1[0]));
+    let g11: CeltCoef = to_coef(mult_coef_taps(g1, gt1[1]));
+    let g12: CeltCoef = to_coef(mult_coef_taps(g1, gt1[2]));
     let (t0i, t1i) = (t0 as isize, t1 as isize);
     let mut x1 = io.x(-t1i + 1);
     let mut x2 = io.x(-t1i);
@@ -317,29 +341,33 @@ fn comb_filter_io<B: CombIo>(
     for i in 0..ov {
         let ii = i as isize;
         let x0 = io.x(ii - t1i + 2);
-        let f: CeltCoef = mult_coef(window[i], window[i]);
+        let f: CeltCoef = to_coef(mult_coef(window[i], window[i]));
         let mut y = io.x(ii)
-            + mult_coef_32(mult_coef(1.0 - f, g00), io.x(ii - t0i))
+            + mult_coef_32(mult_coef(COEF_ONE - f, g00), io.x(ii - t0i))
             + mult_coef_32(
-                mult_coef(1.0 - f, g01),
+                mult_coef(COEF_ONE - f, g01),
                 add32(io.x(ii - t0i + 1), io.x(ii - t0i - 1)),
             )
             + mult_coef_32(
-                mult_coef(1.0 - f, g02),
+                mult_coef(COEF_ONE - f, g02),
                 add32(io.x(ii - t0i + 2), io.x(ii - t0i - 2)),
             )
             + mult_coef_32(mult_coef(f, g10), x2)
             + mult_coef_32(mult_coef(f, g11), add32(x1, x3))
             + mult_coef_32(mult_coef(f, g12), add32(x0, x4));
-        // FIXED_POINT: bias not ported (float build).
-        y = saturate(y, 0);
+        // A bit of bias seems to help here.
+        #[cfg(feature = "fixed-point")]
+        {
+            y = sub32(y, 3);
+        }
+        y = saturate(y, SIG_SAT);
         io.set_y(i, y);
         x4 = x3;
         x3 = x2;
         x2 = x1;
         x1 = x0;
     }
-    if g1 == 0.0 {
+    if g1 == OpusVal16::default() {
         // OPT: Happens to work without the OPUS_MOVE(), but only because the current encoder
         // already copies x to y
         io.copy_x_to_y(ov, nu - ov);
@@ -371,7 +399,7 @@ fn comb_filter_qext(
 ) {
     use crate::celt::vq::Scratch;
     const MP: usize = COMBFILTER_MAXPERIOD as usize;
-    let mut new_window = [0.0f32; 120];
+    let mut new_window = [CeltCoef::default(); 120];
     let n2 = (n / 2) as usize;
     let overlap2 = overlap / 2;
     let mut mem_buf_s = Scratch::<OpusVal32, { MP + 960 }>::new();
@@ -559,9 +587,13 @@ pub const fn opus_strerror(error: i32) -> &'static str {
 }
 
 /// Port of celt/celt.c:opus_get_version_string. Applications may rely on the presence of a
-/// `-fixed` suffix to detect fixed-point builds; this is the float build, so there is none.
+/// `-fixed` suffix to detect fixed-point builds.
 #[must_use]
 pub const fn opus_get_version_string() -> &'static str {
     // C: "libopus " PACKAGE_VERSION (+ "-fixed" / "-fuzzing" in those builds).
-    "libopus 1.6.1"
+    #[cfg(feature = "fixed-point")]
+    let s = "libopus 1.6.1-fixed";
+    #[cfg(not(feature = "fixed-point"))]
+    let s = "libopus 1.6.1";
+    s
 }

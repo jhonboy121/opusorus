@@ -284,13 +284,11 @@ fn custom_mode_create_matches_oracle() {
         "only {created} modes created ({skipped} skipped)"
     );
     // Without an MDCT the public constructor fails for non-static modes, like an allocation
-    // failure in C. (Not available in fixed-point builds until the fixed MDCT is ported.)
-    #[cfg(not(feature = "fixed-point"))]
+    // failure in C.
     assert_eq!(
         modes::opus_custom_mode_create_custom(44100, 896).err(),
         Some(opusorus::Error::AllocFail)
     );
-    #[cfg(not(feature = "fixed-point"))]
     assert!(modes::opus_custom_mode_create_custom(48000, 480).is_ok());
 }
 

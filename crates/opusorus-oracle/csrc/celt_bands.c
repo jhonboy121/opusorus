@@ -1,8 +1,14 @@
 /* Oracle C shims for unit celt_bands: vq.c, quant_bands.c, bands.c, celt.c.
  *
+ * Compiled in the float and in the fixed-point oracle: the shims use the libopus types
+ * (celt_norm/celt_sig/celt_ener/celt_glog/opus_val16/opus_val32/celt_coef are float in the float
+ * build, integers in the fixed-point build), mirrored by the type aliases of
+ * opusorus-oracle/src/celt_bands.rs.
+ *
  * Part A calls the library's public functions. Part B includes vq.c, bands.c and
  * quant_bands.c with their external symbols renamed so their static helpers can be reached
  * (the copies are compiled with the same flags as the library). */
+// oracle-build: any
 #include <string.h>
 #include "opus_types.h"
 #include "opus_defines.h"
@@ -14,6 +20,7 @@
 #include "bands.h"
 #include "quant_bands.h"
 #include "celt.h"
+#include "pitch.h"
 
 static const CELTMode *cb_mode(int fs, int qext, CELTMode *tmp) {
   const CELTMode *m = opus_custom_mode_create(fs, fs / 50, NULL);
@@ -57,13 +64,13 @@ void oracle_celt_tables(signed char *tf, unsigned char *trim, unsigned char *spr
 }
 
 /* In place when `inplace` (y ignored): filters x_base[x_off..x_off+N]. */
-void oracle_comb_filter(float *y, float *x_base, int x_off, int inplace, int T0, int T1, int N,
-                        float g0, float g1, int tapset0, int tapset1, int fs, int use_window,
-                        int overlap) {
+void oracle_comb_filter(opus_val32 *y, opus_val32 *x_base, int x_off, int inplace, int T0,
+                        int T1, int N, opus_val16 g0, opus_val16 g1, int tapset0, int tapset1,
+                        int fs, int use_window, int overlap) {
   CELTMode tmp;
   const CELTMode *m = cb_mode(fs, 0, &tmp);
   const celt_coef *w = use_window ? m->window : NULL;
-  float *x = x_base + x_off;
+  opus_val32 *x = x_base + x_off;
   comb_filter(inplace ? x : y, x, T0, T1, N, g0, g1, tapset0, tapset1, w, overlap, 0);
 }
 
@@ -71,18 +78,18 @@ void oracle_comb_filter(float *y, float *x_base, int x_off, int inplace, int T0,
 /* vq.c                                                                                         */
 /* ------------------------------------------------------------------------------------------ */
 
-void oracle_exp_rotation(float *x, int len, int dir, int stride, int K, int spread) {
+void oracle_exp_rotation(celt_norm *x, int len, int dir, int stride, int K, int spread) {
   exp_rotation(x, len, dir, stride, K, spread);
 }
 
-float oracle_op_pvq_search(float *X, int *iy, int K, int N) {
+opus_val16 oracle_op_pvq_search(celt_norm *X, int *iy, int K, int N) {
   return op_pvq_search_c(X, iy, K, N, 0);
 }
 
 /* out: cm, tell_frac, rng, error, ext tell_frac, ext rng, ext error (after ec_enc_done). */
-void oracle_alg_quant(float *X, int N, int K, int spread, int B, unsigned char *buf, int size,
-                      float gain, int resynth, unsigned char *ext_buf, int ext_size,
-                      int extra_bits, unsigned *out) {
+void oracle_alg_quant(celt_norm *X, int N, int K, int spread, int B, unsigned char *buf,
+                      int size, opus_val32 gain, int resynth, unsigned char *ext_buf,
+                      int ext_size, int extra_bits, unsigned *out) {
   ec_enc enc, ext;
   ec_enc_init(&enc, buf, size);
   ec_enc_init(&ext, ext_size ? ext_buf : NULL, ext_size);
@@ -102,9 +109,9 @@ void oracle_alg_quant(float *X, int N, int K, int spread, int B, unsigned char *
   out[6] = ext.error;
 }
 
-void oracle_alg_unquant(float *X, int N, int K, int spread, int B, unsigned char *buf, int size,
-                        float gain, unsigned char *ext_buf, int ext_size, int extra_bits,
-                        unsigned *out) {
+void oracle_alg_unquant(celt_norm *X, int N, int K, int spread, int B, unsigned char *buf,
+                        int size, opus_val32 gain, unsigned char *ext_buf, int ext_size,
+                        int extra_bits, unsigned *out) {
   ec_dec dec, ext;
   ec_dec_init(&dec, buf, size);
   ec_dec_init(&ext, ext_size ? ext_buf : NULL, ext_size);
@@ -122,15 +129,17 @@ void oracle_alg_unquant(float *X, int N, int K, int spread, int B, unsigned char
   out[6] = ext.error;
 }
 
-void oracle_renormalise_vector(float *X, int N, float gain) { renormalise_vector(X, N, gain, 0); }
+void oracle_renormalise_vector(celt_norm *X, int N, opus_val32 gain) {
+  renormalise_vector(X, N, gain, 0);
+}
 
-int oracle_stereo_itheta(const float *X, const float *Y, int stereo, int N) {
+int oracle_stereo_itheta(const celt_norm *X, const celt_norm *Y, int stereo, int N) {
   return stereo_itheta(X, Y, stereo, N, 0);
 }
 
 /* out: cm, tell_frac, rng, error. */
-void oracle_cubic_quant(float *X, int N, int res, int B, unsigned char *buf, int size, float gain,
-                        int resynth, unsigned *out) {
+void oracle_cubic_quant(celt_norm *X, int N, int res, int B, unsigned char *buf, int size,
+                        opus_val32 gain, int resynth, unsigned *out) {
 #ifdef ENABLE_QEXT
   ec_enc enc;
   ec_enc_init(&enc, buf, size);
@@ -145,8 +154,8 @@ void oracle_cubic_quant(float *X, int N, int res, int B, unsigned char *buf, int
 #endif
 }
 
-void oracle_cubic_unquant(float *X, int N, int res, int B, unsigned char *buf, int size,
-                          float gain, unsigned *out) {
+void oracle_cubic_unquant(celt_norm *X, int N, int res, int B, unsigned char *buf, int size,
+                          opus_val32 gain, unsigned *out) {
 #ifdef ENABLE_QEXT
   ec_dec dec;
   ec_dec_init(&dec, buf, size);
@@ -163,51 +172,52 @@ void oracle_cubic_unquant(float *X, int N, int res, int B, unsigned char *buf, i
 /* bands.c                                                                                      */
 /* ------------------------------------------------------------------------------------------ */
 
-int oracle_hysteresis_decision(float val, const float *thresholds, const float *hysteresis,
-                               int N, int prev) {
+int oracle_hysteresis_decision(opus_val16 val, const opus_val16 *thresholds,
+                               const opus_val16 *hysteresis, int N, int prev) {
   return hysteresis_decision(val, thresholds, hysteresis, N, prev);
 }
 unsigned oracle_celt_lcg_rand(unsigned seed) { return celt_lcg_rand(seed); }
 int oracle_bitexact_cos(int x) { return bitexact_cos((opus_int16)x); }
 int oracle_bitexact_log2tan(int isin, int icos) { return bitexact_log2tan(isin, icos); }
 
-void oracle_compute_band_energies(int fs, int qext, const float *X, float *bandE, int end, int C,
-                                  int LM) {
+void oracle_compute_band_energies(int fs, int qext, const celt_sig *X, celt_ener *bandE,
+                                  int end, int C, int LM) {
   CELTMode tmp;
   compute_band_energies(cb_mode(fs, qext, &tmp), X, bandE, end, C, LM, 0);
 }
 
-void oracle_normalise_bands(int fs, int qext, const float *freq, float *X, const float *bandE,
-                            int end, int C, int M) {
+void oracle_normalise_bands(int fs, int qext, const celt_sig *freq, celt_norm *X,
+                            const celt_ener *bandE, int end, int C, int M) {
   CELTMode tmp;
   normalise_bands(cb_mode(fs, qext, &tmp), freq, X, bandE, end, C, M);
 }
 
-void oracle_denormalise_bands(int fs, int qext, const float *X, float *freq,
-                              const float *bandLogE, int start, int end, int M, int downsample,
-                              int silence) {
+void oracle_denormalise_bands(int fs, int qext, const celt_norm *X, celt_sig *freq,
+                              const celt_glog *bandLogE, int start, int end, int M,
+                              int downsample, int silence) {
   CELTMode tmp;
   denormalise_bands(cb_mode(fs, qext, &tmp), X, freq, bandLogE, start, end, M, downsample,
                     silence);
 }
 
-void oracle_anti_collapse(int fs, int qext, float *X, unsigned char *cm, int LM, int C, int size,
-                          int start, int end, const float *logE, const float *prev1,
-                          const float *prev2, const int *pulses, unsigned seed, int encode) {
+void oracle_anti_collapse(int fs, int qext, celt_norm *X, unsigned char *cm, int LM, int C,
+                          int size, int start, int end, const celt_glog *logE,
+                          const celt_glog *prev1, const celt_glog *prev2, const int *pulses,
+                          unsigned seed, int encode) {
   CELTMode tmp;
   anti_collapse(cb_mode(fs, qext, &tmp), X, cm, LM, C, size, start, end, logE, prev1, prev2,
                 pulses, seed, encode, 0);
 }
 
 /* io: average, hf_average, tapset_decision (in/out). */
-int oracle_spreading_decision(int fs, const float *X, int *io, int last_decision, int update_hf,
-                              int end, int C, int M, const int *spread_weight) {
+int oracle_spreading_decision(int fs, const celt_norm *X, int *io, int last_decision,
+                              int update_hf, int end, int C, int M, const int *spread_weight) {
   CELTMode tmp;
   return spreading_decision(cb_mode(fs, 0, &tmp), X, &io[0], last_decision, &io[1], &io[2],
                             update_hf, end, C, M, spread_weight);
 }
 
-void oracle_haar1(float *X, int N0, int stride) { haar1(X, N0, stride); }
+void oracle_haar1(celt_norm *X, int N0, int stride) { haar1(X, N0, stride); }
 
 enum {
   QP_ENCODE, QP_FS, QP_QEXTMODE, QP_START, QP_END, QP_C, QP_LM, QP_SHORT, QP_SPREAD, QP_DUAL,
@@ -218,8 +228,8 @@ enum {
 
 /* out: [0] codedBands [1] balance [2] intensity [3] dual_stereo [4] tell_frac after
    [5] rng [6] error [7] ext tell_frac [8] ext rng [9] ext error [10] tell_frac before. */
-void oracle_quant_all_bands(const int *ip, float *X, unsigned char *collapse_masks,
-                            const float *bandE, int *pulses, const int *tf_res,
+void oracle_quant_all_bands(const int *ip, celt_norm *X, unsigned char *collapse_masks,
+                            const celt_ener *bandE, int *pulses, const int *tf_res,
                             const int *offsets, const int *cap, const int *extra_pulses,
                             unsigned char *buf, unsigned char *ext_buf, unsigned *seed,
                             int *out) {
@@ -282,10 +292,15 @@ void oracle_quant_all_bands(const int *ip, float *X, unsigned char *collapse_mas
 /* quant_bands.c                                                                                */
 /* ------------------------------------------------------------------------------------------ */
 
+/* eMeans: `signed char` (Q4) in the fixed-point build, `opus_val16` (float) otherwise. */
+#ifdef FIXED_POINT
+void oracle_emeans(signed char *out) { memcpy(out, eMeans, sizeof(eMeans)); }
+#else
 void oracle_emeans(float *out) { memcpy(out, eMeans, sizeof(eMeans)); }
+#endif
 
-void oracle_amp2log2(int fs, int qext, int effEnd, int end, float *bandE, float *bandLogE,
-                     int C) {
+void oracle_amp2log2(int fs, int qext, int effEnd, int end, celt_ener *bandE,
+                     celt_glog *bandLogE, int C) {
   CELTMode tmp;
   amp2Log2(cb_mode(fs, qext, &tmp), effEnd, end, bandE, bandLogE, C);
 }
@@ -297,9 +312,9 @@ enum {
 };
 
 /* out: tell_frac after coarse, after fine, after finalise, rng, error. */
-void oracle_quant_energy(const int *ip, const float *eBands, float *oldEBands, float *error,
-                         unsigned char *buf, float *delayedIntra, int *fine_quant,
-                         int *prev_quant, int *fine_priority, int *out) {
+void oracle_quant_energy(const int *ip, const celt_glog *eBands, celt_glog *oldEBands,
+                         celt_glog *error, unsigned char *buf, opus_val32 *delayedIntra,
+                         int *fine_quant, int *prev_quant, int *fine_priority, int *out) {
   CELTMode tmp;
   const CELTMode *m = cb_mode(ip[QE_FS], ip[QE_QEXT], &tmp);
   int C = ip[QE_C];
@@ -324,8 +339,8 @@ void oracle_quant_energy(const int *ip, const float *eBands, float *oldEBands, f
 
 /* ip: fs qext start end C LM size intra(-1: read flag) prefix_ft null_old.
    out: intra used, tell after coarse, after fine, after finalise, rng, error. */
-void oracle_unquant_energy(const int *ip, float *oldEBands, unsigned char *buf, int *fine_quant,
-                           int *prev_quant, int *fine_priority, int *out) {
+void oracle_unquant_energy(const int *ip, celt_glog *oldEBands, unsigned char *buf,
+                           int *fine_quant, int *prev_quant, int *fine_priority, int *out) {
   CELTMode tmp;
   const CELTMode *m = cb_mode(ip[0], ip[1], &tmp);
   int start = ip[2], end = ip[3], C = ip[4], LM = ip[5], size = ip[6];
@@ -346,10 +361,26 @@ void oracle_unquant_energy(const int *ip, float *oldEBands, unsigned char *buf, 
   out[5] = dec.error;
 }
 
+/* The library's celt_inner_prod_norm / celt_inner_prod_norm_shift (celt_inner_prod in the float
+   build). */
+opus_val32 oracle_celt_inner_prod_norm(const celt_norm *x, const celt_norm *y, int len) {
+  return celt_inner_prod_norm(x, y, len, 0);
+}
+opus_val32 oracle_celt_inner_prod_norm_shift(const celt_norm *x, const celt_norm *y, int len) {
+  return celt_inner_prod_norm_shift(x, y, len, 0);
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* Part B: static helpers (renamed copies of vq.c, bands.c, quant_bands.c)                     */
 /* ------------------------------------------------------------------------------------------ */
 
+#ifdef FIXED_POINT
+/* Functions in the fixed-point build (macros in the float build). */
+#define norm_scaleup oracle_copy_norm_scaleup
+#define norm_scaledown oracle_copy_norm_scaledown
+#define celt_inner_prod_norm oracle_copy_celt_inner_prod_norm
+#define celt_inner_prod_norm_shift oracle_copy_celt_inner_prod_norm_shift
+#endif
 #define exp_rotation oracle_copy_exp_rotation
 #define op_pvq_search_c oracle_copy_op_pvq_search_c
 #define alg_quant oracle_copy_alg_quant
@@ -383,31 +414,33 @@ void oracle_unquant_energy(const int *ip, float *oldEBands, unsigned char *buf, 
 #define unquant_energy_finalise oracle_copy_unquant_energy_finalise
 #include "quant_bands.c"
 
-void oracle_exp_rotation1(float *X, int len, int stride, float c, float s) {
+void oracle_exp_rotation1(celt_norm *X, int len, int stride, opus_val16 c, opus_val16 s) {
   exp_rotation1(X, len, stride, c, s);
 }
-void oracle_normalise_residual(int *iy, float *X, int N, float Ryy, float gain) {
-  normalise_residual(iy, X, N, Ryy, gain, 0);
+void oracle_normalise_residual(int *iy, celt_norm *X, int N, opus_val32 Ryy, opus_val32 gain,
+                               int shift) {
+  normalise_residual(iy, X, N, Ryy, gain, shift);
 }
 unsigned oracle_extract_collapse_mask(int *iy, int N, int B) {
   return extract_collapse_mask(iy, N, B);
 }
 
-float oracle_op_pvq_search_n2(const float *X, int *iy, int *up_iy, int K, int up, int *refine) {
+opus_val32 oracle_op_pvq_search_n2(const celt_norm *X, int *iy, int *up_iy, int K, int up,
+                                   int *refine, int shift) {
 #ifdef ENABLE_QEXT
-  return op_pvq_search_N2(X, iy, up_iy, K, up, refine, 0);
+  return op_pvq_search_N2(X, iy, up_iy, K, up, refine, shift);
 #else
-  (void)X; (void)iy; (void)up_iy; (void)K; (void)up; (void)refine;
+  (void)X; (void)iy; (void)up_iy; (void)K; (void)up; (void)refine; (void)shift;
   return 0;
 #endif
 }
 
-float oracle_op_pvq_search_extra(const float *X, int *iy, int *up_iy, int K, int up, int *refine,
-                                 int N) {
+opus_val32 oracle_op_pvq_search_extra(const celt_norm *X, int *iy, int *up_iy, int K, int up,
+                                      int *refine, int N, int shift) {
 #ifdef ENABLE_QEXT
-  return op_pvq_search_extra(X, iy, up_iy, K, up, refine, N, 0);
+  return op_pvq_search_extra(X, iy, up_iy, K, up, refine, N, shift);
 #else
-  (void)X; (void)iy; (void)up_iy; (void)K; (void)up; (void)refine; (void)N;
+  (void)X; (void)iy; (void)up_iy; (void)K; (void)up; (void)refine; (void)N; (void)shift;
   return 0;
 #endif
 }
@@ -416,29 +449,31 @@ int oracle_compute_qn(int N, int b, int offset, int pulse_cap, int stereo) {
   return compute_qn(N, b, offset, pulse_cap, stereo);
 }
 
-void oracle_compute_channel_weights(float Ex, float Ey, float *w) {
+void oracle_compute_channel_weights(celt_ener Ex, celt_ener Ey, opus_val16 *w) {
   compute_channel_weights(Ex, Ey, w);
 }
 
-void oracle_intensity_stereo(int fs, float *X, const float *Y, const float *bandE, int bandID,
-                             int N) {
+void oracle_intensity_stereo(int fs, celt_norm *X, const celt_norm *Y, const celt_ener *bandE,
+                             int bandID, int N) {
   CELTMode tmp;
   intensity_stereo(cb_mode(fs, 0, &tmp), X, Y, bandE, bandID, N);
 }
 
-void oracle_stereo_split(float *X, float *Y, int N) { stereo_split(X, Y, N); }
+void oracle_stereo_split(celt_norm *X, celt_norm *Y, int N) { stereo_split(X, Y, N); }
 
-void oracle_stereo_merge(float *X, float *Y, float mid, int N) { stereo_merge(X, Y, mid, N, 0); }
+void oracle_stereo_merge(celt_norm *X, celt_norm *Y, opus_val32 mid, int N) {
+  stereo_merge(X, Y, mid, N, 0);
+}
 
-void oracle_deinterleave_hadamard(float *X, int N0, int stride, int hadamard) {
+void oracle_deinterleave_hadamard(celt_norm *X, int N0, int stride, int hadamard) {
   deinterleave_hadamard(X, N0, stride, hadamard);
 }
 
-void oracle_interleave_hadamard(float *X, int N0, int stride, int hadamard) {
+void oracle_interleave_hadamard(celt_norm *X, int N0, int stride, int hadamard) {
   interleave_hadamard(X, N0, stride, hadamard);
 }
 
-float oracle_loss_distortion(const float *eBands, float *oldEBands, int start, int end, int len,
-                             int C) {
+opus_val32 oracle_loss_distortion(const celt_glog *eBands, celt_glog *oldEBands, int start,
+                                  int end, int len, int C) {
   return loss_distortion(eBands, oldEBands, start, end, len, C);
 }

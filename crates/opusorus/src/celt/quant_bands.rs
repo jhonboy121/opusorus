@@ -1,7 +1,8 @@
 //! Port of celt/quant_bands.c, celt/quant_bands.h: coarse/fine band energy quantisation.
 //!
-//! Float build. `log2Amp` is declared in `quant_bands.h` but has no definition in libopus, so
-//! it has no port.
+//! Float and fixed-point builds (`#ifdef FIXED_POINT` → `feature = "fixed-point"`: energies in
+//! Q`DB_SHIFT`, `eMeans` in Q4). `log2Amp` is declared in `quant_bands.h` but has no definition
+//! in libopus, so it has no port.
 
 #![allow(
     clippy::too_many_arguments,
@@ -11,19 +12,34 @@
 use alloc::vec;
 
 use crate::celt::arch::{
-    CeltEner, CeltGlog, OpusVal16, OpusVal32, add32, extend32, gconst, imax, imin, mac16_16, maxg,
-    min32, mult16_16_q15, mult16_32_q15, pshr32, shl32, shr32, sub32,
+    CeltEner, CeltGlog, DB_SHIFT, OpusVal16, OpusVal32, add32, extend32, gconst, imax, imin,
+    mac16_16, maxg, min32, mult16_16_q15, mult16_32_q15, pshr32, shl32, shr32, sub32,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{max32, vshr32};
 use crate::celt::entdec::EcDec;
 use crate::celt::entenc::EcEnc;
 use crate::celt::laplace::{ec_laplace_decode, ec_laplace_encode};
 use crate::celt::mathops::celt_log2_db;
 use crate::celt::rate::MAX_FINE_BITS;
 use crate::celt::static_modes::CeltMode;
-use crate::celt::vq::Scratch;
+use crate::celt::vq::{Scratch, v32};
+#[cfg(not(feature = "fixed-point"))]
 use crate::math;
 
+/// `eMeans`: mean energy in each band quantized in Q4 (fixed-point build).
+#[cfg(feature = "fixed-point")]
+#[rustfmt::skip]
+pub static E_MEANS: [i8; 25] = [
+    103, 100, 92, 85, 81,
+     77, 72, 70, 78, 75,
+     73, 71, 78, 74, 69,
+     72, 70, 74, 76, 71,
+     60, 60, 60, 60, 60,
+];
+
 /// `eMeans`: mean energy in each band quantized in Q4 and converted back to float.
+#[cfg(not(feature = "fixed-point"))]
 #[rustfmt::skip]
 pub static E_MEANS: [OpusVal16; 25] = [
     6.437500, 6.250000, 5.750000, 5.312500, 5.062500,
@@ -33,8 +49,19 @@ pub static E_MEANS: [OpusVal16; 25] = [
     3.750000, 3.750000, 3.750000, 3.750000, 3.750000,
 ];
 
+/// `pred_coef`: prediction coefficients 0.9, 0.8, 0.65, 0.5 (Q15, fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub static PRED_COEF: [OpusVal16; 4] = [29440, 26112, 21248, 16384];
+/// `beta_coef` (Q15, fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub static BETA_COEF: [OpusVal16; 4] = [30147, 22282, 12124, 6554];
+/// `beta_intra` (Q15, fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub const BETA_INTRA: OpusVal16 = 4915;
+
 /// `pred_coef`: prediction coefficients 0.9, 0.8, 0.65, 0.5 (`29440/32768.` ... in double,
 /// stored as float; all exactly representable).
+#[cfg(not(feature = "fixed-point"))]
 pub static PRED_COEF: [OpusVal16; 4] = [
     (29440.0 / 32768.0) as f32,
     (26112.0 / 32768.0) as f32,
@@ -42,6 +69,7 @@ pub static PRED_COEF: [OpusVal16; 4] = [
     (16384.0 / 32768.0) as f32,
 ];
 /// `beta_coef`.
+#[cfg(not(feature = "fixed-point"))]
 pub static BETA_COEF: [OpusVal16; 4] = [
     (30147.0 / 32768.0) as f32,
     (22282.0 / 32768.0) as f32,
@@ -49,6 +77,7 @@ pub static BETA_COEF: [OpusVal16; 4] = [
     (6554.0 / 32768.0) as f32,
 ];
 /// `beta_intra`.
+#[cfg(not(feature = "fixed-point"))]
 pub const BETA_INTRA: OpusVal16 = (4915.0 / 32768.0) as f32;
 
 /// `e_prob_model`: parameters of the Laplace-like probability models used for the coarse
@@ -126,6 +155,53 @@ pub static SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 /// packet cap; QEXT extension payloads can be larger).
 const INTRA_SAVE_MAX: usize = if cfg!(feature = "qext") { 3825 } else { 1275 };
 
+/// `(int)x` of a `celt_glog` expression (float build: truncation toward zero).
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+const fn glog_to_int(x: CeltGlog) -> i32 {
+    x as i32
+}
+/// `(int)x` of a `celt_glog` expression (fixed-point build: already an integer).
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn glog_to_int(x: CeltGlog) -> i32 {
+    x
+}
+
+/// The fine energy offset of quant_fine_energy/unquant_fine_energy for the code `q2` of
+/// `bits` bits after `prev` earlier refinement bits (fixed-point build).
+#[cfg(feature = "fixed-point")]
+#[inline]
+fn fine_offset(q2: i32, bits: i32, prev: i16) -> CeltGlog {
+    let offset: CeltGlog = sub32(vshr32(2 * q2 + 1, bits - DB_SHIFT + 1), gconst(0.5));
+    shr32(offset, i32::from(prev))
+}
+/// The fine energy offset of quant_fine_energy/unquant_fine_energy for the code `q2` of
+/// `bits` bits after `prev` earlier refinement bits (float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline]
+fn fine_offset(q2: i32, bits: i32, prev: i16) -> CeltGlog {
+    let mut offset: CeltGlog =
+        (q2 as f32 + 0.5f32) * (1i32 << (14 - bits)) as f32 * (1.0f32 / 16384.0) - 0.5f32;
+    offset *= (1i32 << (14 - i32::from(prev))) as f32 * (1.0f32 / 16384.0);
+    offset
+}
+
+/// The offset of quant_energy_finalise/unquant_energy_finalise for the bit `q2` after
+/// `fine_quant` fine bits (fixed-point build).
+#[cfg(feature = "fixed-point")]
+#[inline]
+fn finalise_offset(q2: i32, fine_quant: i32) -> CeltGlog {
+    shr32(shl32(q2, DB_SHIFT) - gconst(0.5), fine_quant + 1)
+}
+/// The offset of quant_energy_finalise/unquant_energy_finalise for the bit `q2` after
+/// `fine_quant` fine bits (float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline]
+fn finalise_offset(q2: i32, fine_quant: i32) -> CeltGlog {
+    (q2 as f32 - 0.5f32) * (1i32 << (14 - fine_quant - 1)) as f32 * (1.0f32 / 16384.0)
+}
+
 /// Port of celt/quant_bands.c:loss_distortion.
 #[must_use]
 pub fn loss_distortion(
@@ -136,16 +212,16 @@ pub fn loss_distortion(
     len: i32,
     c: i32,
 ) -> OpusVal32 {
-    let mut dist: OpusVal32 = 0.0;
+    let mut dist: OpusVal32 = OpusVal32::default();
     for ch in 0..c {
         for i in start..end {
             let idx = (i + ch * len) as usize;
-            let d: CeltGlog = pshr32(sub32(e_bands[idx], old_e_bands[idx]), 0);
+            let d: CeltGlog = pshr32(sub32(e_bands[idx], old_e_bands[idx]), DB_SHIFT - 7);
             dist = mac16_16(dist, d, d);
         }
     }
-    // C: `MIN32(200,SHR32(dist,14))` (the int 200 is compared as float).
-    min32(200.0, shr32(dist, 14))
+    // C: `MIN32(200,SHR32(dist,14))` (the int 200 is compared as float in the float build).
+    min32(v32(200), shr32(dist, 14))
 }
 
 /// Port of celt/quant_bands.c:quant_coarse_energy_impl. Returns the "badness" (0 for LFE).
@@ -168,7 +244,7 @@ fn quant_coarse_energy_impl(
 ) -> i32 {
     let nb = m.nb_ebands;
     let mut badness: i32 = 0;
-    let mut prev: [OpusVal32; 2] = [0.0, 0.0];
+    let mut prev: [OpusVal32; 2] = [OpusVal32::default(); 2];
     let coef: OpusVal16;
     let beta: OpusVal16;
 
@@ -176,7 +252,7 @@ fn quant_coarse_energy_impl(
         enc.enc_bit_logp(intra, 3);
     }
     if intra {
-        coef = 0.0;
+        coef = OpusVal16::default();
         beta = BETA_INTRA;
     } else {
         beta = BETA_COEF[lm as usize];
@@ -189,16 +265,27 @@ fn quant_coarse_energy_impl(
             let idx = (i + ch * nb) as usize;
             let x: CeltGlog = e_bands[idx];
             let old_e: CeltGlog = maxg(-gconst(9.0), old_e_bands[idx]);
-            // FIXED_POINT: not ported (float build).
-            let f: OpusVal32 = x - coef * old_e - prev[ch as usize];
-            // Rounding to nearest integer here is really important!
-            // C: `(int)floor(.5f+f)`.
-            let mut qi: i32 = math::floor((0.5f32 + f) as f64) as i32;
-            let decay_bound: CeltGlog = maxg(-gconst(28.0), old_e_bands[idx]) - max_decay;
+            #[cfg(feature = "fixed-point")]
+            let (f, mut qi, decay_bound): (OpusVal32, i32, CeltGlog) = {
+                let f: OpusVal32 = x - mult16_32_q15(coef, old_e) - prev[ch as usize];
+                // Rounding to nearest integer here is really important!
+                let qi = (f + crate::celt::arch::qconst32(0.5, DB_SHIFT)) >> DB_SHIFT;
+                let decay_bound = maxg(-gconst(28.0), sub32(old_e_bands[idx], max_decay));
+                (f, qi, decay_bound)
+            };
+            #[cfg(not(feature = "fixed-point"))]
+            let (f, mut qi, decay_bound): (OpusVal32, i32, CeltGlog) = {
+                let f: OpusVal32 = x - coef * old_e - prev[ch as usize];
+                // Rounding to nearest integer here is really important!
+                // C: `(int)floor(.5f+f)`.
+                let qi = math::floor((0.5f32 + f) as f64) as i32;
+                let decay_bound = maxg(-gconst(28.0), old_e_bands[idx]) - max_decay;
+                (f, qi, decay_bound)
+            };
             // Prevent the energy from going down too quickly (e.g. for bands that have just
             // one bin)
             if qi < 0 && x < decay_bound {
-                qi += shr32(sub32(decay_bound, x), 24) as i32;
+                qi += glog_to_int(shr32(sub32(decay_bound, x), DB_SHIFT));
                 if qi > 0 {
                     qi = 0;
                 }
@@ -240,12 +327,16 @@ fn quant_coarse_energy_impl(
             } else {
                 qi = -1;
             }
-            error[idx] = f - shl32(qi as f32, 24);
+            error[idx] = f - shl32(v32(qi), DB_SHIFT);
             badness += (qi0 - qi).abs();
-            let q: OpusVal32 = shl32(extend32(qi as f32), 24);
+            let q: OpusVal32 = shl32(extend32(v32(qi)), DB_SHIFT);
 
-            let tmp: OpusVal32 = mult16_32_q15(coef, old_e) + prev[ch as usize] + q;
-            // FIXED_POINT: clamp to -28 not ported (float build).
+            #[allow(unused_mut, reason = "only clamped in the fixed-point build")]
+            let mut tmp: OpusVal32 = mult16_32_q15(coef, old_e) + prev[ch as usize] + q;
+            #[cfg(feature = "fixed-point")]
+            {
+                tmp = max32(-gconst(28.0), tmp);
+            }
             old_e_bands[idx] = tmp;
             prev[ch as usize] = prev[ch as usize] + q - mult16_32_q15(beta, q);
         }
@@ -284,9 +375,16 @@ pub fn quant_coarse_energy(
 
     let mut intra = force_intra
         || (!two_pass
-            && *delayed_intra > (2 * c * (end - start)) as f32
+            && *delayed_intra > v32(2 * c * (end - start))
             && nb_available_bytes > (end - start) * c);
-    // C: `(opus_int32)((budget**delayedIntra*loss_rate)/(C*512))` in float.
+    // C: `(opus_int32)((budget**delayedIntra*loss_rate)/(C*512))`: unsigned arithmetic in the
+    // fixed-point build, float otherwise.
+    #[cfg(feature = "fixed-point")]
+    let intra_bias: i32 = (budget
+        .wrapping_mul(*delayed_intra as u32)
+        .wrapping_mul(loss_rate as u32)
+        / (c * 512) as u32) as i32;
+    #[cfg(not(feature = "fixed-point"))]
     let intra_bias: i32 =
         ((budget as f32 * *delayed_intra * loss_rate as f32) / (c * 512) as f32) as i32;
     let new_distortion: OpusVal32 = loss_distortion(e_bands, old_e_bands, start, eff_end, nb, c);
@@ -299,8 +397,17 @@ pub fn quant_coarse_energy(
 
     let mut max_decay: CeltGlog = gconst(16.0);
     if end - start > 10 {
-        // FIXED_POINT: not ported (float build).
-        max_decay = min32(max_decay, 0.125f32 * nb_available_bytes as f32);
+        #[cfg(feature = "fixed-point")]
+        {
+            max_decay = shl32(
+                min32(shr32(max_decay, DB_SHIFT - 3), extend32(nb_available_bytes)),
+                DB_SHIFT - 3,
+            );
+        }
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            max_decay = min32(max_decay, 0.125f32 * nb_available_bytes as f32);
+        }
     }
     if lfe {
         max_decay = gconst(3.0);
@@ -436,8 +543,14 @@ pub fn quant_fine_energy(
         };
         for ch in 0..c {
             let idx = (i + ch * nb) as usize;
-            // FIXED_POINT: not ported (float build).
+            // Has to be without rounding
+            #[cfg(feature = "fixed-point")]
+            let mut q2: i32 = vshr32(
+                add32(error[idx], shr32(gconst(0.5), i32::from(prev))),
+                DB_SHIFT - eq - i32::from(prev),
+            );
             // C: `(int)floor((error*(1<<prev)+.5f)*extra)`.
+            #[cfg(not(feature = "fixed-point"))]
             let mut q2: i32 = math::floor(
                 ((error[idx] * (1i32 << prev) as f32 + 0.5f32) * f32::from(extra)) as f64,
             ) as i32;
@@ -448,9 +561,7 @@ pub fn quant_fine_energy(
                 q2 = 0;
             }
             enc.enc_bits(q2 as u32, eq as u32);
-            let mut offset: CeltGlog =
-                (q2 as f32 + 0.5f32) * (1i32 << (14 - eq)) as f32 * (1.0f32 / 16384.0) - 0.5f32;
-            offset *= (1i32 << (14 - i32::from(prev))) as f32 * (1.0f32 / 16384.0);
+            let offset: CeltGlog = fine_offset(q2, eq, prev);
             old_e_bands[idx] += offset;
             error[idx] -= offset;
         }
@@ -484,12 +595,13 @@ pub fn quant_energy_finalise(
             }
             for ch in 0..c {
                 let idx = (i + ch * nb) as usize;
-                let q2: i32 = if error[idx] < 0.0 { 0 } else { 1 };
+                let q2: i32 = if error[idx] < CeltGlog::default() {
+                    0
+                } else {
+                    1
+                };
                 enc.enc_bits(q2 as u32, 1);
-                // FIXED_POINT: not ported (float build).
-                let offset: CeltGlog = (q2 as f32 - 0.5f32)
-                    * (1i32 << (14 - fine_quant[iu] - 1)) as f32
-                    * (1.0f32 / 16384.0);
+                let offset: CeltGlog = finalise_offset(q2, fine_quant[iu]);
                 if let Some(old) = old_e_bands.as_deref_mut() {
                     old[idx] += offset;
                 }
@@ -515,12 +627,15 @@ pub fn unquant_coarse_energy(
     let nb = m.nb_ebands;
     let prob_model = &E_PROB_MODEL[lm as usize][usize::from(intra)];
     // C: `opus_val64 prev[2]` (float in the float build).
+    #[cfg(feature = "fixed-point")]
+    let mut prev: [i64; 2] = [0, 0];
+    #[cfg(not(feature = "fixed-point"))]
     let mut prev: [f32; 2] = [0.0, 0.0];
     let coef: OpusVal16;
     let beta: OpusVal16;
 
     if intra {
-        coef = 0.0;
+        coef = OpusVal16::default();
         beta = BETA_INTRA;
     } else {
         beta = BETA_COEF[lm as usize];
@@ -550,13 +665,26 @@ pub fn unquant_coarse_energy(
             } else {
                 -1
             };
-            let q: OpusVal32 = shl32(extend32(qi as f32), 24);
+            let q: OpusVal32 = shl32(extend32(v32(qi)), DB_SHIFT);
 
             old_e_bands[idx] = maxg(-gconst(9.0), old_e_bands[idx]);
-            let tmp: OpusVal32 = mult16_32_q15(coef, old_e_bands[idx]) + prev[ch as usize] + q;
-            // FIXED_POINT: clamp to +-28 not ported (float build).
-            old_e_bands[idx] = tmp;
-            prev[ch as usize] = prev[ch as usize] + q - mult16_32_q15(beta, q);
+            #[cfg(feature = "fixed-point")]
+            {
+                let ch = ch as usize;
+                // C: the `opus_val64` sum is stored in an `opus_val32`.
+                let mut tmp: OpusVal32 = (i64::from(mult16_32_q15(coef, old_e_bands[idx]))
+                    + prev[ch]
+                    + i64::from(q)) as i32;
+                tmp = min32(gconst(28.0), max32(-gconst(28.0), tmp));
+                old_e_bands[idx] = tmp;
+                prev[ch] = prev[ch] + i64::from(q) - i64::from(mult16_32_q15(beta, q));
+            }
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                let tmp: OpusVal32 = mult16_32_q15(coef, old_e_bands[idx]) + prev[ch as usize] + q;
+                old_e_bands[idx] = tmp;
+                prev[ch as usize] = prev[ch as usize] + q - mult16_32_q15(beta, q);
+            }
         }
     }
 }
@@ -590,12 +718,7 @@ pub fn unquant_fine_energy(
         for ch in 0..c {
             let idx = (i + ch * nb) as usize;
             let q2: i32 = dec.dec_bits(extra as u32) as i32;
-            // FIXED_POINT: not ported (float build).
-            let mut offset: CeltGlog = (q2 as f32 + 0.5f32)
-                * (1i32 << (14 - i32::from(extra))) as f32
-                * (1.0f32 / 16384.0)
-                - 0.5f32;
-            offset *= (1i32 << (14 - i32::from(prev))) as f32 * (1.0f32 / 16384.0);
+            let offset: CeltGlog = fine_offset(q2, i32::from(extra), prev);
             old_e_bands[idx] += offset;
         }
     }
@@ -627,10 +750,7 @@ pub fn unquant_energy_finalise(
             for ch in 0..c {
                 let idx = (i + ch * nb) as usize;
                 let q2: i32 = dec.dec_bits(1) as i32;
-                // FIXED_POINT: not ported (float build).
-                let offset: CeltGlog = (q2 as f32 - 0.5f32)
-                    * (1i32 << (14 - fine_quant[iu] - 1)) as f32
-                    * (1.0f32 / 16384.0);
+                let offset: CeltGlog = finalise_offset(q2, fine_quant[iu]);
                 if let Some(old) = old_e_bands.as_deref_mut() {
                     old[idx] += offset;
                 }
@@ -655,8 +775,12 @@ pub fn amp2_log2(
     for ch in 0..c {
         for i in 0..eff_end {
             let idx = (i + ch * nb) as usize;
-            band_log_e[idx] = celt_log2_db(band_e[idx]) - shl32(E_MEANS[i as usize], 24 - 4);
-            // FIXED_POINT: Q12 compensation not ported (float build).
+            band_log_e[idx] = celt_log2_db(band_e[idx]) - shl32(E_MEANS[i as usize], DB_SHIFT - 4);
+            // Compensate for bandE[] being Q12 but celt_log2() taking a Q14 input.
+            #[cfg(feature = "fixed-point")]
+            {
+                band_log_e[idx] += gconst(2.0);
+            }
         }
         for i in eff_end..end {
             band_log_e[(ch * nb + i) as usize] = -gconst(14.0);

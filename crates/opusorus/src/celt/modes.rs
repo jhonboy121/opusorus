@@ -283,10 +283,7 @@ pub fn compute_allocation_table(
 /// Returns a static mode when one matches (see [`opus_custom_mode_create`]), otherwise creates
 /// a custom mode. Errors are `BadArg` for unsupported parameters and `AllocFail` where C would
 /// jump to `failure`.
-///
-/// Not available in fixed-point builds yet: the fixed-point MDCT (`celt/mdct.rs`, unit
-/// `fixed_fft`) is still gated there; use [`opus_custom_mode_create_with`] meanwhile.
-#[cfg(all(feature = "custom-modes", not(feature = "fixed-point")))]
+#[cfg(feature = "custom-modes")]
 pub fn opus_custom_mode_create_custom(fs: i32, frame_size: i32) -> Result<Cow<'static, CeltMode>> {
     opus_custom_mode_create_with(fs, frame_size, crate::celt::mdct::clt_mdct_init)
 }

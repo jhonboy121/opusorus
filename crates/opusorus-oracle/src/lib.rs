@@ -17,6 +17,7 @@ pub mod foundation;
 pub mod fixed_foundation;
 
 // Units whose shims compile in both oracles (`// oracle-build: any`).
+pub mod celt_bands;
 pub mod celt_fft;
 pub mod celt_modes;
 pub mod celt_pitch_lpc;
@@ -30,8 +31,6 @@ pub mod silk_resampler;
 // oracle. A unit converted to fixed point marks its shim `any`/`fixed` and lifts the cfg here.
 #[cfg(not(feature = "fixed-point"))]
 pub mod analysis;
-#[cfg(not(feature = "fixed-point"))]
-pub mod celt_bands;
 #[cfg(not(feature = "fixed-point"))]
 pub mod celt_decoder;
 #[cfg(not(feature = "fixed-point"))]
