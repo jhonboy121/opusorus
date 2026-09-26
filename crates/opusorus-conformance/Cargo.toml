@@ -1,0 +1,19 @@
+[package]
+name = "opusorus-conformance"
+description = "Differential tests: opusorus vs the C libopus oracle, plus RFC test vectors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+qext = ["opusorus/qext", "opusorus-oracle/qext"]
+custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
+
+[dependencies]
+opusorus = { workspace = true, features = ["internals", "std"] }
+opusorus-oracle = { workspace = true }
+
+[lints]
+workspace = true

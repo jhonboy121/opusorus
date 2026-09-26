@@ -1,0 +1,29 @@
+[package]
+name = "opusorus"
+description = "Pure safe-Rust port of the Opus audio codec (libopus v1.6.1), bit-exact with the reference."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["opus", "audio", "codec", "celt", "silk"]
+categories = ["multimedia::audio", "multimedia::encoding", "no-std"]
+
+[features]
+default = ["std"]
+# Use std's float math (the platform libm). Required for bit-exactness with the C oracle on the
+# same platform. Without it, the pure-Rust `libm` crate is used (no_std).
+std = []
+# Opus HD / scalable quality extension (libopus `--enable-qext`).
+qext = []
+# Opus Custom modes (libopus `--enable-custom-modes`).
+custom-modes = []
+# Exposes internal modules (unstable, for differential tests and benchmarks only).
+internals = []
+
+[dependencies]
+libm = { workspace = true }
+
+[lints]
+workspace = true

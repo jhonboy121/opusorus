@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/opusorus"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "BSD-3-Clause"
+repository = "https://github.com/opusorus/opusorus"
+authors = ["opusorus contributors"]
+
+[workspace.dependencies]
+opusorus = { path = "crates/opusorus" }
+opusorus-oracle = { path = "crates/opusorus-oracle" }
+libm = "0.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Const-correctness: user requirement "mark const wherever you can".
+missing_const_for_fn = "warn"
+# unwrap/expect only with a documented `#[expect(..., reason = "...")]`.
+unwrap_used = "warn"
+expect_used = "warn"
+# Every lint suppression must carry a written reason.
+allow_attributes_without_reason = "warn"
+# Silent error swallowing guards.
+unwrap_or_default = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1
+debug = 1
+
+# Tests exercise heavy DSP code; keep them fast but still overflow-checked.
+[profile.test]
+opt-level = 2
+overflow-checks = true
+debug-assertions = true
+
+[profile.dev]
+opt-level = 1

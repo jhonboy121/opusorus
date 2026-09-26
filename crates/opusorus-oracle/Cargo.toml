@@ -1,0 +1,29 @@
+[package]
+name = "opusorus-oracle"
+description = "Test-only FFI bindings to the vendored C libopus v1.6.1, used as the reference oracle."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+links = "opus"
+
+[features]
+# Mirrors opusorus features so oracle and port are always built in the same configuration.
+qext = []
+# NOTE: a `fixed-point` oracle build is added in the fixed-point phase (docs/PLAN.md D-011).
+custom-modes = []
+
+[build-dependencies]
+cc = "1"
+
+[lints.rust]
+# This crate exists to call C; unsafe is expected but must be documented.
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+allow_attributes_without_reason = "warn"
