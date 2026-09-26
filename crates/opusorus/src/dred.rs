@@ -50,13 +50,14 @@
 //! ```
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::dnn::dred_coding::{
     DRED_EXPERIMENTAL_BYTES, DRED_EXPERIMENTAL_VERSION, DRED_EXTENSION_ID,
     DRED_NUM_REDUNDANCY_FRAMES,
 };
 use crate::dnn::dred_decoder::{OpusDred, dred_ec_decode};
-use crate::dnn::dred_rdovae::{RdovaeDec, dred_rdovae_dec_load_model, dred_rdovae_decode_all};
+use crate::dnn::dred_rdovae::{RdovaeDec, dred_rdovae_dec_load_shared, dred_rdovae_decode_all};
 use crate::extensions::ExtensionIterator;
 use crate::packet::{parse_impl, toc_samples_per_frame};
 use crate::{Error, Result};
@@ -69,8 +70,9 @@ pub const OPUS_SET_DNN_BLOB_REQUEST: i32 = 4052;
 /// streams.
 #[derive(Debug, Clone)]
 pub struct DredDecoder {
-    /// `model` (boxed: the RDOVAE decoder layers).
-    model: Box<RdovaeDec>,
+    /// `model`: the RDOVAE decoder layers, shared ([`Arc`]) with the decoders the same
+    /// embedded blob was loaded into.
+    model: Arc<RdovaeDec>,
     /// `loaded`.
     loaded: bool,
 }
@@ -94,7 +96,7 @@ impl DredDecoder {
     pub fn new() -> Self {
         #[allow(unused_mut, reason = "only mutated with compiled-in weights")]
         let mut dec = Self {
-            model: Box::default(),
+            model: Arc::default(),
             loaded: false,
         };
         #[cfg(feature = "dnn-weights-embedded")]
@@ -138,9 +140,9 @@ impl DredDecoder {
     /// [`Error::BadArg`] if the blob cannot be parsed or lacks an `rdovaedec` layer (the
     /// previous model, if any, is kept).
     pub fn set_dnn_blob(&mut self, data: &[u8]) -> Result<()> {
-        match dred_rdovae_dec_load_model(data) {
+        match dred_rdovae_dec_load_shared(data) {
             Ok(m) => {
-                *self.model = m;
+                self.model = m;
                 self.loaded = true;
                 Ok(())
             }

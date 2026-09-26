@@ -13,6 +13,7 @@
 //! blob holding the RDOVAE encoder and pitch DNN arrays is loaded.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::celt::arch::VERY_SMALL;
 use crate::celt::entenc::EcEnc;
@@ -29,7 +30,7 @@ use super::dred_rdovae::{
     DRED_LATENT_DEAD_ZONE_Q8, DRED_LATENT_DIM, DRED_LATENT_P0_Q8, DRED_LATENT_QUANT_SCALES_Q8,
     DRED_LATENT_R_Q8, DRED_NUM_FEATURES, DRED_STATE_DEAD_ZONE_Q8, DRED_STATE_DIM, DRED_STATE_P0_Q8,
     DRED_STATE_QUANT_SCALES_Q8, DRED_STATE_R_Q8, RdovaeEnc, RdovaeEncState,
-    dred_rdovae_enc_load_model, dred_rdovae_encode_dframe,
+    dred_rdovae_enc_load_shared, dred_rdovae_encode_dframe,
 };
 use super::lpcnet_enc::{
     LpcnetEncState, NB_TOTAL_FEATURES, lpcnet_compute_single_frame_features_float,
@@ -53,7 +54,7 @@ pub const DRED_ACTIVITY_MEM_SIZE: usize = DRED_MAX_FRAMES * 4;
 /// `DREDEnc` (dred_encoder.h). Fields after `resample_mem`'s C position are Rust-only scratch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DredEnc {
-    pub model: RdovaeEnc,
+    pub model: Arc<RdovaeEnc>,
     pub lpcnet_enc_state: LpcnetEncState,
     pub rdovae_enc: RdovaeEncState,
     pub loaded: bool,
@@ -83,7 +84,7 @@ impl DredEnc {
     #[must_use]
     pub fn new(fs: i32, channels: i32) -> Box<Self> {
         let mut enc = Box::new(Self {
-            model: RdovaeEnc::default(),
+            model: Arc::default(),
             lpcnet_enc_state: LpcnetEncState::default(),
             rdovae_enc: RdovaeEncState::new(),
             loaded: false,
@@ -120,7 +121,7 @@ impl DredEnc {
     /// On an RDOVAE binding failure nothing changes (C may leave a partially overwritten
     /// model); when the pitch DNN part fails the RDOVAE model is already replaced, as in C.
     pub fn load_model(&mut self, data: &[u8]) -> Result<()> {
-        let model = dred_rdovae_enc_load_model(data).map_err(|_| Error::BadArg)?;
+        let model = dred_rdovae_enc_load_shared(data).map_err(|_| Error::BadArg)?;
         self.model = model;
         self.lpcnet_enc_state
             .load_model(data)

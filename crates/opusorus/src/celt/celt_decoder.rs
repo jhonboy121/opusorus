@@ -4,8 +4,9 @@
 //! * [`CeltDecoder`] is the C `struct OpusCustomDecoder`. The C trailing arrays (`_decode_mem`,
 //!   `oldEBands`, `oldLogE`, `oldLogE2`, `backgroundLogE`, `lpc`) are owned `Vec`s sized at init;
 //!   [`CeltDecoder::reset`] mirrors `OPUS_RESET_STATE` (the memset of everything after
-//!   `DECODER_RESET_START`). The C VLAs are preallocated scratch buffers owned by the state, so
-//!   decoding never allocates after the first frame.
+//!   `DECODER_RESET_START`). The C VLAs are stack arrays (the frame-sized ones heap buffers
+//!   kept by the state for large custom modes) and the `quant_all_bands` scratch is owned by
+//!   the state, so decoding never allocates after the first frames.
 //! * The decoder borrows its mode (`&'m CeltMode`), like the C pointer: the Opus decoder uses
 //!   `CeltDecoder<'static>` with a static mode; custom modes are borrowed from the caller.
 //! * [`CeltDecoder::celt_decode_with_ec`] / [`CeltDecoder::celt_decode_with_ec_dred`] take the
@@ -133,23 +134,35 @@ pub use crate::celt::celt::{
     CELT_SET_END_BAND_REQUEST, CELT_SET_SIGNALLING_REQUEST, CELT_SET_START_BAND_REQUEST,
 };
 
-/// Preallocated replacements for the C VLAs of the decoder (sized for the mode at init).
+/// `N` up to which the frame-sized C VLAs of the decoder (`X`, `freq`, the `deemphasis`
+/// scratch) are stack arrays sized for it: the 20 ms frames of the standard modes up to
+/// 48 kHz (QEXT adds a second size for 96 kHz, see [`with_frame_bufs`]).
+const STACK_N: usize = 960;
+
+/// Largest `overlap` of any mode (`(shortMdctSize>>2)<<2` with shorts of at most 3.3 ms, i.e.
+/// 320 samples at 96 kHz).
+const MAX_OVERLAP: usize = 320;
+
+/// Largest `max_period` (`QEXT_SCALE(MAX_PERIOD)`).
+#[cfg(feature = "qext")]
+const MAX_MAX_PERIOD: usize = 2 * MAX_PERIOD as usize;
+/// Largest `max_period` (`QEXT_SCALE(MAX_PERIOD)`).
+#[cfg(not(feature = "qext"))]
+const MAX_MAX_PERIOD: usize = MAX_PERIOD as usize;
+
+/// Replacements for the C VLAs of the decoder that are not stack arrays.
+///
+/// The frame-sized buffers are stack arrays (see [`with_frame_bufs`]) except for large
+/// custom modes, which use these heap buffers (grown on first use, then kept so decoding
+/// does not allocate). The PLC buffers (`exc`, `fir_tmp`, `lp_pitch_buf`, `etmp`, `buf_copy`)
+/// are stack arrays.
 #[derive(Debug, Clone, Default)]
 struct DecoderScratch {
-    /// `X`: `2*N` normalised MDCT coefficients (C `C*N`; `C` is the stream channel count).
-    x: Vec<CeltNorm>,
-    /// `freq` of `celt_synthesis` (`N`).
-    freq: Vec<CeltSig>,
-    /// `scratch` of `deemphasis` (`N`).
-    deemph: Vec<CeltSig>,
-    /// `etmp` of `prefilter_and_fold` (`overlap`).
-    etmp: Vec<OpusVal32>,
-    /// `_exc` of the pitch PLC (`max_period + CELT_LPC_ORDER`).
-    exc: Vec<OpusVal16>,
-    /// `fir_tmp` of the pitch PLC (`max_period`).
-    fir_tmp: Vec<OpusVal16>,
-    /// `lp_pitch_buf` of `celt_plc_pitch_search` (`DECODE_BUFFER_SIZE>>1`).
-    lp_pitch_buf: Vec<OpusVal16>,
+    /// `X` (`2*N` normalised MDCT coefficients) for `N > MAX_STACK_N`.
+    x_heap: Vec<CeltNorm>,
+    /// `freq` of `celt_synthesis`, reused as the `deemphasis` scratch (`N`), for
+    /// `N > MAX_STACK_N`.
+    freq_heap: Vec<CeltSig>,
     /// `tf_res`, `cap`, `offsets`, `fine_quant`, `pulses`, `fine_priority` (`nbEBands` each).
     tf_res: Vec<i32>,
     cap: Vec<i32>,
@@ -171,23 +184,14 @@ struct DecoderScratch {
     qext_collapse_masks: Vec<u8>,
     /// `quant_all_bands` scratch.
     bands: BandsScratch,
-    /// `buf_copy` of the neural PLC (`2*overlap`).
-    #[cfg(feature = "deep-plc")]
-    buf_copy: Vec<CeltSig>,
 }
 
 impl DecoderScratch {
-    fn new(mode: &CeltMode, overlap: usize, max_period: usize) -> Self {
-        let n_max = (mode.short_mdct_size * mode.nb_short_mdcts) as usize;
+    fn new(mode: &CeltMode) -> Self {
         let nb = mode.nb_ebands as usize;
         Self {
-            x: vec![0.0; 2 * n_max],
-            freq: vec![0.0; n_max],
-            deemph: vec![0.0; n_max],
-            etmp: vec![0.0; overlap],
-            exc: vec![0.0; max_period + CELT_LPC_ORDER],
-            fir_tmp: vec![0.0; max_period],
-            lp_pitch_buf: vec![0.0; (DECODE_BUFFER_SIZE >> 1) as usize],
+            x_heap: Vec::new(),
+            freq_heap: Vec::new(),
             tf_res: vec![0; nb],
             cap: vec![0; nb],
             offsets: vec![0; nb],
@@ -204,11 +208,59 @@ impl DecoderScratch {
             #[cfg(feature = "qext")]
             qext_collapse_masks: vec![0; 2 * NB_QEXT_BANDS as usize],
             bands: BandsScratch::new(),
-            #[cfg(feature = "deep-plc")]
-            buf_copy: vec![0.0; 2 * overlap],
         }
     }
 }
+
+/// The frame-sized C VLAs of one `celt_decode_with_ec_dred` call: `X` (`2*N`) and `freq` (`N`,
+/// also the `deemphasis` scratch, which C allocates separately after `freq` is dead).
+struct FrameBufs<'a> {
+    x: &'a mut [CeltNorm],
+    freq: &'a mut [CeltSig],
+}
+
+/// Runs `f` with the frame-sized VLAs for frames of `n` samples: zeroed stack arrays for
+/// `n <= STACK_N` (and, with QEXT, `n <= 2*STACK_N`: 96 kHz frames, so 48 kHz frames only
+/// clear the smaller arrays), else `x_heap` / `freq_heap`, grown on first use and kept.
+fn with_frame_bufs<R>(
+    n: usize,
+    x_heap: &mut Vec<CeltNorm>,
+    freq_heap: &mut Vec<CeltSig>,
+    f: impl FnOnce(&mut FrameBufs<'_>) -> R,
+) -> R {
+    if n <= STACK_N {
+        let mut x: [CeltNorm; 2 * STACK_N] = [0.0; 2 * STACK_N];
+        let mut freq: [CeltSig; STACK_N] = [0.0; STACK_N];
+        return f(&mut FrameBufs {
+            x: &mut x[..2 * n],
+            freq: &mut freq[..n],
+        });
+    }
+    #[cfg(feature = "qext")]
+    if n <= 2 * STACK_N {
+        let mut x: [CeltNorm; 4 * STACK_N] = [0.0; 4 * STACK_N];
+        let mut freq: [CeltSig; 2 * STACK_N] = [0.0; 2 * STACK_N];
+        return f(&mut FrameBufs {
+            x: &mut x[..2 * n],
+            freq: &mut freq[..n],
+        });
+    }
+    if x_heap.len() < 2 * n {
+        x_heap.resize(2 * n, 0.0);
+        freq_heap.resize(n, 0.0);
+    }
+    f(&mut FrameBufs {
+        x: &mut x_heap[..2 * n],
+        freq: &mut freq_heap[..n],
+    })
+}
+
+/// Largest `N` whose frame-sized VLAs are stack arrays (see [`with_frame_bufs`]).
+#[cfg(feature = "qext")]
+const MAX_STACK_N: usize = 2 * STACK_N;
+/// Largest `N` whose frame-sized VLAs are stack arrays (see [`with_frame_bufs`]).
+#[cfg(not(feature = "qext"))]
+const MAX_STACK_N: usize = STACK_N;
 
 /// Port of celt/celt_decoder.c:struct OpusCustomDecoder (`CELTDecoder`): the CELT decoder state.
 #[derive(Debug, Clone)]
@@ -301,18 +353,25 @@ pub struct CeltDecoder<'m> {
 /// the two differ; this exists for API parity (`opus_decoder_get_size`).
 #[must_use]
 pub fn celt_decoder_get_size(channels: i32) -> i32 {
-    #[cfg(feature = "qext")]
-    let mode = opus_custom_mode_create(96000, 960);
-    #[cfg(not(feature = "qext"))]
-    let mode = opus_custom_mode_create(48000, 960);
-    #[expect(clippy::expect_used, reason = "the static default mode always exists")]
+    celt_decoder_get_size_for_rate(if cfg!(feature = "qext") { 96000 } else { 48000 }, channels)
+}
+
+/// [`celt_decoder_get_size`] for the mode of an Opus decoder at `fs` Hz (the 48 kHz mode, or
+/// the 96 kHz one with QEXT).
+#[must_use]
+pub fn celt_decoder_get_size_for_rate(fs: i32, channels: i32) -> i32 {
+    let mode = opus_custom_mode_create(if fs > 48000 { 96000 } else { 48000 }, 960);
+    #[expect(clippy::expect_used, reason = "the static default modes always exist")]
     opus_custom_decoder_get_size(mode.expect("static mode"), channels)
 }
 
 /// Port of celt/celt_decoder.c:opus_custom_decoder_get_size (Rust memory footprint, see
-/// [`celt_decoder_get_size`]).
+/// [`celt_decoder_get_size`]): the struct, its buffers (`_decode_mem`, the energy histories,
+/// `lpc`, the small allocation scratch), the `quant_all_bands` scratch once grown by decoding
+/// (up to two coded channels, any frame size) and the heap `X` / `freq`
+/// buffers (`N > MAX_STACK_N`: large custom modes). The other C VLAs are stack arrays.
 #[must_use]
-pub const fn opus_custom_decoder_get_size(mode: &CeltMode, channels: i32) -> i32 {
+pub fn opus_custom_decoder_get_size(mode: &CeltMode, channels: i32) -> i32 {
     #[cfg(feature = "qext")]
     let qext_scale =
         if mode.fs == 96000 && (mode.short_mdct_size == 240 || mode.short_mdct_size == 180) {
@@ -322,19 +381,61 @@ pub const fn opus_custom_decoder_get_size(mode: &CeltMode, channels: i32) -> i32
         };
     #[cfg(not(feature = "qext"))]
     let qext_scale = 1;
-    let n_max = mode.short_mdct_size * mode.nb_short_mdcts;
-    let nb = mode.nb_ebands;
-    let words = channels * (qext_scale * DECODE_BUFFER_SIZE + mode.overlap)
-        + 4 * 2 * nb
-        + channels * CELT_LPC_ORDER as i32
-        // scratch
-        + 4 * n_max
-        + mode.overlap
-        + 2 * (qext_scale * MAX_PERIOD)
-        + CELT_LPC_ORDER as i32
-        + (DECODE_BUFFER_SIZE >> 1)
-        + 8 * nb;
-    size_of::<CeltDecoder<'static>>() as i32 + 4 * words
+    let c = channels as usize;
+    let n_max = (mode.short_mdct_size * mode.nb_short_mdcts) as usize;
+    let nb = mode.nb_ebands as usize;
+    let state = c
+        * ((qext_scale * DECODE_BUFFER_SIZE) as usize + mode.overlap as usize)
+        * size_of::<CeltSig>()
+        + 4 * 2 * nb * size_of::<CeltGlog>()
+        + c * CELT_LPC_ORDER * size_of::<OpusVal16>();
+    // tf_res, cap, offsets, fine_quant, pulses, fine_priority, collapse_masks.
+    let alloc = 6 * nb * size_of::<i32>() + 2 * nb;
+    #[cfg(feature = "qext")]
+    let alloc = alloc
+        + (2 * (nb + NB_QEXT_BANDS as usize) + nb) * size_of::<i32>()
+        + 2 * NB_QEXT_BANDS as usize;
+    let frame = if n_max > MAX_STACK_N {
+        2 * n_max * size_of::<CeltNorm>() + n_max * size_of::<CeltSig>()
+    } else {
+        0
+    };
+    let size = size_of::<CeltDecoder<'static>>()
+        + state
+        + alloc
+        + bands_scratch_size(mode, mode.max_lm)
+        + frame;
+    size as i32
+}
+
+/// Bytes of the `quant_all_bands` scratch ([`BandsScratch`]) after decoding frames of up to
+/// `2^max_lm` short MDCTs of `mode` with up to two coded channels: `norm`
+/// (`C*M*(eBands[nbEBands-1]-eBands[start])`) and ten buffers of the widest band, for the
+/// mode's bands and (QEXT) the extension bands.
+fn bands_scratch_size(mode: &CeltMode, max_lm: i32) -> usize {
+    let m = 1usize << max_lm;
+    let bands = |e: &[i16], nb: usize| {
+        let norm = 2 * m * (e[nb - 1] - e[0]) as usize;
+        let widest = e[..=nb]
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as usize)
+            .max()
+            .map_or(0, |w| w * m);
+        (norm, widest)
+    };
+    #[allow(unused_mut, reason = "only updated with QEXT")]
+    let (mut norm, mut widest) = bands(&mode.e_bands, mode.nb_ebands as usize);
+    // The modes `decode_frame` runs the QEXT bands for.
+    #[cfg(feature = "qext")]
+    if (mode.fs == 48000 && (mode.short_mdct_size == 120 || mode.short_mdct_size == 90))
+        || (mode.fs == 96000 && (mode.short_mdct_size == 240 || mode.short_mdct_size == 180))
+    {
+        let q = compute_qext_mode(mode);
+        let (n, w) = bands(&q.e_bands, q.nb_ebands as usize);
+        norm = norm.max(n);
+        widest = widest.max(w);
+    }
+    (norm + 10 * widest) * size_of::<CeltNorm>()
 }
 
 /// Port of celt/celt_decoder.c:deemphasis_stereo_simple: special case for stereo with no
@@ -868,7 +969,6 @@ impl<'m> CeltDecoder<'m> {
         let overlap = mode.overlap;
         let nb = mode.nb_ebands as usize;
         let dbs = (qext_scale * DECODE_BUFFER_SIZE) as usize;
-        let max_period = (qext_scale * MAX_PERIOD) as usize;
         let mut st = Self {
             mode,
             overlap,
@@ -912,7 +1012,7 @@ impl<'m> CeltDecoder<'m> {
             old_log_e2: vec![0.0; 2 * nb],
             background_log_e: vec![0.0; 2 * nb],
             lpc: vec![0.0; channels as usize * CELT_LPC_ORDER],
-            scratch: DecoderScratch::new(mode, overlap as usize, max_period),
+            scratch: DecoderScratch::new(mode),
         };
         st.reset();
         Ok(st)
@@ -982,7 +1082,8 @@ impl<'m> CeltDecoder<'m> {
         let overlap = self.overlap as usize;
         let stride = dbs + overlap;
         let window = &self.mode.window[..overlap];
-        let etmp = &mut self.scratch.etmp[..overlap];
+        let mut etmp_buf: [OpusVal32; MAX_OVERLAP] = [0.0; MAX_OVERLAP];
+        let etmp = &mut etmp_buf[..overlap];
         for c in 0..self.channels as usize {
             let chan = &mut self.decode_mem[c * stride..(c + 1) * stride];
             // Apply the pre-filter to the MDCT overlap for the next frame because the
@@ -1076,6 +1177,7 @@ impl<'m> CeltDecoder<'m> {
         &mut self,
         n: usize,
         lm: i32,
+        bufs: &mut FrameBufs<'_>,
         #[cfg(feature = "deep-plc")] mut lpcnet: Option<&mut LpcnetPlcState>,
     ) {
         let cn = self.channels as usize;
@@ -1137,7 +1239,7 @@ impl<'m> CeltDecoder<'m> {
                 }
             }
             let mut seed: u32 = self.rng;
-            let x = &mut self.scratch.x;
+            let x = &mut *bufs.x;
             for c in 0..cn {
                 for i in start as usize..eff_end as usize {
                     let boffs = n * c + ((e_bands[i] as usize) << lm);
@@ -1159,7 +1261,7 @@ impl<'m> CeltDecoder<'m> {
                 }
                 celt_synthesis(
                     mode,
-                    &self.scratch.x,
+                    bufs.x,
                     &mut out_syn[..cn],
                     &self.old_ebands,
                     start,
@@ -1176,7 +1278,7 @@ impl<'m> CeltDecoder<'m> {
                     &[],
                     #[cfg(feature = "qext")]
                     0,
-                    &mut self.scratch.freq,
+                    bufs.freq,
                 );
             }
 
@@ -1203,12 +1305,9 @@ impl<'m> CeltDecoder<'m> {
                 let qext_scale = self.qext_scale();
                 let (d0, d1) = self.decode_mem.split_at(stride);
                 let chans: [&[CeltSig]; 2] = [d0, if cn == 2 { d1 } else { &[] }];
-                pitch_index = celt_plc_pitch_search(
-                    &chans[..cn],
-                    cn,
-                    qext_scale,
-                    &mut self.scratch.lp_pitch_buf,
-                );
+                let mut lp_pitch_buf = [0.0; (DECODE_BUFFER_SIZE >> 1) as usize];
+                pitch_index =
+                    celt_plc_pitch_search(&chans[..cn], cn, qext_scale, &mut lp_pitch_buf);
                 self.last_pitch_index = pitch_index;
             } else {
                 pitch_index = self.last_pitch_index;
@@ -1235,8 +1334,11 @@ impl<'m> CeltDecoder<'m> {
 
             let window = &mode.window[..];
             let ord = CELT_LPC_ORDER;
-            let exc_buf = &mut self.scratch.exc[..max_period + ord];
-            let fir_tmp = &mut self.scratch.fir_tmp[..exc_length];
+            let mut exc_stack: [OpusVal16; MAX_MAX_PERIOD + CELT_LPC_ORDER] =
+                [0.0; MAX_MAX_PERIOD + CELT_LPC_ORDER];
+            let mut fir_tmp_stack: [OpusVal16; MAX_MAX_PERIOD] = [0.0; MAX_MAX_PERIOD];
+            let exc_buf = &mut exc_stack[..max_period + ord];
+            let fir_tmp = &mut fir_tmp_stack[..exc_length];
             for c in 0..cn {
                 let mut s1: OpusVal32 = 0.0;
                 let buf = &mut self.decode_mem[c * stride..(c + 1) * stride];
@@ -1422,7 +1524,8 @@ impl<'m> CeltDecoder<'m> {
         let cn = self.channels as usize;
         let overlap = self.mode.overlap as usize;
         let window = &self.mode.window[..];
-        let buf_copy = &mut self.scratch.buf_copy;
+        let mut buf_copy_stack: [CeltSig; 2 * MAX_OVERLAP] = [0.0; 2 * MAX_OVERLAP];
+        let buf_copy = &mut buf_copy_stack[..];
         for c in 0..cn {
             buf_copy[c * overlap..(c + 1) * overlap]
                 .copy_from_slice(&self.decode_mem[c * stride + dbs - n..][..overlap]);
@@ -1489,7 +1592,13 @@ impl<'m> CeltDecoder<'m> {
     }
 
     /// De-emphasis of the `n` output samples of every channel into `pcm`.
-    fn deemphasis_out(&mut self, pcm: &mut [OpusRes], n: usize, accum: bool) {
+    fn deemphasis_out(
+        &mut self,
+        pcm: &mut [OpusRes],
+        n: usize,
+        accum: bool,
+        scratch: &mut [CeltSig],
+    ) {
         let dbs = self.decode_buffer_size();
         let stride = dbs + self.overlap as usize;
         let cc = self.channels as usize;
@@ -1504,7 +1613,7 @@ impl<'m> CeltDecoder<'m> {
             &self.mode.preemph,
             &mut self.preemph_mem_d,
             accum,
-            &mut self.scratch.deemph,
+            scratch,
         );
     }
 
@@ -1664,16 +1773,64 @@ impl<'m> CeltDecoder<'m> {
             eff_end = mode.eff_ebands;
         }
 
+        let mut x_heap = core::mem::take(&mut self.scratch.x_heap);
+        let mut freq_heap = core::mem::take(&mut self.scratch.freq_heap);
+        let ret = with_frame_bufs(n, &mut x_heap, &mut freq_heap, |bufs| {
+            self.decode_with_bufs(
+                data,
+                len,
+                pcm,
+                dec,
+                accum,
+                n,
+                lm,
+                c_stream,
+                end,
+                eff_end,
+                frame_size,
+                bufs,
+                #[cfg(feature = "deep-plc")]
+                lpcnet,
+                #[cfg(feature = "qext")]
+                ext,
+            )
+        });
+        self.scratch.x_heap = x_heap;
+        self.scratch.freq_heap = freq_heap;
+        ret
+    }
+
+    /// The part of `celt_decode_with_ec_dred` after the header parsing, with the frame-sized
+    /// VLAs in `bufs`.
+    #[expect(clippy::too_many_arguments, reason = "the C function's locals")]
+    fn decode_with_bufs(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [OpusRes],
+        dec: Option<&mut EcDec<'_>>,
+        accum: bool,
+        n: usize,
+        lm: i32,
+        c_stream: i32,
+        end: i32,
+        eff_end: i32,
+        frame_size: i32,
+        bufs: &mut FrameBufs<'_>,
+        #[cfg(feature = "deep-plc")] lpcnet: Option<&mut LpcnetPlcState>,
+        #[cfg(feature = "qext")] ext: Option<&[u8]>,
+    ) -> Result<i32> {
         let data = match data {
             Some(d) if len > 1 => &d[..len as usize],
             _ => {
                 self.celt_decode_lost(
                     n,
                     lm,
+                    bufs,
                     #[cfg(feature = "deep-plc")]
                     lpcnet,
                 );
-                self.deemphasis_out(pcm, n, accum);
+                self.deemphasis_out(pcm, n, accum, bufs.freq);
                 return Ok(frame_size / self.downsample);
             }
         };
@@ -1710,6 +1867,7 @@ impl<'m> CeltDecoder<'m> {
                 pcm,
                 d,
                 accum,
+                bufs,
                 #[cfg(feature = "qext")]
                 ext_payload,
             ),
@@ -1720,6 +1878,7 @@ impl<'m> CeltDecoder<'m> {
                     pcm,
                     &mut local,
                     accum,
+                    bufs,
                     #[cfg(feature = "qext")]
                     ext_payload,
                 )
@@ -1834,6 +1993,7 @@ impl<'m> CeltDecoder<'m> {
         pcm: &mut [OpusRes],
         dec: &mut EcDec<'_>,
         accum: bool,
+        bufs: &mut FrameBufs<'_>,
         #[cfg(feature = "qext")] ext_payload: &[u8],
     ) -> Result<i32> {
         let FrameParams {
@@ -2136,7 +2296,7 @@ impl<'m> CeltDecoder<'m> {
 
         // Decode fixed codebook
         {
-            let (x0, x1) = sc.x.split_at_mut(n);
+            let (x0, x1) = bufs.x.split_at_mut(n);
             let y = if c == 2 { Some(&mut x1[..n]) } else { None };
             #[cfg(feature = "qext")]
             let mut ext_ec = EcCoder::Dec(&mut ext_dec);
@@ -2193,7 +2353,7 @@ impl<'m> CeltDecoder<'m> {
                 &mut ext_dec,
                 c,
             );
-            let (x0, x1) = sc.x.split_at_mut(n);
+            let (x0, x1) = bufs.x.split_at_mut(n);
             let y = if c == 2 { Some(&mut x1[..n]) } else { None };
             quant_all_bands(
                 qm,
@@ -2248,7 +2408,7 @@ impl<'m> CeltDecoder<'m> {
         if anti_collapse_on {
             anti_collapse(
                 mode,
-                &mut sc.x,
+                bufs.x,
                 &sc.collapse_masks,
                 lm,
                 c,
@@ -2273,7 +2433,6 @@ impl<'m> CeltDecoder<'m> {
             self.prefilter_and_fold(n);
         }
         {
-            let sc = &mut self.scratch;
             let (d0, d1) = self.decode_mem.split_at_mut(stride);
             let mut out_syn: [&mut [CeltSig]; 2] = [&mut d0[dbs - n..], &mut []];
             if cc == 2 {
@@ -2281,7 +2440,7 @@ impl<'m> CeltDecoder<'m> {
             }
             celt_synthesis(
                 mode,
-                &sc.x,
+                bufs.x,
                 &mut out_syn[..cc],
                 &self.old_ebands,
                 start,
@@ -2298,7 +2457,7 @@ impl<'m> CeltDecoder<'m> {
                 &self.qext_old_band_e,
                 #[cfg(feature = "qext")]
                 qext_end,
-                &mut sc.freq,
+                bufs.freq,
             );
         }
 
@@ -2362,7 +2521,7 @@ impl<'m> CeltDecoder<'m> {
             self.rng ^= ext_dec.rng;
         }
 
-        self.deemphasis_out(pcm, n, accum);
+        self.deemphasis_out(pcm, n, accum, bufs.freq);
         self.loss_duration = 0;
         self.plc_duration = 0;
         self.last_frame_type = FRAME_NORMAL;

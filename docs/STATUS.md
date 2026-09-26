@@ -71,6 +71,27 @@ NEON-optimized C (0.88–1.10×). The remaining MDCT/FFT gap to `c_opt` comes fr
 NEON kernels that a bit-exact port cannot use for float code.
 DNN decode (20 s at complexity 10, 20 % loss): SILK WB 0.77×, CELT 48k 0.77× C time.
 
+## Decoder memory
+
+`Decoder::get_size` / `MsDecoder::get_size` report the Rust footprint (struct + owned heap after
+decoding 20 ms frames through the int16 API, with the DNN states of loaded models; shared DNN
+weights excluded), checked against the allocations of real decoders (`crates/opusorus/tests/footprint.rs`).
+Bytes, mono / stereo decoder (C: `opus_decoder_get_size`):
+
+| Build | Rust before | Rust now | C |
+|---|---:|---:|---:|
+| default (48 kHz) | 87 031 / 122 682 | 36 450 / 49 058 | 18 468 / 27 236 |
+| qext (96 kHz) | 152 274 / 221 480 | 53 146 / 78 266 | 27 252 / 44 692 |
+| deep-plc + dred + osce | ≈3.9 MB per decoder with embedded weights | 171 578 / 201 586 | 191 580 / 200 348 |
+| + qext | (399 035 / 468 314 without models) | 175 762 / 205 770 | 200 364 / 217 804 |
+
+The C VLAs are stack arrays (the frame-sized CELT ones for up to 20 ms at 48 kHz, and 96 kHz with
+QEXT); the int16/int24 `out` and multistream `buf` buffers grow on first use; the deep PLC, LACE/NoLACE
+and BWE states are allocated when their models are loaded and used (C semantics unchanged); the
+models of the embedded blob are bound once per process and shared (`Arc`). Without DNN models
+loaded, a DNN build's decoder is 59 KB / 73 KB (48 kHz). Remaining gap without DNN: the CELT
+`quant_all_bands` scratch (≈12 KB, C stack) and the 20 ms `out` buffer of the int16 API.
+
 ## Shared library sizes
 
 `scripts/size_report.sh` (aarch64 Linux, stripped; section totals in parentheses because file sizes
@@ -87,7 +108,7 @@ are quantised by 64 KiB segment alignment on aarch64):
 Breakdown of the Rust C ABI: ≈390 KB codec code, ≈150 KB Rust std panic/backtrace machinery
 (gimli/addr2line/demangle), ≈90 KB panic location records (~1,400 sites), ≈47 KB `.eh_frame`,
 ≈16 KB C ABI glue. The C ABI is kept only as a verification harness (upstream C tests), not as a shipped product
-(PLAN D-024), so its size is not optimised further.
+(PLAN D-025), so its size is not optimised further.
 
 ## Fuzzing
 

@@ -12,6 +12,7 @@
 //! The parsed [`WeightArray`]s borrow the blob; [`linear_init`] / [`conv2d_init`] copy the
 //! bound arrays into owned [`LinearLayer`] / [`Conv2dLayer`] storage.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::nnet::{Conv2dLayer, LinearLayer, WEIGHT_BLOB_VERSION, WEIGHT_BLOCK_SIZE};
@@ -326,4 +327,64 @@ pub fn write_weights(list: &[WeightArray<'_>], out: &mut Vec<u8>) {
         out.extend_from_slice(&a.data[..size]);
         out.resize(out.len() + (block_size - size), 0);
     }
+}
+
+/// Cache of one model bound from the embedded weight blob (`dnn-weights-embedded` with `std`):
+/// the model is bound once per process and shared by every state that loads it.
+#[cfg(all(feature = "std", feature = "dnn-weights-embedded"))]
+pub type ModelCache<T> = std::sync::OnceLock<Result<Arc<T>>>;
+
+/// Cache of one model bound from the embedded weight blob: without `std` (no `OnceLock`) or
+/// without an embedded blob there is nothing to cache.
+#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+#[derive(Debug)]
+pub struct ModelCache<T>(core::marker::PhantomData<fn() -> T>);
+
+#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+impl<T> ModelCache<T> {
+    /// An empty cache.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+impl<T> Default for ModelCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Binds a model from the weight blob `data` with `init` (`parse_weights` + `init_*`) into a
+/// shared [`Arc`]. The embedded blob (`dnn-weights-embedded`, with `std`) is bound only once:
+/// every later load returns the model kept in `cache`, so the decoders and encoders created
+/// with compiled-in weights share one copy of the weights instead of each parsing and copying
+/// the blob (C points to its compiled-in tables).
+///
+/// # Errors
+/// As `parse_weights` / `init`.
+#[cfg_attr(
+    not(all(feature = "std", feature = "dnn-weights-embedded")),
+    expect(
+        unused_variables,
+        reason = "the cache only exists for the embedded blob with std"
+    )
+)]
+pub fn load_shared<T>(
+    data: &[u8],
+    init: fn(&[WeightArray<'_>]) -> Result<T>,
+    cache: &'static ModelCache<T>,
+) -> Result<Arc<T>> {
+    #[cfg(all(feature = "std", feature = "dnn-weights-embedded"))]
+    if core::ptr::eq(data, super::embedded::DNN_BLOB) {
+        return cache.get_or_init(|| bind(data, init)).clone();
+    }
+    bind(data, init)
+}
+
+/// `parse_weights` then `init`, into a new [`Arc`].
+fn bind<T>(data: &[u8], init: fn(&[WeightArray<'_>]) -> Result<T>) -> Result<Arc<T>> {
+    let list = parse_weights(data)?;
+    Ok(Arc::new(init(&list)?))
 }

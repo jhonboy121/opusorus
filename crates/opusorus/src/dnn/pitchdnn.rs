@@ -5,6 +5,7 @@
 //! Upstream compiles the model arrays in (`pitchdnn_init`); the port always loads them from a
 //! weight blob ([`PitchDnnState::load_model`], upstream `pitchdnn_load_model`), per PLAN D-015.
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -15,7 +16,7 @@ use super::nnet::{
     ACTIVATION_LINEAR, ACTIVATION_TANH, Conv2dLayer, LinearLayer, compute_conv2d,
     compute_generic_dense, compute_generic_gru,
 };
-use super::parse_lpcnet_weights::{WeightArray, conv2d_init, linear_init, parse_weights};
+use super::parse_lpcnet_weights::{ModelCache, WeightArray, conv2d_init, linear_init, load_shared};
 
 /// `PITCH_MIN_PERIOD`.
 pub const PITCH_MIN_PERIOD: usize = 32;
@@ -41,7 +42,8 @@ pub const PITCH_DNN_MAX_RNN_UNITS: usize = 64;
 
 /// Size of `xcorr_mem1`.
 pub const XCORR_MEM1_SIZE: usize = (NB_XCORR_FEATURES + 2) * 2;
-/// Size of `xcorr_mem2` / `xcorr_mem3`.
+/// Size of `xcorr_mem2` (and of the C `xcorr_mem3`, which upstream never uses and the port
+/// drops).
 pub const XCORR_MEM2_SIZE: usize = (NB_XCORR_FEATURES + 2) * 2 * 8;
 /// Scratch needed by the two `compute_conv2d` calls (`ktime*in_channels*(height+2)` of
 /// `conv2d_2`: 3*4*226); stands in for the C stack `in_buf[MAX_CONV2D_INPUTS]`.
@@ -157,17 +159,17 @@ pub fn init_pitchdnn(arrays: &[WeightArray<'_>]) -> Result<PitchDnn> {
     })
 }
 
-/// `PitchDNNState`.
+/// The pitch DNN of the embedded weight blob (see [`load_shared`]).
+static MODEL_CACHE: ModelCache<PitchDnn> = ModelCache::new();
+
+/// `PitchDNNState`. The model is shared ([`Arc`]) by the states it was loaded into. The C
+/// `xcorr_mem3` is never used upstream and is not kept.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PitchDnnState {
-    pub model: PitchDnn,
+    pub model: Arc<PitchDnn>,
     pub gru_state: [f32; GRU_1_STATE_SIZE],
     pub xcorr_mem1: [f32; XCORR_MEM1_SIZE],
     pub xcorr_mem2: Vec<f32>,
-    /// Unused upstream (kept for layout fidelity).
-    pub xcorr_mem3: Vec<f32>,
-    /// Scratch for [`compute_conv2d`] (not part of the C state).
-    conv_scratch: Vec<f32>,
 }
 
 impl Default for PitchDnnState {
@@ -181,31 +183,45 @@ impl PitchDnnState {
     /// compiled-in model; here the model stays empty until [`Self::load_model`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_model(Arc::default())
+    }
+
+    /// Port of dnn/pitchdnn.c:pitchdnn_init with `model` bound.
+    #[must_use]
+    pub fn with_model(model: Arc<PitchDnn>) -> Self {
         Self {
-            model: PitchDnn::default(),
+            model,
             gru_state: [0.0; GRU_1_STATE_SIZE],
             xcorr_mem1: [0.0; XCORR_MEM1_SIZE],
             xcorr_mem2: vec![0.0; XCORR_MEM2_SIZE],
-            xcorr_mem3: vec![0.0; XCORR_MEM2_SIZE],
-            conv_scratch: vec![0.0; CONV2D_SCRATCH_SIZE],
         }
     }
+
+    /// Heap bytes owned by the state (the shared model excluded).
+    pub const HEAP_SIZE: usize = XCORR_MEM2_SIZE * size_of::<f32>();
 
     /// Port of dnn/pitchdnn.c:pitchdnn_init (clears the state, keeps the loaded model).
     pub fn pitchdnn_init(&mut self) {
         self.gru_state.fill(0.0);
         self.xcorr_mem1.fill(0.0);
         self.xcorr_mem2.fill(0.0);
-        self.xcorr_mem3.fill(0.0);
     }
 
     /// Port of dnn/pitchdnn.c:pitchdnn_load_model: parses a weight blob and binds the model.
     /// On failure (C: -1) the previous model is kept.
     pub fn load_model(&mut self, data: &[u8]) -> Result<()> {
-        let list = parse_weights(data)?;
-        self.model = init_pitchdnn(&list)?;
+        self.model = load_pitchdnn(data)?;
         Ok(())
     }
+}
+
+/// Binds the pitch DNN of a weight blob (the model part of `pitchdnn_load_model`), shared with
+/// the other states loading the same embedded blob (see [`load_shared`]).
+///
+/// # Errors
+/// As [`init_pitchdnn`], or an unparsable blob.
+pub fn load_pitchdnn(data: &[u8]) -> Result<Arc<PitchDnn>> {
+    load_shared(data, init_pitchdnn, &MODEL_CACHE)
 }
 
 /// Port of dnn/pitchdnn.c:compute_pitchdnn. `if_features` holds `PITCH_IF_FEATURES` (88) and
@@ -221,6 +237,8 @@ pub fn compute_pitchdnn(
     let mut conv1_tmp1 = [0f32; (NB_XCORR_FEATURES + 2) * 8];
     let mut conv1_tmp2 = [0f32; (NB_XCORR_FEATURES + 2) * 8];
     let mut output = [0f32; DENSE_FINAL_UPSAMPLER_OUT_SIZE];
+    // The `in_buf` stack array of `compute_conv2d`.
+    let mut conv_scratch = [0f32; CONV2D_SCRATCH_SIZE];
     let mut pos = 0usize;
     let mut maxval = -1f32;
     let mut sum = 0f32;
@@ -249,7 +267,7 @@ pub fn compute_pitchdnn(
         NB_XCORR_FEATURES,
         NB_XCORR_FEATURES + 2,
         ACTIVATION_TANH,
-        &mut st.conv_scratch,
+        &mut conv_scratch,
     );
     compute_conv2d(
         &model.conv2d_2,
@@ -259,7 +277,7 @@ pub fn compute_pitchdnn(
         NB_XCORR_FEATURES,
         NB_XCORR_FEATURES,
         ACTIVATION_TANH,
-        &mut st.conv_scratch,
+        &mut conv_scratch,
     );
 
     compute_generic_dense(

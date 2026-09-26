@@ -21,7 +21,7 @@
 
 use opusorus::dnn::fargan::{self as fg, FarganState};
 use opusorus::dnn::lpcnet_enc as le;
-use opusorus::dnn::lpcnet_plc::{self as lp, LpcnetPlcState};
+use opusorus::dnn::lpcnet_plc::{self as lp, LpcnetPlcState, PlcDnn};
 use opusorus::dnn::nnet::LinearLayer;
 use opusorus::dnn::parse_lpcnet_weights as pw;
 use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq, signals};
@@ -117,24 +117,43 @@ fn enc_floats(st: &le::LpcnetEncState, v: &mut Vec<f32>) {
     v.extend_from_slice(&st.pitchdnn.xcorr_mem2);
 }
 
+/// The model-dependent part of a PLC state (its initial state before a model loads).
+fn plc_dnn(st: &LpcnetPlcState) -> std::borrow::Cow<'_, PlcDnn> {
+    match &st.dnn {
+        Some(d) => std::borrow::Cow::Borrowed(&**d),
+        None => std::borrow::Cow::Owned(PlcDnn::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )),
+    }
+}
+
+/// The model-dependent part of a loaded PLC state.
+fn plc_dnn_mut(st: &mut LpcnetPlcState) -> &mut PlcDnn {
+    st.dnn.as_deref_mut().expect("loaded PLC state")
+}
+
 fn plc_floats(st: &LpcnetPlcState) -> Vec<f32> {
     let mut v = Vec::with_capacity(c::PLC_STATE_LEN);
     for f in &st.fec {
         v.extend_from_slice(f);
     }
     v.extend_from_slice(&st.pcm);
-    v.extend_from_slice(&st.features);
-    v.extend_from_slice(&st.cont_features);
-    for n in [&st.plc_net, &st.plc_bak[0], &st.plc_bak[1]] {
+    let d = plc_dnn(st);
+    v.extend_from_slice(&d.features);
+    v.extend_from_slice(&d.cont_features);
+    for n in [&d.plc_net, &d.plc_bak[0], &d.plc_bak[1]] {
         v.extend_from_slice(&n.gru1_state);
         v.extend_from_slice(&n.gru2_state);
     }
-    v.extend(fargan_floats(&st.fargan));
-    enc_floats(&st.enc, &mut v);
+    v.extend(fargan_floats(&d.fargan));
+    enc_floats(&d.enc, &mut v);
     v
 }
 
 fn plc_ints(st: &LpcnetPlcState) -> Vec<i32> {
+    let d = plc_dnn(st);
     vec![
         i32::from(st.loaded),
         st.analysis_gap,
@@ -145,8 +164,8 @@ fn plc_ints(st: &LpcnetPlcState) -> Vec<i32> {
         st.predict_pos,
         st.blend,
         st.loss_count,
-        i32::from(st.fargan.cont_initialized),
-        st.fargan.last_period,
+        i32::from(d.fargan.cont_initialized),
+        d.fargan.last_period,
     ]
 }
 
@@ -337,8 +356,8 @@ fn model_binding_matches_generated_init() {
     }
     // The loaders bind the same models.
     let st = rust_plc(&blob);
-    assert_eq!(st.model, plc);
-    assert_eq!(st.fargan.model, fargan);
+    assert_eq!(*plc_dnn(&st).model, plc);
+    assert_eq!(*plc_dnn(&st).fargan.model, fargan);
 }
 
 #[test]
@@ -364,11 +383,9 @@ fn load_model_errors() {
     no_fargan.extend_from_slice(&plc);
     assert!(st.load_model(&no_fargan).is_err());
     assert!(!st.loaded);
-    // As in C, the PLC model and the pitch DNN were already replaced.
-    assert_eq!(
-        st.model,
-        lp::init_plcmodel(&pw::parse_weights(&plc).unwrap()).unwrap()
-    );
+    // C has already replaced the PLC model and the pitch DNN, but they are only used after a
+    // load that binds all three again: without loaded models the port keeps none.
+    assert!(st.dnn.is_none());
     let mut no_pitch = plc.clone();
     no_pitch.extend_from_slice(&fargan);
     assert!(st.load_model(&no_pitch).is_err());
@@ -379,9 +396,15 @@ fn load_model_errors() {
     st.lpcnet_plc_init();
     assert!(st.loaded);
     assert_eq!(
-        st.fargan.model,
+        *plc_dnn(&st).fargan.model,
         fg::init_fargan(&pw::parse_weights(&fargan).unwrap()).unwrap()
     );
+    // With loaded models, a failed load replaces the models that bind (as in C) and keeps
+    // `loaded`.
+    let mut other_plc = dc::write_blob(dc::MODEL_PITCHDNN);
+    other_plc.extend_from_slice(&plc);
+    assert!(st.load_model(&other_plc).is_err());
+    assert!(st.loaded);
     lp::lpcnet_plc_reset(&mut st);
     assert!(st.loaded);
 
@@ -695,7 +718,7 @@ fn plc_static_helpers() {
                 let amp = [0.5f32, 1.0, 4.0][t % 3];
                 let input = rand_vec(&mut rng, lp::PLC_INPUT_SIZE, amp);
                 let mut ro = [0f32; le::NB_FEATURES];
-                lp::compute_plc_pred(&mut r, &mut ro, &input);
+                lp::compute_plc_pred(plc_dnn_mut(&mut r), &mut ro, &input);
                 let co = h.compute_plc_pred(&input);
                 assert_bits_eq_f32(&format!("compute_plc_pred #{t}"), &ro, &co);
             }
@@ -722,7 +745,7 @@ fn plc_static_helpers() {
             }
             2 => {
                 let f = rand_vec(&mut rng, le::NB_FEATURES, 3.0);
-                lp::queue_features(&mut r, &f);
+                lp::queue_features(plc_dnn_mut(&mut r), &f);
                 h.queue_features(&f);
             }
             _ => {

@@ -12,6 +12,7 @@
 //! 16 kHz audio per 20-dim feature vector).
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::Result;
 use crate::celt::arch::{imax, imin, max32, min16, min32};
@@ -23,7 +24,7 @@ use super::nnet::{
     ACTIVATION_LINEAR, ACTIVATION_SIGMOID, ACTIVATION_TANH, LinearLayer, compute_generic_conv1d,
     compute_generic_dense, compute_generic_gru, compute_glu, compute_glu_inplace,
 };
-use super::parse_lpcnet_weights::{WeightArray, linear_init, parse_weights};
+use super::parse_lpcnet_weights::{ModelCache, WeightArray, linear_init, load_shared};
 use super::pitchdnn::PITCH_MAX_PERIOD;
 
 // ---- fargan_data.h (generated) -------------------------------------------------------------
@@ -268,10 +269,14 @@ pub fn init_fargan(arrays: &[WeightArray<'_>]) -> Result<Fargan> {
     })
 }
 
-/// `FARGANState` (fargan.h). The C `arch` field is dropped.
+/// The FARGAN model of the embedded weight blob (see [`load_shared`]).
+static MODEL_CACHE: ModelCache<Fargan> = ModelCache::new();
+
+/// `FARGANState` (fargan.h). The C `arch` field is dropped; the model is shared ([`Arc`]) by
+/// the states it was loaded into.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FarganState {
-    pub model: Fargan,
+    pub model: Arc<Fargan>,
     pub cont_initialized: bool,
     pub deemph_mem: f32,
     pub pitch_buf: [f32; PITCH_MAX_PERIOD],
@@ -293,8 +298,14 @@ impl FarganState {
     /// A cleared state without a model (C `OPUS_CLEAR` in `fargan_init`).
     #[must_use]
     pub fn new_inline() -> Self {
+        Self::with_model(Arc::default())
+    }
+
+    /// A cleared state with `model` bound (C `fargan_init` with compiled-in tables).
+    #[must_use]
+    pub const fn with_model(model: Arc<Fargan>) -> Self {
         Self {
-            model: Fargan::default(),
+            model,
             cont_initialized: false,
             deemph_mem: 0.0,
             pitch_buf: [0.0; PITCH_MAX_PERIOD],
@@ -317,19 +328,26 @@ impl FarganState {
     /// Port of dnn/fargan.c:fargan_init: clears the state. Upstream then re-binds the
     /// compiled-in model; here the loaded model (if any) is kept.
     pub fn fargan_init(&mut self) {
-        let model = core::mem::take(&mut self.model);
-        *self = Self::new_inline();
-        self.model = model;
+        let model = self.model.clone();
+        *self = Self::with_model(model);
     }
 
     /// Port of dnn/fargan.c:fargan_load_model: parses a weight blob and binds the model
     /// (C returns -1 on failure). On failure the previous model is kept (C would have
     /// partially overwritten it, or crashed on an unparsable blob).
     pub fn load_model(&mut self, data: &[u8]) -> Result<()> {
-        let list = parse_weights(data)?;
-        self.model = init_fargan(&list)?;
+        self.model = load_fargan(data)?;
         Ok(())
     }
+}
+
+/// Binds the FARGAN model of a weight blob (the model part of `fargan_load_model`), shared with
+/// the other states loading the same embedded blob (see [`load_shared`]).
+///
+/// # Errors
+/// As [`init_fargan`], or an unparsable blob.
+pub fn load_fargan(data: &[u8]) -> Result<Arc<Fargan>> {
+    load_shared(data, init_fargan, &MODEL_CACHE)
 }
 
 /// `period = (int)floor(.5+256./pow(2.f,((1./60.)*((features[NB_BANDS]+1.5)*60))))`

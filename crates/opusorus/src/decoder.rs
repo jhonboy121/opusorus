@@ -72,7 +72,6 @@
 //! models. The blob stays loaded across [`Decoder::reset`] and [`Decoder::init`].
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::celt::arch::{
@@ -172,16 +171,31 @@ const fn bandwidth_from_raw(bw: i32) -> Option<Bandwidth> {
     }
 }
 
-/// Scratch buffers replacing the C VLAs (allocated at init, so decoding does not allocate).
-#[derive(Debug, Clone)]
-struct Scratch {
-    /// `pcm_silk` (10 ms, SILK output when the caller's frame is shorter).
-    pcm_silk: Vec<OpusRes>,
-    /// `redundant_audio` (5 ms redundant CELT frame).
-    redundant_audio: Vec<OpusRes>,
-    /// `out` of `opus_decode` / `opus_decode24` (grown only for PLC/FEC requests longer than
-    /// 120 ms).
-    out: Vec<OpusRes>,
+/// Samples per channel of a 10 ms frame at [`MAX_FS`] (the `pcm_silk` stack buffer).
+const MAX_F10: usize = (MAX_FS / 100) as usize;
+
+/// The largest `size(fs)` over the API rates whose buffers differ: 48 kHz and (QEXT) 96 kHz
+/// (the lower rates use the 48 kHz CELT mode and smaller buffers).
+pub(crate) fn max_over_rates(size: impl Fn(i32) -> usize) -> usize {
+    let s = size(48000);
+    if cfg!(feature = "qext") {
+        s.max(size(96000))
+    } else {
+        s
+    }
+}
+
+/// Returns the first `n` samples of `buf`, a buffer replacing a C stack VLA of `opus_res`
+/// samples (`out` of `opus_decode` / `opus_decode24`, `buf` of
+/// `opus_multistream_decode_native`). It is grown on demand to the largest request and kept,
+/// so it stays empty for callers that never need it and steady-state decoding does not
+/// allocate (a stack array would have to be zeroed on every call). C leaves the VLA
+/// uninitialized; every caller writes the samples it reads.
+pub(crate) fn res_buf(buf: &mut Vec<OpusRes>, n: usize) -> &mut [OpusRes] {
+    if buf.len() < n {
+        buf.resize(n, 0.0);
+    }
+    &mut buf[..n]
 }
 
 /// Where a `smooth_fade` input comes from: a separate buffer, or the output buffer itself (the
@@ -290,7 +304,8 @@ pub struct Decoder {
     softclip_mem: [f32; 2],
     range_final: u32,
 
-    scratch: Scratch,
+    /// `out` of `opus_decode` / `opus_decode24` (C: a stack VLA; see [`res_buf`]).
+    out_buf: Vec<OpusRes>,
 }
 
 /// Snapshot of the Opus-level decoder state (for differential tests).
@@ -343,10 +358,6 @@ impl Decoder {
             n_channels_api: channels,
             ..SilkDecControlStruct::default()
         };
-        let ch = channels as usize;
-        let f10 = (fs / 100) as usize;
-        let f5 = (fs / 200) as usize;
-        let max_frame = (fs / 25 * 3) as usize;
         #[allow(unused_mut, reason = "only mutated with compiled-in DNN weights")]
         let mut dec = Self {
             celt_dec,
@@ -371,11 +382,7 @@ impl Decoder {
             last_packet_duration: 0,
             softclip_mem: [0.0; 2],
             range_final: 0,
-            scratch: Scratch {
-                pcm_silk: vec![0.0; f10 * ch],
-                redundant_audio: vec![0.0; f5 * ch],
-                out: vec![0.0; max_frame * ch],
-            },
+            out_buf: Vec::new(),
         };
         // Compiled-in weights (C: `lpcnet_plc_init` / `silk_LoadOSCEModels(NULL)` bind the
         // model tables; a failure is a `celt_assert`).
@@ -409,23 +416,54 @@ impl Decoder {
         Ok(())
     }
 
-    /// Port of `src/opus_decoder.c:opus_decoder_get_size`: approximate memory footprint in bytes
-    /// of a decoder with `channels` channels at 48 kHz (the Rust layout, not the C struct size),
-    /// or 0 for an invalid channel count.
+    /// Port of `src/opus_decoder.c:opus_decoder_get_size`: the memory footprint in bytes of a
+    /// decoder with `channels` channels (the Rust layout, not the C struct size), or 0 for an
+    /// invalid channel count.
+    ///
+    /// This counts the decoder and everything it owns on the heap once it has decoded frames
+    /// of up to 20 ms at the highest supported rate: the SILK and CELT decoders (with the
+    /// scratch CELT grows on its first frames), the `out` buffer of the int16 / int24 decode
+    /// functions (which grows to the longest frame decoded that way; the float functions do not
+    /// use it) and the DNN states of the enabled features, allocated when their models are
+    /// loaded and used (deep PLC; LACE or NoLACE, and the BWE state, per SILK channel). The DNN
+    /// model weights are not counted: they are allocated when a blob is loaded, and shared by
+    /// every decoder loaded from the embedded blob (`dnn-weights-embedded`). Temporary buffers
+    /// of the decode calls (C: stack arrays) are on the stack.
+    ///
+    /// The largest footprint over the API rates is reported: 48 kHz (where the OSCE BWE may
+    /// run) and, with QEXT, 96 kHz (larger CELT buffers).
     #[must_use]
     pub fn get_size(channels: i32) -> usize {
         if !(1..=2).contains(&channels) {
             return 0;
         }
-        let ch = channels as usize;
-        let scratch = (480 + 240 + 5760) * ch * size_of::<OpusRes>();
-        // The deep PLC state (without the heap-allocated model weights of a loaded blob).
+        let out = |fs: i32| (fs / 50) as usize * channels as usize * size_of::<OpusRes>();
+        max_over_rates(|fs| Self::footprint_at(channels, fs) + out(fs))
+    }
+
+    /// The footprint of a decoder with `channels` (1 or 2) channels at `fs` Hz (48 or
+    /// 96 kHz), without the `out` buffer (unused in multistream decoding): see
+    /// [`Decoder::get_size`].
+    pub(crate) fn footprint_at(channels: i32, fs: i32) -> usize {
+        // The deep PLC state, and its model-dependent part.
         #[cfg(feature = "deep-plc")]
-        let scratch = scratch + size_of::<LpcnetPlcState>();
+        let dnn = size_of::<LpcnetPlcState>() + LpcnetPlcState::loaded_heap_size();
+        #[cfg(not(feature = "deep-plc"))]
+        let dnn = 0;
+        // The OSCE states of the two SILK channels (a stereo stream runs OSCE on both whatever
+        // the output channels), and the BWE states of the output channels (48 kHz only).
+        #[cfg(feature = "osce")]
+        let dnn = dnn
+            + 2 * crate::dnn::osce::OsceState::max_heap_size()
+            + if fs == 48000 {
+                channels as usize * crate::dnn::osce::OsceBweState::max_heap_size()
+            } else {
+                0
+            };
         size_of::<Self>()
             + size_of::<SilkDecoder>()
-            + crate::celt::celt_decoder::celt_decoder_get_size(channels) as usize
-            + scratch
+            + crate::celt::celt_decoder::celt_decoder_get_size_for_rate(fs, channels) as usize
+            + dnn
     }
 
     /// Number of output channels.
@@ -645,8 +683,10 @@ impl Decoder {
                 2 * i32::from(decode_fec != 0)
             };
             let mut decoded_samples = 0;
+            // `pcm_silk` (C: a stack VLA of F10*channels samples).
+            let mut pcm_silk: Option<[OpusRes; 2 * MAX_F10]> = None;
             let pcm_ptr: &mut [OpusRes] = if pcm_too_small {
-                &mut self.scratch.pcm_silk[..]
+                &mut pcm_silk.insert([0.0; 2 * MAX_F10])[..]
             } else {
                 &mut pcm[..]
             };
@@ -683,9 +723,9 @@ impl Decoder {
                     break;
                 }
             }
-            if pcm_too_small {
+            if let Some(pcm_silk) = &pcm_silk {
                 let n = frame_size as usize * ch;
-                pcm[..n].copy_from_slice(&self.scratch.pcm_silk[..n]);
+                pcm[..n].copy_from_slice(&pcm_silk[..n]);
             }
         }
 
@@ -764,6 +804,9 @@ impl Decoder {
         let f5u = f5 as usize;
         let f2_5u = f2_5 as usize;
         let mut redundant_rng: u32 = 0;
+        // `redundant_audio` (C: a stack VLA of F5*channels samples), only materialized for a
+        // redundant frame.
+        let mut redundant_audio: Option<[OpusRes; 2 * MAX_F5]> = None;
 
         // 5 ms redundant frame for CELT->SILK
         if redundancy && celt_to_silk {
@@ -773,11 +816,12 @@ impl Decoder {
             // the final range is still needed (for testing), so the redundancy is
             // always decoded but the decoded audio may not be used
             must_succeed(self.celt_dec.set_start_band(0))?;
+            let ra = redundant_audio.insert([0.0; 2 * MAX_F5]);
             if let Some(d) = data {
                 c_ignores_result(self.celt_dec.celt_decode_with_ec(
                     Some(&d[len as usize..]),
                     redundancy_bytes,
-                    &mut self.scratch.redundant_audio[..f5u * ch],
+                    &mut ra[..f5u * ch],
                     f5,
                     None,
                     false,
@@ -860,11 +904,12 @@ impl Decoder {
             self.celt_dec.reset();
             must_succeed(self.celt_dec.set_start_band(0))?;
 
+            let ra = redundant_audio.insert([0.0; 2 * MAX_F5]);
             if let Some(d) = data {
                 c_ignores_result(self.celt_dec.celt_decode_with_ec(
                     Some(&d[len as usize..]),
                     redundancy_bytes,
-                    &mut self.scratch.redundant_audio[..f5u * ch],
+                    &mut ra[..f5u * ch],
                     f5,
                     None,
                     false,
@@ -874,7 +919,7 @@ impl Decoder {
             let o = ch * (frame_size as usize - f2_5u);
             smooth_fade(
                 FadeIn::Out,
-                FadeIn::Buf(&self.scratch.redundant_audio[ch * f2_5u..]),
+                FadeIn::Buf(&ra[ch * f2_5u..]),
                 &mut pcm[o..],
                 f2_5u,
                 ch,
@@ -885,12 +930,16 @@ impl Decoder {
         // 5ms redundant frame for CELT->SILK; ignore if the previous frame did not
         // use CELT (the first redundancy frame in a transition from SILK may have
         // been lost)
-        if redundancy && celt_to_silk && (self.prev_mode != MODE_SILK_ONLY || self.prev_redundancy)
+        if redundancy
+            && celt_to_silk
+            && (self.prev_mode != MODE_SILK_ONLY || self.prev_redundancy)
+            // Always set for a CELT->SILK redundant frame (decoded above).
+            && let Some(ra) = &redundant_audio
         {
             let n = ch * f2_5u;
-            pcm[..n].copy_from_slice(&self.scratch.redundant_audio[..n]);
+            pcm[..n].copy_from_slice(&ra[..n]);
             smooth_fade(
-                FadeIn::Buf(&self.scratch.redundant_audio[n..]),
+                FadeIn::Buf(&ra[n..]),
                 FadeIn::Out,
                 &mut pcm[n..],
                 f2_5u,
@@ -1200,8 +1249,8 @@ impl Decoder {
     }
 
     /// Shared body of `opus_decode` / `opus_decode24`: C's `frame_size` checks, then
-    /// `opus_decode_native` into the scratch `out` buffer. Returns the sample count per channel
-    /// with the samples in `self.scratch.out` (taken out and handed to `convert`).
+    /// `opus_decode_native` into the `out` buffer (see [`res_buf`]), whose samples are then
+    /// handed to `convert`. Returns the sample count per channel.
     fn decode_via_out(
         &mut self,
         data: Option<&[u8]>,
@@ -1230,26 +1279,16 @@ impl Decoder {
         if n > pcm_len {
             return Err(Error::BadArg);
         }
-        let mut out = core::mem::take(&mut self.scratch.out);
-        if out.len() < n {
-            // Only PLC/FEC requests longer than 120 ms get here.
-            out.resize(n, 0.0);
-        }
-        let ret = self.opus_decode_native(
-            data,
-            &mut out[..n],
-            frame_size,
-            decode_fec,
-            false,
-            None,
-            soft_clip,
-        );
+        let mut out_buf = core::mem::take(&mut self.out_buf);
+        let out = res_buf(&mut out_buf, n);
+        let ret =
+            self.opus_decode_native(data, out, frame_size, decode_fec, false, None, soft_clip);
         if let Ok(r) = ret
             && r > 0
         {
             convert(&out[..r as usize * self.channels as usize]);
         }
-        self.scratch.out = out;
+        self.out_buf = out_buf;
         ret
     }
 
@@ -1727,7 +1766,7 @@ impl Decoder {
     }
 
     /// `opus_decoder_dred_decode` / `opus_decoder_dred_decode24`: `opus_decode_native` into
-    /// the scratch buffer (soft clipping for the int16 path), then `convert`.
+    /// the `out` buffer (soft clipping for the int16 path), then `convert`.
     #[cfg(feature = "dred")]
     fn dred_decode_via_out(
         &mut self,
@@ -1747,13 +1786,11 @@ impl Decoder {
         if n > pcm_len {
             return Err(Error::BadArg);
         }
-        let mut out = core::mem::take(&mut self.scratch.out);
-        if out.len() < n {
-            out.resize(n, 0.0);
-        }
+        let mut out_buf = core::mem::take(&mut self.out_buf);
+        let out = res_buf(&mut out_buf, n);
         let ret = self.decode_native_impl(
             None,
-            &mut out[..n],
+            out,
             frame_size,
             0,
             false,
@@ -1766,7 +1803,7 @@ impl Decoder {
         {
             convert(&out[..r as usize * self.channels as usize]);
         }
-        self.scratch.out = out;
+        self.out_buf = out_buf;
         ret
     }
 
@@ -1922,9 +1959,9 @@ impl Decoder {
             o[2],
             o[3],
         ];
-        let mut floats = Vec::with_capacity(l.pcm.len() + l.features.len());
+        let mut floats = Vec::with_capacity(l.pcm.len() + l.features().len());
         floats.extend_from_slice(&l.pcm);
-        floats.extend_from_slice(&l.features);
+        floats.extend_from_slice(&l.features());
         (ints, floats)
     }
 

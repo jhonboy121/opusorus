@@ -13,6 +13,7 @@
 mod stats_data;
 
 use alloc::format;
+use alloc::sync::Arc;
 
 pub use stats_data::*;
 
@@ -22,7 +23,9 @@ use super::nnet::{
     ACTIVATION_LINEAR, ACTIVATION_TANH, LinearLayer, compute_generic_conv1d,
     compute_generic_conv1d_dilation, compute_generic_dense, compute_generic_gru, compute_glu,
 };
-use super::parse_lpcnet_weights::{WeightArray, linear_init, parse_weights};
+use super::parse_lpcnet_weights::{
+    ModelCache, WeightArray, linear_init, load_shared, parse_weights,
+};
 
 // ---- dred_rdovae_constants.h ----
 
@@ -298,6 +301,28 @@ pub fn dred_rdovae_enc_load_model(data: &[u8]) -> Result<RdovaeEnc> {
 pub fn dred_rdovae_dec_load_model(data: &[u8]) -> Result<RdovaeDec> {
     let list = parse_weights(data)?;
     init_rdovaedec(&list)
+}
+
+/// The RDOVAE models of the embedded weight blob (see [`load_shared`]).
+static ENC_CACHE: ModelCache<RdovaeEnc> = ModelCache::new();
+static DEC_CACHE: ModelCache<RdovaeDec> = ModelCache::new();
+
+/// [`dred_rdovae_enc_load_model`] into a shared [`Arc`] (the model of the embedded blob is
+/// bound once and shared by every encoder, see [`load_shared`]).
+///
+/// # Errors
+/// As [`dred_rdovae_enc_load_model`].
+pub fn dred_rdovae_enc_load_shared(data: &[u8]) -> Result<Arc<RdovaeEnc>> {
+    load_shared(data, init_rdovaeenc, &ENC_CACHE)
+}
+
+/// [`dred_rdovae_dec_load_model`] into a shared [`Arc`] (the model of the embedded blob is
+/// bound once and shared by every DRED decoder, see [`load_shared`]).
+///
+/// # Errors
+/// As [`dred_rdovae_dec_load_model`].
+pub fn dred_rdovae_dec_load_shared(data: &[u8]) -> Result<Arc<RdovaeDec>> {
+    load_shared(data, init_rdovaedec, &DEC_CACHE)
 }
 
 // ---- states ----

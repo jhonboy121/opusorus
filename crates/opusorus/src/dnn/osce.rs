@@ -23,17 +23,21 @@
 //!   the Opus decoder should only select `OSCE_MODE_SILK_BBWE` with a loaded model.
 //!
 //! ## Deviations
-//! * `OSCEState` is a C union of `LACEState` / `NoLACEState`; [`OsceState`] holds both (safe
-//!   Rust). The union is never observed through the wrong member: the method only changes in
-//!   [`osce_reset`], which resets the matching member.
+//! * `OSCEState` is a C union of `LACEState` / `NoLACEState`; [`OsceState`] keeps the member
+//!   of the current method on the heap, allocated when it first runs with a loaded model
+//!   (until then it is in its reset state). The union is never observed through the wrong
+//!   member: the method only changes in [`osce_reset`], which resets the matching member, so
+//!   the other member is dropped there. Likewise [`OsceBweState`] allocates the BBWENet state
+//!   when BWE first runs (until then it is the all-zero state of `silk_init_decoder`).
 //! * `osce_load_models` returns an error for an unparsable blob (C passes a NULL list on).
 //! * An invalid method in [`osce_enhance_frame`] (C: `celt_assert(0)` and an uninitialized
 //!   output buffer) passes the input through.
-//! * BBWENet's two large C stack buffers (`x_buffer1/2`, 2 x 34 KB, of which 7.5 KB/11.25 KB are
-//!   used) are a scratch owned by [`BbwenetState`].
+//! * BBWENet's two large C stack buffers (`x_buffer1/2`, 2 x 34 KB) are stack arrays of the
+//!   7.5 KB / 11.25 KB actually used.
 
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::celt::mathops::{celt_log, celt_sin, float2int};
 use crate::math;
@@ -50,7 +54,7 @@ use super::nnet::{
 use super::osce_features::{
     OsceDecInfo, osce_bwe_calculate_features, osce_calculate_features, osce_cross_fade_10ms,
 };
-use super::parse_lpcnet_weights::{WeightArray, parse_weights};
+use super::parse_lpcnet_weights::{ModelCache, WeightArray, load_shared};
 use crate::silk::structs::SilkDecoderControl;
 
 mod bbwenet_data;
@@ -192,8 +196,8 @@ const BBWENET_XBUF1_SIZE: usize = 4 * BBWENET_AF2_OUT_CHANNELS * BBWENET_AF2_FRA
 /// channels x 240 samples).
 const BBWENET_XBUF2_SIZE: usize = 4 * BBWENET_AF2_OUT_CHANNELS * BBWENET_TDSHAPE2_FRAME_SIZE;
 
-/// `BBWENetState`. Equality ignores the scratch buffer.
-#[derive(Debug, Clone)]
+/// `BBWENetState`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BbwenetState {
     pub feature_net_conv1_state: [f32; BBWENET_FNET_CONV1_STATE_SIZE],
     pub feature_net_conv2_state: [f32; BBWENET_FNET_CONV2_STATE_SIZE],
@@ -206,8 +210,6 @@ pub struct BbwenetState {
     pub tdshape1_state: AdaShapeState,
     pub tdshape2_state: AdaShapeState,
     pub resampler_state: [ResampState; 3],
-    /// Scratch for `bbwenet_process_frames` (C stack `x_buffer1` / `x_buffer2`; not state).
-    scratch: Vec<f32>,
 }
 
 impl Default for BbwenetState {
@@ -223,28 +225,12 @@ impl Default for BbwenetState {
             tdshape1_state: AdaShapeState::default(),
             tdshape2_state: AdaShapeState::default(),
             resampler_state: [ResampState::default(); 3],
-            scratch: vec![0.0; BBWENET_XBUF1_SIZE + BBWENET_XBUF2_SIZE],
         }
     }
 }
 
-impl PartialEq for BbwenetState {
-    fn eq(&self, other: &Self) -> bool {
-        self.feature_net_conv1_state == other.feature_net_conv1_state
-            && self.feature_net_conv2_state == other.feature_net_conv2_state
-            && self.feature_net_gru_state == other.feature_net_gru_state
-            && self.outbut_buffer == other.outbut_buffer
-            && self.af1_state == other.af1_state
-            && self.af2_state == other.af2_state
-            && self.af3_state == other.af3_state
-            && self.tdshape1_state == other.tdshape1_state
-            && self.tdshape2_state == other.tdshape2_state
-            && self.resampler_state == other.resampler_state
-    }
-}
-
 impl BbwenetState {
-    /// `OPUS_CLEAR(state, 1)`: zeroes every state field, keeping the scratch allocation.
+    /// `OPUS_CLEAR(state, 1)`: zeroes every state field.
     fn clear(&mut self) {
         self.feature_net_conv1_state.fill(0.0);
         self.feature_net_conv2_state.fill(0.0);
@@ -385,27 +371,143 @@ impl Default for NoLace {
     }
 }
 
-/// `OSCEModel`.
+/// The models of the embedded weight blob (see [`load_shared`]).
+static LACE_CACHE: ModelCache<Lace> = ModelCache::new();
+static NOLACE_CACHE: ModelCache<NoLace> = ModelCache::new();
+static BBWENET_CACHE: ModelCache<Bbwenet> = ModelCache::new();
+
+/// `OSCEModel`. The models are allocated when they are loaded and shared ([`Arc`]) by the
+/// decoders they were loaded into; before that they read as unbound (empty) models, like C's
+/// zeroed struct.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OsceModel {
     /// C `int loaded`; set by the caller (`silk_LoadOSCEModels`) from the load result.
     pub loaded: bool,
-    pub lace: Lace,
-    pub nolace: NoLace,
-    pub bbwenet: Bbwenet,
+    lace: Option<Arc<Lace>>,
+    nolace: Option<Arc<NoLace>>,
+    bbwenet: Option<Arc<Bbwenet>>,
 }
 
-/// `OSCEState` (a C union of the LACE and NoLACE states; see the module deviations).
-#[derive(Debug, Clone, Default, PartialEq)]
+impl OsceModel {
+    /// `lace` (an unbound model before it is loaded).
+    #[must_use]
+    pub fn lace(&self) -> Cow<'_, Lace> {
+        match &self.lace {
+            Some(m) => Cow::Borrowed(&**m),
+            None => Cow::Owned(Lace::default()),
+        }
+    }
+
+    /// `nolace` (an unbound model before it is loaded).
+    #[must_use]
+    pub fn nolace(&self) -> Cow<'_, NoLace> {
+        match &self.nolace {
+            Some(m) => Cow::Borrowed(&**m),
+            None => Cow::Owned(NoLace::default()),
+        }
+    }
+
+    /// `bbwenet` (an unbound model before it is loaded).
+    #[must_use]
+    pub fn bbwenet(&self) -> Cow<'_, Bbwenet> {
+        match &self.bbwenet {
+            Some(m) => Cow::Borrowed(&**m),
+            None => Cow::Owned(Bbwenet::default()),
+        }
+    }
+}
+
+/// `OSCEState`: the C union of the LACE and NoLACE states (see the module deviations).
+///
+/// Each member is allocated when first used (`None` is its reset state, the only state it can
+/// have before it runs), and dropped when [`osce_reset`] selects another method. The accessors
+/// give the state of a member as C would see it after `osce_reset` selected its method.
+#[derive(Debug, Clone, Default)]
 pub struct OsceState {
-    pub lace: LaceState,
-    pub nolace: NoLaceState,
+    lace: Option<Box<LaceState>>,
+    nolace: Option<Box<NoLaceState>>,
 }
 
-/// `OSCEBWEState`.
-#[derive(Debug, Clone, Default, PartialEq)]
+impl OsceState {
+    /// The LACE state (its reset state when not allocated).
+    #[must_use]
+    pub fn lace(&self) -> Cow<'_, LaceState> {
+        match &self.lace {
+            Some(b) => Cow::Borrowed(&**b),
+            None => Cow::Owned(new_lace_state()),
+        }
+    }
+
+    /// The LACE state, allocated in its reset state if needed.
+    pub fn lace_mut(&mut self) -> &mut LaceState {
+        self.lace.get_or_insert_with(|| Box::new(new_lace_state()))
+    }
+
+    /// The NoLACE state (its reset state when not allocated).
+    #[must_use]
+    pub fn nolace(&self) -> Cow<'_, NoLaceState> {
+        match &self.nolace {
+            Some(b) => Cow::Borrowed(&**b),
+            None => Cow::Owned(new_nolace_state()),
+        }
+    }
+
+    /// The NoLACE state, allocated in its reset state if needed.
+    pub fn nolace_mut(&mut self) -> &mut NoLaceState {
+        self.nolace
+            .get_or_insert_with(|| Box::new(new_nolace_state()))
+    }
+
+    /// Heap bytes of the state when a method runs (the larger member of the C union).
+    #[must_use]
+    pub const fn max_heap_size() -> usize {
+        if size_of::<LaceState>() > size_of::<NoLaceState>() {
+            size_of::<LaceState>()
+        } else {
+            size_of::<NoLaceState>()
+        }
+    }
+}
+
+impl PartialEq for OsceState {
+    fn eq(&self, other: &Self) -> bool {
+        self.lace() == other.lace() && self.nolace() == other.nolace()
+    }
+}
+
+/// `OSCEBWEState`. The BBWENet state is allocated when first used (`None` is the all-zero
+/// state of `silk_init_decoder`'s memset).
+#[derive(Debug, Clone, Default)]
 pub struct OsceBweState {
-    pub bbwenet: BbwenetState,
+    bbwenet: Option<Box<BbwenetState>>,
+}
+
+impl OsceBweState {
+    /// The BBWENet state (all zero when not allocated).
+    #[must_use]
+    pub fn bbwenet(&self) -> Cow<'_, BbwenetState> {
+        match &self.bbwenet {
+            Some(b) => Cow::Borrowed(&**b),
+            None => Cow::Owned(BbwenetState::default()),
+        }
+    }
+
+    /// The BBWENet state, allocated (all zero) if needed.
+    pub fn bbwenet_mut(&mut self) -> &mut BbwenetState {
+        self.bbwenet.get_or_insert_with(Box::default)
+    }
+
+    /// Heap bytes of the state once BWE ran.
+    #[must_use]
+    pub const fn max_heap_size() -> usize {
+        size_of::<BbwenetState>()
+    }
+}
+
+impl PartialEq for OsceBweState {
+    fn eq(&self, other: &Self) -> bool {
+        self.bbwenet() == other.bbwenet()
+    }
 }
 
 /// `silk_OSCE_struct` (silk/structs.h): the per-channel enhancer state of the SILK decoder.
@@ -478,10 +580,16 @@ pub fn init_lace(weights: &[WeightArray<'_>]) -> Result<Lace> {
 
 /// Port of dnn/osce.c:reset_lace_state (static).
 pub fn reset_lace_state(state: &mut LaceState) {
-    *state = LaceState::default();
+    *state = new_lace_state();
+}
+
+/// A LACE state after [`reset_lace_state`].
+fn new_lace_state() -> LaceState {
+    let mut state = LaceState::default();
     init_adacomb_state(&mut state.cf1_state);
     init_adacomb_state(&mut state.cf2_state);
     init_adaconv_state(&mut state.af1_state);
+    state
 }
 
 /// Port of dnn/osce.c:lace_feature_net (static). `output` receives `4*LACE_COND_DIM` floats,
@@ -742,7 +850,12 @@ pub fn init_nolace(weights: &[WeightArray<'_>]) -> Result<NoLace> {
 
 /// Port of dnn/osce.c:reset_nolace_state (static).
 pub fn reset_nolace_state(state: &mut NoLaceState) {
-    *state = NoLaceState::default();
+    *state = new_nolace_state();
+}
+
+/// A NoLACE state after [`reset_nolace_state`].
+fn new_nolace_state() -> NoLaceState {
+    let mut state = NoLaceState::default();
     init_adacomb_state(&mut state.cf1_state);
     init_adacomb_state(&mut state.cf2_state);
     init_adaconv_state(&mut state.af1_state);
@@ -752,6 +865,7 @@ pub fn reset_nolace_state(state: &mut NoLaceState) {
     init_adashape_state(&mut state.tdshape1_state);
     init_adashape_state(&mut state.tdshape2_state);
     init_adashape_state(&mut state.tdshape3_state);
+    state
 }
 
 /// Port of dnn/osce.c:nolace_feature_net (static). `output` receives `4*NOLACE_COND_DIM`
@@ -1409,10 +1523,10 @@ pub fn bbwenet_process_frames(
     // Feature net.
     bbwe_feature_net(h_bbwenet, state, &mut latent_features, features, num_frames);
 
-    // The C buffers are zero-initialized on the stack; they live in the state here.
-    let mut scratch = core::mem::take(&mut state.scratch);
-    scratch.fill(0.0);
-    let (x_buffer1, x_buffer2) = scratch.split_at_mut(BBWENET_XBUF1_SIZE);
+    // The C buffers are zero-initialized on the stack (only the used part here).
+    let mut x_buffer1 = [0f32; BBWENET_XBUF1_SIZE];
+    let mut x_buffer2 = [0f32; BBWENET_XBUF2_SIZE];
+    let (x_buffer1, x_buffer2) = (&mut x_buffer1[..], &mut x_buffer2[..]);
 
     // Signal net: first adaptive filtering stage, three output channels.
     for i_subframe in 0..num_subframes {
@@ -1570,8 +1684,6 @@ pub fn bbwenet_process_frames(
             &h_bbwenet.window48,
         );
     }
-
-    state.scratch = scratch;
 }
 
 /// Port of dnn/osce.c:reset_bbwenet_state (static).
@@ -1603,10 +1715,26 @@ pub fn init_bbwenet(weights: &[WeightArray<'_>]) -> Result<Bbwenet> {
 pub fn osce_reset(h_osce: &mut SilkOsceStruct, method: i32) {
     h_osce.features = OsceFeatureState::default();
 
+    // The members not selected here are dead until `osce_reset` selects their method again
+    // (a C union), so they are dropped; the selected one is reset in place if allocated.
+    let state = &mut h_osce.state;
     match method {
-        OSCE_METHOD_NONE => {}
-        OSCE_METHOD_LACE => reset_lace_state(&mut h_osce.state.lace),
-        OSCE_METHOD_NOLACE => reset_nolace_state(&mut h_osce.state.nolace),
+        OSCE_METHOD_NONE => {
+            state.lace = None;
+            state.nolace = None;
+        }
+        OSCE_METHOD_LACE => {
+            state.nolace = None;
+            if let Some(l) = state.lace.as_deref_mut() {
+                reset_lace_state(l);
+            }
+        }
+        OSCE_METHOD_NOLACE => {
+            state.lace = None;
+            if let Some(n) = state.nolace.as_deref_mut() {
+                reset_nolace_state(n);
+            }
+        }
         // C: celt_assert(0 && "method not defined").
         _ => debug_assert!(false, "OSCE method {method} not defined"),
     }
@@ -1621,7 +1749,7 @@ pub fn osce_bwe_reset(h_osce_bwe: &mut SilkOsceBweStruct) {
     for k in 0..=OSCE_BWE_MAX_INSTAFREQ_BIN {
         h_osce_bwe.features.last_spec[2 * k] = 1e-9_f64 as f32;
     }
-    reset_bbwenet_state(&mut h_osce_bwe.state.bbwenet);
+    reset_bbwenet_state(h_osce_bwe.state.bbwenet_mut());
 }
 
 /// Port of dnn/osce.c:osce_load_models: binds LACE, NoLACE and BBWENet from a weight blob.
@@ -1634,11 +1762,10 @@ pub fn osce_bwe_reset(h_osce_bwe: &mut SilkOsceBweStruct) {
 pub fn osce_load_models(model: &mut OsceModel, data: Option<&[u8]>) -> Result<()> {
     match data {
         Some(data) if !data.is_empty() => {
-            // Init from buffer.
-            let list = parse_weights(data)?;
-            model.lace = init_lace(&list)?;
-            model.nolace = init_nolace(&list)?;
-            model.bbwenet = init_bbwenet(&list)?;
+            // Init from buffer (the models of the embedded blob are shared).
+            model.lace = Some(load_shared(data, init_lace, &LACE_CACHE)?);
+            model.nolace = Some(load_shared(data, init_nolace, &NOLACE_CACHE)?);
+            model.bbwenet = Some(load_shared(data, init_bbwenet, &BBWENET_CACHE)?);
             Ok(())
         }
         // USE_WEIGHTS_FILE: return -1.
@@ -1676,8 +1803,8 @@ pub fn osce_bwe(
 
     // Process frames.
     bbwenet_process_frames(
-        &model.bbwenet,
-        &mut ps_osce_bwe.state.bbwenet,
+        &model.bbwenet(),
+        ps_osce_bwe.state.bbwenet_mut(),
         &mut out_buffer,
         &in_buffer,
         &features,
@@ -1685,7 +1812,7 @@ pub fn osce_bwe(
     );
 
     // Scale and delay output.
-    let bb = &mut ps_osce_bwe.state.bbwenet;
+    let bb = ps_osce_bwe.state.bbwenet_mut();
     let n_out = 3 * xq16_len;
     xq48[..OSCE_BWE_OUTPUT_DELAY].copy_from_slice(&bb.outbut_buffer);
     for (o, &v) in xq48[OSCE_BWE_OUTPUT_DELAY..n_out]
@@ -1769,8 +1896,8 @@ pub fn osce_enhance_frame(
     match method {
         OSCE_METHOD_NONE => out_buffer.copy_from_slice(&in_buffer),
         OSCE_METHOD_LACE => lace_process_20ms_frame(
-            &model.lace,
-            &mut ps_dec_osce.state.lace,
+            &model.lace(),
+            ps_dec_osce.state.lace_mut(),
             &mut out_buffer,
             &in_buffer,
             &features,
@@ -1778,8 +1905,8 @@ pub fn osce_enhance_frame(
             &periods,
         ),
         OSCE_METHOD_NOLACE => nolace_process_20ms_frame(
-            &model.nolace,
-            &mut ps_dec_osce.state.nolace,
+            &model.nolace(),
+            ps_dec_osce.state.nolace_mut(),
             &mut out_buffer,
             &in_buffer,
             &features,

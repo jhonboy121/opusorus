@@ -18,9 +18,19 @@
 //! `OPUS_UNIMPLEMENTED`). The structure of the blob is validated at compile time.
 //!
 //! `set_dnn_blob` still works and replaces the embedded models.
+//!
+//! With `std`, each model of the embedded blob is bound once per process and shared (`Arc`)
+//! by every decoder and encoder, as C shares its compiled-in tables; without `std` (no
+//! `OnceLock`) each creation binds its own copy.
 
 /// The embedded weight blob (the file named by `OPUSORUS_DNN_BLOB` at build time).
-pub const DNN_BLOB: &[u8] = include_bytes!(env!(
+///
+/// A `static`, so that every use has the same address: the models bound from it are cached
+/// and shared by address (`parse_lpcnet_weights::load_shared`).
+pub static DNN_BLOB: &[u8] = BLOB;
+
+/// The embedded bytes (a `const` for the compile-time validation below).
+const BLOB: &[u8] = include_bytes!(env!(
     "OPUSORUS_DNN_BLOB",
     "the `dnn-weights-embedded` feature needs OPUSORUS_DNN_BLOB set to the absolute path of a \
      libopus DNN weight blob; generate one with scripts/gen_dnn_blob.sh (after \
@@ -64,7 +74,7 @@ const fn is_weight_blob(b: &[u8]) -> bool {
 }
 
 const _: () = assert!(
-    is_weight_blob(DNN_BLOB),
+    is_weight_blob(BLOB),
     "OPUSORUS_DNN_BLOB is not a libopus DNN weight blob (generate one with scripts/gen_dnn_blob.sh)"
 );
 

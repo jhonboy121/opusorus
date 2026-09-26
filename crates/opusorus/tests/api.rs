@@ -109,14 +109,6 @@ fn strerror() {
     }
 }
 
-/// Upper bound libopus' test puts on a decoder's size (`1 << 18`). With OSCE the Rust decoder
-/// keeps the OSCE feature/model state inline and preallocates its output scratch (C uses the stack),
-/// so its footprint is ~280 KB; shrinking it is tracked in docs/TRACKER.md ("memory footprint").
-#[cfg(not(feature = "osce"))]
-const DEC_SIZE_BOUND: usize = 1 << 18;
-#[cfg(feature = "osce")]
-const DEC_SIZE_BOUND: usize = 1 << 19;
-
 /// Port of `test_dec_api`.
 #[test]
 fn dec_api() {
@@ -127,10 +119,7 @@ fn dec_api() {
     for c in 0..4 {
         let i = Decoder::get_size(c);
         if c == 1 || c == 2 {
-            assert!(
-                i > 2048 && i <= DEC_SIZE_BOUND,
-                "opus_decoder_get_size({c})={i}"
-            );
+            assert!(i > 2048 && i <= 1 << 18, "opus_decoder_get_size({c})={i}");
         } else {
             assert_eq!(i, 0);
         }
@@ -334,7 +323,7 @@ fn msdec_api() {
             let i = MsDecoder::get_size(a, b);
             if a > 0 && b <= a && b >= 0 {
                 assert!(
-                    i > 2048 && i <= DEC_SIZE_BOUND * a as usize,
+                    i > 2048 && i <= (1 << 18) * a as usize,
                     "opus_multistream_decoder_get_size({a},{b})={i}"
                 );
             } else {

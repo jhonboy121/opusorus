@@ -116,7 +116,7 @@ fn dump_osce(s: &SilkOsceStruct) -> Vec<u32> {
     v.push(f.reset as u32);
     put_f(&mut v, &f.signal_history);
     if s.method == o::OSCE_METHOD_LACE {
-        let l = &s.state.lace;
+        let l = s.state.lace();
         put_f(&mut v, &l.feature_net_conv2_state);
         put_f(&mut v, &l.feature_net_gru_state);
         put_comb(&mut v, &l.cf1_state);
@@ -124,7 +124,7 @@ fn dump_osce(s: &SilkOsceStruct) -> Vec<u32> {
         put_conv(&mut v, &l.af1_state);
         put_f(&mut v, &[l.preemph_mem, l.deemph_mem]);
     } else if s.method == o::OSCE_METHOD_NOLACE {
-        let n = &s.state.nolace;
+        let n = s.state.nolace();
         put_f(&mut v, &n.feature_net_conv2_state);
         put_f(&mut v, &n.feature_net_gru_state);
         put_f(&mut v, &n.post_cf1_state);
@@ -148,7 +148,7 @@ fn dump_osce(s: &SilkOsceStruct) -> Vec<u32> {
 
 fn dump_bwe(b: &SilkOsceBweStruct) -> Vec<u32> {
     let mut v = Vec::new();
-    let s = &b.state.bbwenet;
+    let s = b.state.bbwenet();
     put_f(&mut v, &b.features.signal_history);
     put_f(&mut v, &b.features.last_spec);
     put_f(&mut v, &s.feature_net_conv1_state);
@@ -269,11 +269,11 @@ fn speech16(n: usize, seed: u64) -> Vec<i16> {
 fn load_models() {
     let (m, _) = models();
     let mut cm = c_model();
-    assert_bits_eq_f32("lace window", &m.lace.window, &cm.window(0));
-    assert_bits_eq_f32("nolace window", &m.nolace.window, &cm.window(1));
-    assert_bits_eq_f32("bbwenet window16", &m.bbwenet.window16, &cm.window(2));
-    assert_bits_eq_f32("bbwenet window32", &m.bbwenet.window32, &cm.window(3));
-    assert_bits_eq_f32("bbwenet window48", &m.bbwenet.window48, &cm.window(4));
+    assert_bits_eq_f32("lace window", &m.lace().window, &cm.window(0));
+    assert_bits_eq_f32("nolace window", &m.nolace().window, &cm.window(1));
+    assert_bits_eq_f32("bbwenet window16", &m.bbwenet().window16, &cm.window(2));
+    assert_bits_eq_f32("bbwenet window32", &m.bbwenet().window32, &cm.window(3));
+    assert_bits_eq_f32("bbwenet window48", &m.bbwenet().window48, &cm.window(4));
     // Compiled-in C tables load too.
     let (_, ret) = c::Model::new(None);
     assert_eq!(ret, 0);
@@ -299,9 +299,9 @@ fn load_models() {
     // A successful load binds every layer like C (checked through outputs in the other tests).
     let mut r = OsceModel::default();
     o::osce_load_models(&mut r, Some(blob())).unwrap();
-    assert_eq!(r.lace, m.lace);
-    assert_eq!(r.nolace, m.nolace);
-    assert_eq!(r.bbwenet, m.bbwenet);
+    assert_eq!(r.lace(), m.lace());
+    assert_eq!(r.nolace(), m.nolace());
+    assert_eq!(r.bbwenet(), m.bbwenet());
 }
 
 #[test]
@@ -555,8 +555,8 @@ fn lace_nolace_networks() {
                 let mut out = vec![0f32; cv.len()];
                 if nolace {
                     o::nolace_feature_net(
-                        &m.nolace,
-                        &mut rs.state.nolace,
+                        &m.nolace(),
+                        rs.state.nolace_mut(),
                         &mut out,
                         feats,
                         numbits,
@@ -564,8 +564,8 @@ fn lace_nolace_networks() {
                     );
                 } else {
                     o::lace_feature_net(
-                        &m.lace,
-                        &mut rs.state.lace,
+                        &m.lace(),
+                        rs.state.lace_mut(),
                         &mut out,
                         feats,
                         numbits,
@@ -579,8 +579,8 @@ fn lace_nolace_networks() {
                 let mut out = vec![0f32; 320];
                 if nolace {
                     o::nolace_process_20ms_frame(
-                        &m.nolace,
-                        &mut rs.state.nolace,
+                        &m.nolace(),
+                        rs.state.nolace_mut(),
                         &mut out,
                         &x,
                         feats,
@@ -589,8 +589,8 @@ fn lace_nolace_networks() {
                     );
                 } else {
                     o::lace_process_20ms_frame(
-                        &m.lace,
-                        &mut rs.state.lace,
+                        &m.lace(),
+                        rs.state.lace_mut(),
                         &mut out,
                         &x,
                         feats,
@@ -691,13 +691,20 @@ fn bwe_direct() {
         if f % 2 == 0 {
             let cv = c_net.feature_net(&mut cm, &cf, nf);
             let mut out = vec![0f32; cv.len()];
-            o::bbwe_feature_net(&m.bbwenet, &mut r_net.state.bbwenet, &mut out, &cf, nf);
+            o::bbwe_feature_net(&m.bbwenet(), r_net.state.bbwenet_mut(), &mut out, &cf, nf);
             assert_bits_eq_f32(&format!("bwe feature net {f}"), &out, &cv);
         } else {
             let x: Vec<f32> = xq.iter().map(|&v| v as f32 * (1.0 / 32768.0)).collect();
             let cv = c_net.process_frames(&mut cm, &x, &cf, nf);
             let mut out = vec![0f32; cv.len()];
-            o::bbwenet_process_frames(&m.bbwenet, &mut r_net.state.bbwenet, &mut out, &x, &cf, nf);
+            o::bbwenet_process_frames(
+                &m.bbwenet(),
+                r_net.state.bbwenet_mut(),
+                &mut out,
+                &x,
+                &cf,
+                nf,
+            );
             assert_bits_eq_f32(&format!("bwe process frames {f}"), &out, &cv);
         }
         assert_dump_eq(

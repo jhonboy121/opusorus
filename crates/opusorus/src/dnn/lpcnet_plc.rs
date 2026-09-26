@@ -23,11 +23,14 @@
 //!   silk/PLC.c:404), guarded by `loaded`.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::Result;
 use crate::celt::arch::max16;
 
-use super::fargan::{FARGAN_CONT_SAMPLES, FarganState, fargan_cont, fargan_synthesize_int};
+use super::fargan::{
+    FARGAN_CONT_SAMPLES, Fargan, FarganState, fargan_cont, fargan_synthesize_int, load_fargan,
+};
 use super::freq::{FRAME_SIZE, NB_BANDS, burg_cepstral_analysis};
 use super::lpcnet_enc::{
     CONT_VECTORS, LpcnetEncState, NB_FEATURES, NB_TOTAL_FEATURES, PLC_MAX_FEC,
@@ -36,7 +39,8 @@ use super::lpcnet_enc::{
 use super::nnet::{
     ACTIVATION_LINEAR, ACTIVATION_TANH, LinearLayer, compute_generic_dense, compute_generic_gru,
 };
-use super::parse_lpcnet_weights::{WeightArray, linear_init, parse_weights};
+use super::parse_lpcnet_weights::{ModelCache, WeightArray, linear_init, load_shared};
+use super::pitchdnn::{PitchDnn, load_pitchdnn};
 
 // ---- plc_data.h (generated) ----------------------------------------------------------------
 
@@ -168,13 +172,62 @@ impl Default for PlcNetState {
     }
 }
 
-/// `struct LPCNetPLCState` (lpcnet_private.h). The C `arch` field is dropped; the fields from
-/// `fec` on are the ones `lpcnet_plc_reset` clears (`LPCNET_PLC_RESET_START`).
+/// The PLC model of the embedded weight blob (see [`load_shared`]).
+static MODEL_CACHE: ModelCache<PlcModel> = ModelCache::new();
+
+/// The fields of `struct LPCNetPLCState` that only a loaded model reads or writes: the models
+/// (`model`, and those of `fargan` and `enc`, shared through [`Arc`]s), the FARGAN and feature
+/// extraction states, `features`, `cont_features`, `plc_net` and `plc_bak`.
+///
+/// C only touches these in `lpcnet_plc_conceal` (which requires `loaded`) and in
+/// `lpcnet_plc_init` / `lpcnet_plc_reset`, which put them back in their initial state; so
+/// until a model loads they are in that state, and [`LpcnetPlcState`] only allocates them
+/// when [`LpcnetPlcState::load_model`] succeeds (see [`LpcnetPlcState::dnn`]).
 #[derive(Debug, Clone, PartialEq)]
-pub struct LpcnetPlcState {
-    pub model: PlcModel,
+pub struct PlcDnn {
+    pub model: Arc<PlcModel>,
     pub fargan: FarganState,
     pub enc: LpcnetEncState,
+    pub features: [f32; NB_TOTAL_FEATURES],
+    pub cont_features: [f32; CONT_VECTORS * NB_FEATURES],
+    pub plc_net: PlcNetState,
+    pub plc_bak: [PlcNetState; 2],
+}
+
+impl PlcDnn {
+    /// The state `lpcnet_plc_init` leaves with the given models bound.
+    #[must_use]
+    pub fn new(model: Arc<PlcModel>, pitchdnn: Arc<PitchDnn>, fargan: Arc<Fargan>) -> Self {
+        Self {
+            model,
+            fargan: FarganState::with_model(fargan),
+            enc: LpcnetEncState::with_pitch_model(pitchdnn),
+            features: [0.0; NB_TOTAL_FEATURES],
+            cont_features: [0.0; CONT_VECTORS * NB_FEATURES],
+            plc_net: PlcNetState::default(),
+            plc_bak: [PlcNetState::default(); 2],
+        }
+    }
+
+    /// The `lpcnet_plc_reset` part for these fields.
+    fn reset(&mut self) {
+        self.features.fill(0.0);
+        self.cont_features.fill(0.0);
+        self.plc_net = PlcNetState::default();
+        self.plc_bak = [PlcNetState::default(); 2];
+        self.enc.lpcnet_encoder_init();
+    }
+}
+
+/// `struct LPCNetPLCState` (lpcnet_private.h). The C `arch` field is dropped; the fields from
+/// `fec` on are the ones `lpcnet_plc_reset` clears (`LPCNET_PLC_RESET_START`), together with
+/// the reset part of [`PlcDnn`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LpcnetPlcState {
+    /// The models and the fields only a loaded model uses ([`PlcDnn`]): allocated when
+    /// [`Self::load_model`] first succeeds, `None` (their initial state) until then.
+    pub dnn: Option<Box<PlcDnn>>,
+    /// C `loaded`: whether `dnn` is allocated.
     pub loaded: bool,
 
     // LPCNET_PLC_RESET_START
@@ -187,11 +240,7 @@ pub struct LpcnetPlcState {
     pub predict_pos: i32,
     pub pcm: [f32; PLC_BUF_SIZE],
     pub blend: i32,
-    pub features: [f32; NB_TOTAL_FEATURES],
-    pub cont_features: [f32; CONT_VECTORS * NB_FEATURES],
     pub loss_count: i32,
-    pub plc_net: PlcNetState,
-    pub plc_bak: [PlcNetState; 2],
 }
 
 impl Default for LpcnetPlcState {
@@ -204,11 +253,9 @@ impl Default for LpcnetPlcState {
 
 impl LpcnetPlcState {
     /// All-zero state (no model).
-    fn new_inline() -> Self {
+    const fn new_inline() -> Self {
         Self {
-            model: PlcModel::default(),
-            fargan: FarganState::new_inline(),
-            enc: LpcnetEncState::default(),
+            dnn: None,
             loaded: false,
             fec: [[0.0; NB_FEATURES]; PLC_MAX_FEC],
             analysis_gap: 0,
@@ -219,11 +266,7 @@ impl LpcnetPlcState {
             predict_pos: 0,
             pcm: [0.0; PLC_BUF_SIZE],
             blend: 0,
-            features: [0.0; NB_TOTAL_FEATURES],
-            cont_features: [0.0; CONT_VECTORS * NB_FEATURES],
             loss_count: 0,
-            plc_net: PlcNetState::default(),
-            plc_bak: [PlcNetState::default(); 2],
         }
     }
 
@@ -233,6 +276,22 @@ impl LpcnetPlcState {
         let mut st = Box::new(Self::new_inline());
         st.lpcnet_plc_init();
         st
+    }
+
+    /// C `features` (all zero until a model is loaded).
+    #[must_use]
+    pub fn features(&self) -> [f32; NB_TOTAL_FEATURES] {
+        match &self.dnn {
+            Some(d) => d.features,
+            None => [0.0; NB_TOTAL_FEATURES],
+        }
+    }
+
+    /// Heap bytes owned by the state besides the state itself once a model is loaded: the
+    /// [`PlcDnn`] box and its buffers (the shared models excluded).
+    #[must_use]
+    pub const fn loaded_heap_size() -> usize {
+        size_of::<PlcDnn>() + LpcnetEncState::HEAP_SIZE
     }
 
     /// Port of dnn/lpcnet_plc.c:lpcnet_plc_reset.
@@ -247,12 +306,12 @@ impl LpcnetPlcState {
         self.predict_pos = 0;
         self.pcm.fill(0.0);
         self.blend = 0;
-        self.features.fill(0.0);
-        self.cont_features.fill(0.0);
         self.loss_count = 0;
-        self.plc_net = PlcNetState::default();
-        self.plc_bak = [PlcNetState::default(); 2];
-        self.enc.lpcnet_encoder_init();
+        // (and `features`, `cont_features`, `plc_net`, `plc_bak`, then
+        // `lpcnet_encoder_init(&st->enc)`)
+        if let Some(d) = self.dnn.as_deref_mut() {
+            d.reset();
+        }
         self.pcm.fill(0.0);
         self.blend = 0;
         self.loss_count = 0;
@@ -268,22 +327,35 @@ impl LpcnetPlcState {
     /// loaded (and therefore `loaded`), which is the equivalent of the compiled-in tables:
     /// `fargan_init` / `lpcnet_encoder_init` likewise keep their models.
     pub fn lpcnet_plc_init(&mut self) {
-        self.fargan.fargan_init();
-        self.enc.lpcnet_encoder_init();
+        if let Some(d) = self.dnn.as_deref_mut() {
+            d.fargan.fargan_init();
+            d.enc.lpcnet_encoder_init();
+        }
         self.lpcnet_plc_reset();
     }
 
     /// Port of dnn/lpcnet_plc.c:lpcnet_plc_load_model: binds the PLC model, the pitch DNN
-    /// (feature extraction) and FARGAN from one weight blob (C returns -1 on failure).
+    /// (feature extraction) and FARGAN from one weight blob (C returns -1 on failure). The
+    /// models of the embedded blob (`dnn-weights-embedded`) are shared by every state.
     ///
-    /// As in C, each model that binds successfully is replaced even when a later one fails,
-    /// and `loaded` is only set when all three succeed. (C also partially overwrites the
-    /// failing model; the port keeps it, and rejects an unparsable blob instead of crashing.)
+    /// As in C, with models already loaded each model that binds successfully is replaced even
+    /// when a later one fails, and `loaded` is only set when all three succeed. (C also
+    /// partially overwrites the failing model; the port keeps it, and rejects an unparsable
+    /// blob instead of crashing.) Without loaded models a failed load leaves the state
+    /// unchanged: the models C would have bound so far are never used before a later load
+    /// binds all three again.
     pub fn load_model(&mut self, data: &[u8]) -> Result<()> {
-        let list = parse_weights(data)?;
-        self.model = init_plcmodel(&list)?;
-        self.enc.load_model(data)?;
-        self.fargan.load_model(data)?;
+        let model = load_shared(data, init_plcmodel, &MODEL_CACHE)?;
+        if let Some(d) = self.dnn.as_deref_mut() {
+            d.model = model;
+            d.enc.pitchdnn.model = load_pitchdnn(data)?;
+            d.fargan.model = load_fargan(data)?;
+        } else {
+            let pitchdnn = load_pitchdnn(data)?;
+            let fargan = load_fargan(data)?;
+            // The fields only a loaded model uses are still in their `lpcnet_plc_init` state.
+            self.dnn = Some(Box::new(PlcDnn::new(model, pitchdnn, fargan)));
+        }
         self.loaded = true;
         Ok(())
     }
@@ -330,11 +402,10 @@ pub const fn lpcnet_plc_fec_clear(st: &mut LpcnetPlcState) {
 
 /// Port of dnn/lpcnet_plc.c:compute_plc_pred (static). `input` holds [`PLC_INPUT_SIZE`]
 /// values; `out` receives `PLC_DENSE_OUT_OUT_SIZE` (= `NB_FEATURES`).
-pub fn compute_plc_pred(st: &mut LpcnetPlcState, out: &mut [f32], input: &[f32]) {
+pub fn compute_plc_pred(st: &mut PlcDnn, out: &mut [f32], input: &[f32]) {
     let mut tmp = [0f32; PLC_DENSE_IN_OUT_SIZE];
-    let model = &st.model;
+    let model = &*st.model;
     let net = &mut st.plc_net;
-    debug_assert!(st.loaded);
     compute_generic_dense(&model.plc_dense_in, &mut tmp, input, ACTIVATION_TANH);
     compute_generic_gru(
         &model.plc_gru1_input,
@@ -356,48 +427,82 @@ pub fn compute_plc_pred(st: &mut LpcnetPlcState, out: &mut [f32], input: &[f32])
     );
 }
 
+/// The FEC queue fields of [`LpcnetPlcState`] read by `get_fec_or_pred`.
+struct FecQueue<'a> {
+    fec: &'a [[f32; NB_FEATURES]; PLC_MAX_FEC],
+    fec_read_pos: &'a mut i32,
+    fec_fill_pos: i32,
+    fec_skip: &'a mut i32,
+}
+
 /// Port of dnn/lpcnet_plc.c:get_fec_or_pred (static): the next queued FEC vector (returns
 /// true) or a prediction (false), written to `out[..NB_FEATURES]`.
+///
+/// Requires a loaded model (like its only caller, `lpcnet_plc_conceal`); returns false and
+/// leaves `out` unchanged otherwise.
 pub fn get_fec_or_pred(st: &mut LpcnetPlcState, out: &mut [f32]) -> bool {
-    if st.fec_read_pos != st.fec_fill_pos && st.fec_skip == 0 {
+    let LpcnetPlcState {
+        dnn: Some(dnn),
+        fec,
+        fec_read_pos,
+        fec_fill_pos,
+        fec_skip,
+        ..
+    } = st
+    else {
+        debug_assert!(false, "get_fec_or_pred without a loaded model");
+        return false;
+    };
+    let mut q = FecQueue {
+        fec,
+        fec_read_pos,
+        fec_fill_pos: *fec_fill_pos,
+        fec_skip,
+    };
+    fec_or_pred(dnn, &mut q, out)
+}
+
+/// The body of [`get_fec_or_pred`].
+fn fec_or_pred(dnn: &mut PlcDnn, q: &mut FecQueue<'_>, out: &mut [f32]) -> bool {
+    if *q.fec_read_pos != q.fec_fill_pos && *q.fec_skip == 0 {
         let mut plc_features = [0f32; PLC_INPUT_SIZE];
         let mut discard = [0f32; NB_FEATURES];
-        out[..NB_FEATURES].copy_from_slice(&st.fec[st.fec_read_pos as usize]);
-        st.fec_read_pos += 1;
+        out[..NB_FEATURES].copy_from_slice(&q.fec[*q.fec_read_pos as usize]);
+        *q.fec_read_pos += 1;
         // Update PLC state using FEC, so without Burg features.
         plc_features[2 * NB_BANDS..2 * NB_BANDS + NB_FEATURES].copy_from_slice(&out[..NB_FEATURES]);
         plc_features[2 * NB_BANDS + NB_FEATURES] = -1.0;
-        compute_plc_pred(st, &mut discard, &plc_features);
+        compute_plc_pred(dnn, &mut discard, &plc_features);
         true
     } else {
         let zeros = [0f32; PLC_INPUT_SIZE];
-        compute_plc_pred(st, out, &zeros);
-        if st.fec_skip > 0 {
-            st.fec_skip -= 1;
+        compute_plc_pred(dnn, out, &zeros);
+        if *q.fec_skip > 0 {
+            *q.fec_skip -= 1;
         }
         false
     }
 }
 
-/// [`get_fec_or_pred`] into `st.features` (the C calls pass `st->features` as `out`).
-fn get_fec_or_pred_features(st: &mut LpcnetPlcState) -> bool {
+/// [`get_fec_or_pred`] into `dnn.features` (the C calls pass `st->features` as `out`).
+fn get_fec_or_pred_features(dnn: &mut PlcDnn, q: &mut FecQueue<'_>) -> bool {
     let mut out = [0f32; NB_FEATURES];
-    out.copy_from_slice(&st.features[..NB_FEATURES]);
-    let ret = get_fec_or_pred(st, &mut out);
-    st.features[..NB_FEATURES].copy_from_slice(&out);
+    out.copy_from_slice(&dnn.features[..NB_FEATURES]);
+    let ret = fec_or_pred(dnn, q, &mut out);
+    dnn.features[..NB_FEATURES].copy_from_slice(&out);
     ret
 }
 
 /// Port of dnn/lpcnet_plc.c:queue_features (static): appends `NB_FEATURES` values to the
 /// `CONT_VECTORS`-deep history used by `fargan_cont`.
-pub fn queue_features(st: &mut LpcnetPlcState, features: &[f32]) {
+pub fn queue_features(st: &mut PlcDnn, features: &[f32]) {
     st.cont_features
         .copy_within(NB_FEATURES..CONT_VECTORS * NB_FEATURES, 0);
     st.cont_features[(CONT_VECTORS - 1) * NB_FEATURES..].copy_from_slice(&features[..NB_FEATURES]);
 }
 
 /// [`queue_features`] of `st.features`.
-fn queue_own_features(st: &mut LpcnetPlcState) {
+fn queue_own_features(st: &mut PlcDnn) {
     let mut f = [0f32; NB_FEATURES];
     f.copy_from_slice(&st.features[..NB_FEATURES]);
     queue_features(st, &f);
@@ -442,81 +547,105 @@ const ATT_TABLE: [f32; 10] = [
 /// Port of dnn/lpcnet_plc.c:lpcnet_plc_conceal: synthesizes one lost 10 ms frame
 /// (`FRAME_SIZE` samples at 16 kHz) into `pcm`. C always returns 0.
 ///
-/// The model must be loaded (C asserts `st->loaded`; callers check it). Without a model
-/// every unbound layer outputs zeros instead of C's NULL dereference.
+/// The model must be loaded (C asserts `st->loaded`; callers check it). Without a model this
+/// writes silence and leaves the state unchanged (C would dereference NULL layers).
 pub fn lpcnet_plc_conceal(st: &mut LpcnetPlcState, pcm: &mut [i16]) {
     debug_assert!(st.loaded);
-    if st.blend == 0 {
+    let LpcnetPlcState {
+        dnn: Some(dnn),
+        fec,
+        analysis_gap,
+        fec_read_pos,
+        fec_fill_pos,
+        fec_skip,
+        analysis_pos,
+        predict_pos,
+        pcm: buf,
+        blend,
+        loss_count,
+        ..
+    } = st
+    else {
+        pcm[..FRAME_SIZE].fill(0);
+        return;
+    };
+    let mut q = FecQueue {
+        fec,
+        fec_read_pos,
+        fec_fill_pos: *fec_fill_pos,
+        fec_skip,
+    };
+    if *blend == 0 {
         let mut count = 0;
-        st.plc_net = st.plc_bak[0];
-        while st.analysis_pos + FRAME_SIZE as i32 <= PLC_BUF_SIZE as i32 {
+        dnn.plc_net = dnn.plc_bak[0];
+        while *analysis_pos + FRAME_SIZE as i32 <= PLC_BUF_SIZE as i32 {
             let mut x = [0f32; FRAME_SIZE];
             let mut plc_features = [0f32; PLC_INPUT_SIZE];
-            debug_assert!(st.analysis_pos >= 0);
-            let apos = st.analysis_pos as usize;
-            for (xi, &p) in x.iter_mut().zip(&st.pcm[apos..apos + FRAME_SIZE]) {
+            debug_assert!(*analysis_pos >= 0);
+            let apos = *analysis_pos as usize;
+            for (xi, &p) in x.iter_mut().zip(&buf[apos..apos + FRAME_SIZE]) {
                 *xi = 32768.0f32 * p;
             }
             burg_cepstral_analysis(&mut plc_features, &x);
-            lpcnet_compute_single_frame_features_float(&mut st.enc, &x, &mut st.features);
-            if (st.analysis_gap == 0 || count > 0) && st.analysis_pos >= st.predict_pos {
-                queue_own_features(st);
+            lpcnet_compute_single_frame_features_float(&mut dnn.enc, &x, &mut dnn.features);
+            if (*analysis_gap == 0 || count > 0) && *analysis_pos >= *predict_pos {
+                queue_own_features(dnn);
                 plc_features[2 * NB_BANDS..2 * NB_BANDS + NB_FEATURES]
-                    .copy_from_slice(&st.features[..NB_FEATURES]);
+                    .copy_from_slice(&dnn.features[..NB_FEATURES]);
                 plc_features[2 * NB_BANDS + NB_FEATURES] = 1.0;
-                st.plc_bak[0] = st.plc_bak[1];
-                st.plc_bak[1] = st.plc_net;
+                dnn.plc_bak[0] = dnn.plc_bak[1];
+                dnn.plc_bak[1] = dnn.plc_net;
                 let mut out = [0f32; NB_FEATURES];
-                compute_plc_pred(st, &mut out, &plc_features);
-                st.features[..NB_FEATURES].copy_from_slice(&out);
+                compute_plc_pred(dnn, &mut out, &plc_features);
+                dnn.features[..NB_FEATURES].copy_from_slice(&out);
             }
-            st.analysis_pos += FRAME_SIZE as i32;
+            *analysis_pos += FRAME_SIZE as i32;
             count += 1;
         }
-        st.plc_bak[0] = st.plc_bak[1];
-        st.plc_bak[1] = st.plc_net;
-        get_fec_or_pred_features(st);
-        queue_own_features(st);
-        st.plc_bak[0] = st.plc_bak[1];
-        st.plc_bak[1] = st.plc_net;
-        get_fec_or_pred_features(st);
-        queue_own_features(st);
+        dnn.plc_bak[0] = dnn.plc_bak[1];
+        dnn.plc_bak[1] = dnn.plc_net;
+        get_fec_or_pred_features(dnn, &mut q);
+        queue_own_features(dnn);
+        dnn.plc_bak[0] = dnn.plc_bak[1];
+        dnn.plc_bak[1] = dnn.plc_net;
+        get_fec_or_pred_features(dnn, &mut q);
+        queue_own_features(dnn);
         fargan_cont(
-            &mut st.fargan,
-            &st.pcm[PLC_BUF_SIZE - FARGAN_CONT_SAMPLES..],
-            &st.cont_features,
+            &mut dnn.fargan,
+            &buf[PLC_BUF_SIZE - FARGAN_CONT_SAMPLES..],
+            &dnn.cont_features,
         );
-        st.analysis_gap = 0;
+        *analysis_gap = 0;
     }
-    st.plc_bak[0] = st.plc_bak[1];
-    st.plc_bak[1] = st.plc_net;
-    if get_fec_or_pred_features(st) {
-        st.loss_count = 0;
+    dnn.plc_bak[0] = dnn.plc_bak[1];
+    dnn.plc_bak[1] = dnn.plc_net;
+    if get_fec_or_pred_features(dnn, &mut q) {
+        *loss_count = 0;
     } else {
-        st.loss_count += 1;
+        *loss_count += 1;
     }
-    if st.loss_count >= 10 {
-        st.features[0] = max16(
+    if *loss_count >= 10 {
+        dnn.features[0] = max16(
             -15.0,
-            st.features[0] + ATT_TABLE[9] - (2 * (st.loss_count - 9)) as f32,
+            dnn.features[0] + ATT_TABLE[9] - (2 * (*loss_count - 9)) as f32,
         );
     } else {
-        st.features[0] = max16(-15.0, st.features[0] + ATT_TABLE[st.loss_count as usize]);
+        dnn.features[0] = max16(-15.0, dnn.features[0] + ATT_TABLE[*loss_count as usize]);
     }
-    fargan_synthesize_int(&mut st.fargan, pcm, &st.features);
-    queue_own_features(st);
-    if st.analysis_pos - FRAME_SIZE as i32 >= 0 {
-        st.analysis_pos -= FRAME_SIZE as i32;
+    fargan_synthesize_int(&mut dnn.fargan, pcm, &dnn.features);
+    queue_own_features(dnn);
+    if *analysis_pos - FRAME_SIZE as i32 >= 0 {
+        *analysis_pos -= FRAME_SIZE as i32;
     } else {
-        st.analysis_gap = 1;
+        *analysis_gap = 1;
     }
-    st.predict_pos = PLC_BUF_SIZE as i32;
-    st.pcm.copy_within(FRAME_SIZE.., 0);
-    for (d, &s) in st.pcm[PLC_BUF_SIZE - FRAME_SIZE..]
+    *predict_pos = PLC_BUF_SIZE as i32;
+    buf.copy_within(FRAME_SIZE.., 0);
+    for (d, &s) in buf[PLC_BUF_SIZE - FRAME_SIZE..]
         .iter_mut()
         .zip(&pcm[..FRAME_SIZE])
     {
         *d = (1.0f32 / 32768.0f32) * f32::from(s);
     }
-    st.blend = 1;
+    *blend = 1;
 }

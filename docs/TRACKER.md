@@ -78,15 +78,15 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 
 | Item | Notes |
 |---|---|
-| Memory footprint | `Decoder::get_size`: Rust 75 KB (1 ch) vs C 18 KB without DNN, 245–280 KB vs 192–200 KB with OSCE. Causes: preallocated 120 ms output scratch (C uses stack), inline OSCE state. Plan: allocate DNN state lazily when weights load, shrink scratch. |
+| Decoder memory footprint (rest) | Done (see STATUS "Decoder memory"): with the DNN features Rust ≤ C; without them Rust 36/49 KB vs C 18/27 KB (mono/stereo). Remaining: the `quant_all_bands` scratch (`BandsScratch`, celt/bands.rs, ≈12 KB per CELT decoder) could become stack arrays; the int16/int24 `out` buffer (20 ms) stays on the heap because a stack array would be zeroed per call. `justfile` `float_all` can now include `opusorus-capi/osce` (test_opus_api's 256 KiB bound holds). |
 | DNN fuzz targets, custom-modes fuzz target | fuzz crate has no DNN/OpusCustom targets yet |
 | FFT/MDCT vectorisation | contiguous per-stage twiddles could let LLVM vectorise butterflies (still bit-exact) |
-| Shared parsed DNN models | each Decoder/Encoder re-parses the embedded 4 MB blob; share via `Arc` |
 
 ## Performance log
 
 | Date | Item | Result |
 |---|---|---|
+| 2026-09-26 | Decoder memory footprint | decode benches vs before: CELT stereo +0.3 %, surround 5.1 +0.7 % (stack arrays for the C VLAs, zeroed per frame), hybrid/SILK ±0.1–0.3 %; all within criterion's noise threshold |
 | 2026-09-26 | Performance pass | SILK decode 1.39→0.83× C scalar; all codec benches 0.70–0.90× C scalar, 0.88–1.10× C NEON; C ABI release −7.8% sections |
 | 2026-09-26 | Full benchmark suite (layer E) | Rust ≈ C scalar (0.87–1.05×), SILK decode 1.39×; vs C NEON 1.07–1.37× |
 | 2026-09-26 | CELT decoder (layer C) | 0.92× C time |

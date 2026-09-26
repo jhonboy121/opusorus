@@ -5,6 +5,7 @@
 //! management and map to [`LpcnetEncState::new`] and `Drop`.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::Result;
 use crate::celt::arch::{max16, min16};
@@ -18,7 +19,9 @@ use super::freq::{
     FRAME_SIZE, FREQ_SIZE, LPC_ORDER, NB_BANDS, OVERLAP_SIZE, PREEMPHASIS, TRAINING_OFFSET,
     WINDOW_SIZE, apply_window, dct, forward_transform, lpc_from_cepstrum, lpcn_compute_band_energy,
 };
-use super::pitchdnn::{PITCH_MAX_PERIOD, PITCH_MIN_PERIOD, PitchDnnState, compute_pitchdnn};
+use super::pitchdnn::{
+    PITCH_MAX_PERIOD, PITCH_MIN_PERIOD, PitchDnn, PitchDnnState, compute_pitchdnn,
+};
 
 /// `NB_FEATURES` (lpcnet.h).
 pub const NB_FEATURES: usize = 20;
@@ -73,8 +76,13 @@ impl Default for LpcnetEncState {
 
 impl LpcnetEncState {
     fn new_inline() -> Self {
+        Self::with_pitchdnn(PitchDnnState::new())
+    }
+
+    /// A cleared state around `pitchdnn` (whose state is cleared by the caller).
+    fn with_pitchdnn(pitchdnn: PitchDnnState) -> Self {
         Self {
-            pitchdnn: PitchDnnState::new(),
+            pitchdnn,
             analysis_mem: [0.0; OVERLAP_SIZE],
             mem_preemph: 0.0,
             prev_if: [KissFftCpx::default(); PITCH_IF_MAX_FREQ],
@@ -103,10 +111,18 @@ impl LpcnetEncState {
     /// Port of dnn/lpcnet_enc.c:lpcnet_encoder_init: clears the state (the loaded pitch model is
     /// kept; upstream re-binds the compiled-in model here).
     pub fn lpcnet_encoder_init(&mut self) {
-        let model = core::mem::take(&mut self.pitchdnn.model);
-        *self = Self::new_inline();
-        self.pitchdnn.model = model;
+        let model = self.pitchdnn.model.clone();
+        *self = Self::with_pitch_model(model);
     }
+
+    /// A state after `lpcnet_encoder_init` with the pitch DNN `model` bound.
+    #[must_use]
+    pub fn with_pitch_model(model: Arc<PitchDnn>) -> Self {
+        Self::with_pitchdnn(PitchDnnState::with_model(model))
+    }
+
+    /// Heap bytes owned by the state (the shared model excluded).
+    pub const HEAP_SIZE: usize = PitchDnnState::HEAP_SIZE;
 
     /// Port of dnn/lpcnet_enc.c:lpcnet_encoder_load_model.
     pub fn load_model(&mut self, data: &[u8]) -> Result<()> {

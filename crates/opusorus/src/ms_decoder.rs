@@ -36,7 +36,6 @@
 //! limited to 120 ms) returns [`Error::BadArg`] where C would write out of bounds. A `mapping`
 //! shorter than `channels` is [`Error::BadArg`].
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::celt::arch::{OpusRes, imin, res2float, res2int16, res2int24};
@@ -45,6 +44,7 @@ use crate::decoder::{
     OPUS_GET_GAIN_REQUEST, OPUS_GET_LAST_PACKET_DURATION_REQUEST,
     OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST, OPUS_GET_SAMPLE_RATE_REQUEST, OPUS_RESET_STATE,
     OPUS_SET_COMPLEXITY_REQUEST, OPUS_SET_GAIN_REQUEST, OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST,
+    max_over_rates, res_buf,
 };
 use crate::multistream::{
     ChannelLayout, get_left_channel, get_mono_channel, get_right_channel, validate_layout,
@@ -163,7 +163,8 @@ pub struct MsDecoder {
     /// The per-stream decoders: coupled (stereo) streams first.
     decoders: Vec<Decoder>,
     fs: i32,
-    /// `buf` of `opus_multistream_decode_native` (2 channels x 120 ms), allocated at init.
+    /// `buf` of `opus_multistream_decode_native` (C: a stack VLA of 2 channels x
+    /// `frame_size`; see [`res_buf`]).
     buf: Vec<OpusRes>,
 }
 
@@ -217,7 +218,7 @@ impl MsDecoder {
             layout,
             decoders,
             fs,
-            buf: vec![0.0; 2 * (fs / 25 * 3) as usize],
+            buf: Vec::new(),
         })
     }
 
@@ -237,17 +238,23 @@ impl MsDecoder {
         Ok(())
     }
 
-    /// Port of `opus_multistream_decoder_get_size`: approximate memory footprint in bytes (the
-    /// Rust layout), or 0 for invalid stream counts.
+    /// Port of `opus_multistream_decoder_get_size`: the memory footprint in bytes (the Rust
+    /// layout; see [`Decoder::get_size`]), or 0 for invalid stream counts. It includes the
+    /// `buf` of `opus_multistream_decode_native`, which grows to two channels of the longest
+    /// frame decoded (20 ms here).
     #[must_use]
     pub fn get_size(streams: i32, coupled_streams: i32) -> usize {
         if streams < 1 || coupled_streams > streams || coupled_streams < 0 {
             return 0;
         }
-        size_of::<Self>()
-            + coupled_streams as usize * Decoder::get_size(2)
-            + (streams - coupled_streams) as usize * Decoder::get_size(1)
-            + 2 * 5760 * size_of::<OpusRes>()
+        let coupled = coupled_streams as usize;
+        let mono = (streams - coupled_streams) as usize;
+        max_over_rates(|fs| {
+            size_of::<Self>()
+                + coupled * Decoder::footprint_at(2, fs)
+                + mono * Decoder::footprint_at(1, fs)
+                + 2 * (fs / 50) as usize * size_of::<OpusRes>()
+        })
     }
 
     /// Number of output channels.
@@ -300,10 +307,9 @@ impl MsDecoder {
         let Self {
             layout,
             decoders,
-            buf,
+            buf: buf_heap,
             ..
         } = self;
-        let buf = &mut buf[..2 * frame_size as usize];
 
         let mut data: &[u8] = match data {
             Some(d) => d,
@@ -330,70 +336,74 @@ impl MsDecoder {
         if pcm.len() < out_samples as usize * nb_channels {
             return Err(Error::BadArg);
         }
-        for (s, dec) in decoders.iter_mut().enumerate() {
-            let s = s as i32;
-            if !do_plc && data.is_empty() {
-                return Err(Error::InternalError);
-            }
-            let mut packet_offset: usize = 0;
-            let ret = dec.opus_decode_native(
-                if do_plc { None } else { Some(data) },
-                buf,
-                frame_size,
-                decode_fec,
-                s != layout.nb_streams - 1,
-                Some(&mut packet_offset),
-                soft_clip,
-            )?;
-            if !do_plc {
-                data = &data[packet_offset..];
-            }
-            if ret <= 0 {
-                return Ok(ret);
-            }
-            frame_size = ret;
-            let fsz = frame_size as usize;
-            if s < layout.nb_coupled_streams {
-                // Copy "left" audio to the channel(s) where it belongs
-                let mut prev = -1;
-                loop {
-                    let chan = get_left_channel(layout, s, prev);
-                    if chan == -1 {
-                        break;
-                    }
-                    copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[..]), 2, fsz);
-                    prev = chan;
+        // C allocates `2*frame_size` samples; the streams write at most `out_samples` each.
+        let buf = res_buf(buf_heap, 2 * out_samples as usize);
+        {
+            for (s, dec) in decoders.iter_mut().enumerate() {
+                let s = s as i32;
+                if !do_plc && data.is_empty() {
+                    return Err(Error::InternalError);
                 }
-                // Copy "right" audio to the channel(s) where it belongs
-                let mut prev = -1;
-                loop {
-                    let chan = get_right_channel(layout, s, prev);
-                    if chan == -1 {
-                        break;
-                    }
-                    copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[1..]), 2, fsz);
-                    prev = chan;
+                let mut packet_offset: usize = 0;
+                let ret = dec.opus_decode_native(
+                    if do_plc { None } else { Some(data) },
+                    buf,
+                    frame_size,
+                    decode_fec,
+                    s != layout.nb_streams - 1,
+                    Some(&mut packet_offset),
+                    soft_clip,
+                )?;
+                if !do_plc {
+                    data = &data[packet_offset..];
                 }
-            } else {
-                // Copy audio to the channel(s) where it belongs
-                let mut prev = -1;
-                loop {
-                    let chan = get_mono_channel(layout, s, prev);
-                    if chan == -1 {
-                        break;
+                if ret <= 0 {
+                    return Ok(ret);
+                }
+                frame_size = ret;
+                let fsz = frame_size as usize;
+                if s < layout.nb_coupled_streams {
+                    // Copy "left" audio to the channel(s) where it belongs
+                    let mut prev = -1;
+                    loop {
+                        let chan = get_left_channel(layout, s, prev);
+                        if chan == -1 {
+                            break;
+                        }
+                        copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[..]), 2, fsz);
+                        prev = chan;
                     }
-                    copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[..]), 1, fsz);
-                    prev = chan;
+                    // Copy "right" audio to the channel(s) where it belongs
+                    let mut prev = -1;
+                    loop {
+                        let chan = get_right_channel(layout, s, prev);
+                        if chan == -1 {
+                            break;
+                        }
+                        copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[1..]), 2, fsz);
+                        prev = chan;
+                    }
+                } else {
+                    // Copy audio to the channel(s) where it belongs
+                    let mut prev = -1;
+                    loop {
+                        let chan = get_mono_channel(layout, s, prev);
+                        if chan == -1 {
+                            break;
+                        }
+                        copy_channel_out(pcm, nb_channels, chan as usize, Some(&buf[..]), 1, fsz);
+                        prev = chan;
+                    }
                 }
             }
+            // Handle muted channels
+            for c in 0..nb_channels {
+                if layout.mapping[c] == 255 {
+                    copy_channel_out(pcm, nb_channels, c, None, 0, frame_size as usize);
+                }
+            }
+            Ok(frame_size)
         }
-        // Handle muted channels
-        for c in 0..nb_channels {
-            if layout.mapping[c] == 255 {
-                copy_channel_out(pcm, nb_channels, c, None, 0, frame_size as usize);
-            }
-        }
-        Ok(frame_size)
     }
 
     /// Port of `opus_multistream_decode` with C argument types (for the C ABI).
