@@ -95,6 +95,65 @@ models of the embedded blob are bound once per process and shared (`Arc`). Witho
 loaded, a DNN build's decoder is 59 KB / 73 KB (48 kHz). Remaining gap without DNN: the CELT
 `quant_all_bands` scratch (≈12 KB, C stack) and the 20 ms `out` buffer of the int16 API.
 
+
+### Fixed-point build
+
+`scripts/bench_report.sh --qext --fixed` / `--fixed-res24` (Rust fixed vs the fixed C oracle
+(scalar) vs upstream CMake `OPUS_FIXED_POINT=ON` with NEON). Rust output is bit-exact with the
+fixed oracle in every case.
+
+**Fixed-point** (16-bit opus_res, opus_encode/opus_decode; c_opt = CMake OPUS_FIXED_POINT=ON, NEON, RTCD arch 3):
+| benchmark | rust | c_scalar | c_opt | rust/c_scalar | rust/c_opt |
+|---|---:|---:|---:|---:|---:|
+| decode celt_48k_stereo_128k | 41.7 µs | 45.3 µs | 39.8 µs | 0.92 | 1.05 |
+| decode hybrid_48k_mono_32k | 23.9 µs | 27.0 µs | 24.3 µs | 0.89 | 0.99 |
+| decode silk_16k_mono_16k_voip | 5.11 µs | 6.15 µs | 5.72 µs | 0.83 | 0.89 |
+| decode qext_96k_stereo_256k | 93.8 µs | 107.4 µs | 89.3 µs | 0.87 | 1.05 |
+| encode celt_48k_stereo_128k (cx10) | 126.1 µs | 164.5 µs | 127.1 µs | 0.77 | 0.99 |
+| encode celt_48k_stereo_128k (cx5) | 95.4 µs | 130.8 µs | 95.0 µs | 0.73 | 1.00 |
+| encode hybrid_48k_mono_32k (cx10) | 190.1 µs | 239.6 µs | 174.5 µs | 0.79 | 1.09 |
+| encode hybrid_48k_mono_32k (cx5) | 122.5 µs | 136.9 µs | 114.6 µs | 0.89 | 1.07 |
+| encode silk_16k_mono_16k_voip (cx10) | 148.5 µs | 198.3 µs | 142.0 µs | 0.75 | 1.05 |
+| encode silk_16k_mono_16k_voip (cx5) | 86.2 µs | 101.8 µs | 86.8 µs | 0.85 | 0.99 |
+| encode qext_96k_stereo_256k (cx10) | 247.3 µs | 346.4 µs | 242.3 µs | 0.71 | 1.02 |
+| encode qext_96k_stereo_256k (cx5) | 211.9 µs | 310.3 µs | 209.6 µs | 0.68 | 1.01 |
+| decode surround51_48k_256k | 121.9 µs | 129.3 µs | 111.0 µs | 0.94 | 1.10 |
+| encode surround51_48k_256k (cx10) | 396.1 µs | 529.1 µs | 401.7 µs | 0.75 | 0.99 |
+| encode surround51_48k_256k (cx5) | 333.8 µs | 453.5 µs | 329.2 µs | 0.74 | 1.01 |
+| MDCT forward N=1920 | 6.39 µs | 5.96 µs | 5.75 µs | 1.07 | **1.11** |
+| MDCT backward N=1920 | 6.32 µs | 6.28 µs | 5.23 µs | 1.01 | **1.21** |
+| FFT 480 | 4.41 µs | 4.29 µs | 4.30 µs | 1.03 | 1.03 |
+| range coder enc+dec, 1000 ops | 9.73 µs | 11.9 µs | 10.2 µs | 0.82 | 0.95 |
+| SILK resampler 48k->16k | 5.14 µs | 5.32 µs | 5.48 µs | 0.97 | 0.94 |
+
+**Fixed-res24** (24-bit opus_res, opus_encode24/opus_decode24; c_opt + -DENABLE_RES24):
+| benchmark | rust | c_scalar | c_opt | rust/c_scalar | rust/c_opt |
+|---|---:|---:|---:|---:|---:|
+| decode celt_48k_stereo_128k | 44.6 µs | 44.5 µs | 39.6 µs | 1.00 | **1.13** |
+| decode hybrid_48k_mono_32k | 23.4 µs | 27.2 µs | 24.3 µs | 0.86 | 0.96 |
+| decode silk_16k_mono_16k_voip | 5.06 µs | 6.27 µs | 5.84 µs | 0.81 | 0.87 |
+| decode qext_96k_stereo_256k | 92.1 µs | 106.3 µs | 89.0 µs | 0.87 | 1.04 |
+| encode celt_48k_stereo_128k (cx10) | 126.7 µs | 162.7 µs | 128.4 µs | 0.78 | 0.99 |
+| encode celt_48k_stereo_128k (cx5) | 96.3 µs | 128.3 µs | 96.8 µs | 0.75 | 1.00 |
+| encode hybrid_48k_mono_32k (cx10) | 190.4 µs | 238.7 µs | 175.2 µs | 0.80 | 1.09 |
+| encode hybrid_48k_mono_32k (cx5) | 123.1 µs | 136.1 µs | 115.1 µs | 0.90 | 1.07 |
+| encode silk_16k_mono_16k_voip (cx10) | 149.3 µs | 198.8 µs | 142.7 µs | 0.75 | 1.05 |
+| encode silk_16k_mono_16k_voip (cx5) | 87.0 µs | 102.1 µs | 87.5 µs | 0.85 | 0.99 |
+| encode qext_96k_stereo_256k (cx10) | 250.5 µs | 343.1 µs | 247.5 µs | 0.73 | 1.01 |
+| encode qext_96k_stereo_256k (cx5) | 215.4 µs | 306.8 µs | 214.8 µs | 0.70 | 1.00 |
+| decode surround51_48k_256k | 126.8 µs | 127.1 µs | 109.9 µs | 1.00 | **1.15** |
+| encode surround51_48k_256k (cx10) | 397.7 µs | 523.1 µs | 406.2 µs | 0.76 | 0.98 |
+| encode surround51_48k_256k (cx5) | 336.5 µs | 446.7 µs | 335.3 µs | 0.75 | 1.00 |
+| MDCT forward N=1920 | 6.39 µs | 5.96 µs | 5.75 µs | 1.07 | **1.11** |
+| MDCT backward N=1920 | 6.32 µs | 6.28 µs | 5.23 µs | 1.01 | **1.21** |
+| FFT 480 | 4.42 µs | 4.29 µs | 4.30 µs | 1.03 | 1.03 |
+| range coder enc+dec, 1000 ops | 9.84 µs | 11.9 µs | 10.2 µs | 0.83 | 0.96 |
+| SILK resampler 48k->16k | 5.13 µs | 5.32 µs | 5.50 µs | 0.97 | 0.93 |
+
+
+Summary: fixed-point codec benches run at 0.68–0.94× scalar C time (res24 0.70–1.00×) and
+0.89–1.10× NEON C (res24 0.87–1.15×).
+
 ## Shared library sizes
 
 `scripts/size_report.sh` (aarch64 Linux, stripped; section totals in parentheses because file sizes
@@ -122,6 +181,12 @@ overflow checks. Campaign (2026-09-26): default build ≈6.9M execs (differentia
 355k, repacketizer 4.9M, ...), QEXT build ≈1.0M execs; 0 crashes, 0 OOM, 0 timeouts, 0 divergences.
 Mutation checks: injected one-character bugs were caught in 143 execs / ~1 min. Reproduce with
 `fuzz/run_all.sh` (`SECS=`, `FORK=`, `TARGETS=`, `FEATURES=qext`).
+
+## Conformance (fixed-point)
+
+- Upstream C test suite against fixed `libopusorus` (C ABI): test_opus_api/decode/encode(+regressions)/padding/projection/extensions/custom all PASS in fixed-point, fixed-res24 (+qext, +custom-modes); upstream opus_demo + opus_compare RFC 8251 vectors 120/120 in each.
+- Rust fixed decoder RFC 8251 quality (mono/stereo, 48k): fixed-point 97.15/98.68 %, fixed-res24 97.36/98.88 % (float 97.41/99.70 %); all rates pass. Opus HD: fixed-res24+qext passes all 12 at 96 kHz; 16-bit fixed+qext is limited by its output rounding floor (same as C).
+- Fixed-point fuzzing: ≈6.4M execs fixed-point + ≈4.9M fixed-res24+qext across 10 targets (differential vs fixed C), 0 findings in the port. See docs/UPSTREAM_ISSUES.md for upstream C bugs found.
 
 ## Conformance
 - RFC 8251 vectors: bit-exact vs C at 8/12/16/24/48 kHz mono+stereo; average opus_compare quality
