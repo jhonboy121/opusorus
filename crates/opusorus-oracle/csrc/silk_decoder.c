@@ -1,7 +1,9 @@
 /* Oracle C shims for unit silk_decoder: the SILK decoder (silk/dec_API.c and the functions it
    calls). dec_API.c is included with every global renamed so the `silk_decoder` super-struct
    (private to that file) is visible; the renamed copies are compiled from the same source as
-   the library ones. */
+   the library ones. Built in both oracles: the SILK decoder is integer code, only the
+   `opus_res` output type differs (float / short / int with ENABLE_RES24). */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 
@@ -91,7 +93,7 @@ void oracle_sd_ec_state(void *p, unsigned int out[12]) {
 
 /* ctrl: nChannelsAPI, nChannelsInternal, API_sampleRate, internalSampleRate, payloadSize_ms,
    prevPitchLag, enable_deep_plc (in/out). */
-int oracle_sd_decode(void *p, int ctrl[7], int lost, int new_packet, float *out, int *n_out) {
+int oracle_sd_decode(void *p, int ctrl[7], int lost, int new_packet, opus_res *out, int *n_out) {
   oracle_sd *h = (oracle_sd *)p;
   silk_DecControlStruct c;
   opus_int32 n = 0;

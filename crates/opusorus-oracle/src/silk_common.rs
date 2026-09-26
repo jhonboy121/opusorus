@@ -18,6 +18,13 @@ unsafe extern "C" {
     fn oracle_silk_sigm_Q15(x: c_int) -> c_int;
     fn oracle_silk_insertion_sort_increasing(a: *mut i32, idx: *mut c_int, l: c_int, k: c_int);
     fn oracle_silk_insertion_sort_increasing_all_values_int16(a: *mut i16, l: c_int);
+    #[cfg(feature = "fixed-point")]
+    fn oracle_silk_insertion_sort_decreasing_int16(
+        a: *mut i16,
+        idx: *mut c_int,
+        l: c_int,
+        k: c_int,
+    );
     fn oracle_silk_bwexpander(ar: *mut i16, d: c_int, chirp: i32);
     fn oracle_silk_bwexpander_32(ar: *mut i32, d: c_int, chirp: i32);
     fn oracle_silk_inner_prod_aligned_scale(
@@ -288,6 +295,23 @@ pub fn insertion_sort_increasing_all_values_int16(a: &mut [i16]) {
     unsafe {
         oracle_silk_insertion_sort_increasing_all_values_int16(a.as_mut_ptr(), a.len() as c_int)
     };
+}
+/// C `silk_insertion_sort_decreasing_int16` on `a[..l]` (fixed-point build only); returns
+/// `idx[..k]`.
+#[cfg(feature = "fixed-point")]
+pub fn insertion_sort_decreasing_int16(a: &mut [i16], l: usize, k: usize) -> Vec<i32> {
+    assert!(a.len() >= l && l >= k && k > 0);
+    let mut idx = vec![0 as c_int; k];
+    // SAFETY: `a` has `l` elements and `idx` has `k`.
+    unsafe {
+        oracle_silk_insertion_sort_decreasing_int16(
+            a.as_mut_ptr(),
+            idx.as_mut_ptr(),
+            l as c_int,
+            k as c_int,
+        )
+    };
+    idx
 }
 /// C `silk_bwexpander` on the whole slice.
 pub fn bwexpander(ar: &mut [i16], chirp_q16: i32) {

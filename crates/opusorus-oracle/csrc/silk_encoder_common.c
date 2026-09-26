@@ -5,11 +5,21 @@
    Encoder-state based functions get a zeroed (calloc) silk_encoder_state filled from a flat
    `oracle_sec_enc_params` struct; updated fields are copied back after the call. The NSQ, VAD
    and stereo states are passed directly (Rust mirrors them with #[repr(C)] structs, the layout
-   is checked by oracle_sec_sizes). */
+   is checked by oracle_sec_sizes).
+
+   Built in both oracles (this code is shared by the float and fixed-point encoders): only
+   HP_variable_cutoff takes the build's encoder super-state (silk_encoder_state_FLP / _FIX). */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 #include "main.h"
+#ifdef FIXED_POINT
+#include "main_FIX.h"
+typedef silk_encoder_state_FIX oracle_sec_encoder_state_Fxx;
+#else
 #include "main_FLP.h"
+typedef silk_encoder_state_FLP oracle_sec_encoder_state_Fxx;
+#endif
 #include "NSQ.h"
 #include "tables.h"
 #include "entenc.h"
@@ -313,7 +323,8 @@ void oracle_silk_stereo_quant_pred(opus_int32 *pred_Q13, opus_int8 *ix) {
 /* ---------------------------------------------------------------------------------------- */
 
 void oracle_silk_HP_variable_cutoff(oracle_sec_enc_params *p) {
-  silk_encoder_state_FLP *s = (silk_encoder_state_FLP *)calloc(1, sizeof(silk_encoder_state_FLP));
+  oracle_sec_encoder_state_Fxx *s =
+      (oracle_sec_encoder_state_Fxx *)calloc(1, sizeof(oracle_sec_encoder_state_Fxx));
   if (s == NULL) abort();
   enc_from_params(&s->sCmn, p);
   silk_HP_variable_cutoff(s);

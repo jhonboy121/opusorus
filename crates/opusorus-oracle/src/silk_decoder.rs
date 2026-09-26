@@ -7,6 +7,16 @@
 use core::ffi::{c_int, c_short, c_uint, c_void};
 use core::ptr::NonNull;
 
+/// C `opus_res` of the oracle build: `float` (float build).
+#[cfg(not(feature = "fixed-point"))]
+pub type OpusRes = f32;
+/// C `opus_res` of the oracle build: `opus_int16` (fixed-point build).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type OpusRes = i16;
+/// C `opus_res` of the oracle build: `opus_int32` (fixed-point build with `ENABLE_RES24`).
+#[cfg(feature = "fixed-res24")]
+pub type OpusRes = i32;
+
 unsafe extern "C" {
     fn oracle_sd_new() -> *mut c_void;
     fn oracle_sd_free(p: *mut c_void);
@@ -20,7 +30,7 @@ unsafe extern "C" {
         ctrl: *mut c_int,
         lost: c_int,
         new_packet: c_int,
-        out: *mut f32,
+        out: *mut OpusRes,
         n_out: *mut c_int,
     ) -> c_int;
     fn oracle_sd_dump(p: *mut c_void, out: *mut c_int, cap: c_int) -> c_int;
@@ -104,7 +114,7 @@ impl SilkDec {
         ctrl: &mut DecCtrl,
         lost: i32,
         new_packet: i32,
-        out: &mut [f32],
+        out: &mut [OpusRes],
     ) -> (i32, i32) {
         assert!(out.len() >= (ctrl[2].max(0) as usize / 50) * ctrl[0].clamp(1, 2) as usize);
         let mut n = 0;

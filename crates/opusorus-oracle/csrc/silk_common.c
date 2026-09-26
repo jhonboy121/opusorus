@@ -236,6 +236,12 @@ void oracle_silk_insertion_sort_increasing(opus_int32 *a, int *idx, int L, int K
 void oracle_silk_insertion_sort_increasing_all_values_int16(opus_int16 *a, int L) {
   silk_insertion_sort_increasing_all_values_int16(a, L);
 }
+#ifdef FIXED_POINT
+/* Only compiled in the fixed-point build (sort.c). */
+void oracle_silk_insertion_sort_decreasing_int16(opus_int16 *a, int *idx, int L, int K) {
+  silk_insertion_sort_decreasing_int16(a, idx, L, K);
+}
+#endif
 void oracle_silk_bwexpander(opus_int16 *ar, int d, opus_int32 chirp) { silk_bwexpander(ar, d, chirp); }
 void oracle_silk_bwexpander_32(opus_int32 *ar, int d, opus_int32 chirp) {
   silk_bwexpander_32(ar, d, chirp);

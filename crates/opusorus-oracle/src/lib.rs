@@ -19,6 +19,8 @@ pub mod fixed_foundation;
 // Units whose shims compile in both oracles (`// oracle-build: any`).
 pub mod celt_fft;
 pub mod silk_common;
+pub mod silk_decoder;
+pub mod silk_encoder_common;
 pub mod silk_resampler;
 
 // Float-only units: their shims (no `// oracle-build:` marker) are not compiled into a fixed-point
@@ -51,10 +53,6 @@ pub mod opus_decoder;
 pub mod opus_encoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod opus_packet;
-#[cfg(not(feature = "fixed-point"))]
-pub mod silk_decoder;
-#[cfg(not(feature = "fixed-point"))]
-pub mod silk_encoder_common;
 #[cfg(not(feature = "fixed-point"))]
 pub mod silk_encoder_flp;
 #[cfg(not(feature = "fixed-point"))]

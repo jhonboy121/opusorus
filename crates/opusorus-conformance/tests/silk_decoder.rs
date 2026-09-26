@@ -2,16 +2,17 @@
 //! calls: frame decoding, indices/parameters, core, PLC, CNG, stereo MS->LR, resampling) vs the
 //! C oracle, bit-exact on PCM output, return codes, control struct, range decoder state and the
 //! complete decoder state after every call.
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Runs in the float and the fixed-point builds (the SILK decoder is integer code; only the
+//! `opus_res` output differs: `f32`, `i16`, or `i32` with `fixed-res24`), against the matching
+//! oracle (packets come from that oracle's own encoder).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: failures should panic"
 )]
 
+use opusorus::celt::arch::OpusRes;
 use opusorus::celt::entdec::EcDec;
 use opusorus::silk::coding::silk_decode_pulses;
 use opusorus::silk::decoder::*;
@@ -169,6 +170,18 @@ const fn ctrl_to_c(r: &SilkDecControlStruct) -> c::DecCtrl {
 /// Output buffer size: 20 ms at the highest API rate, stereo.
 const OUT_LEN: usize = 96 * 20 * 2;
 
+/// Bit pattern of one `opus_res` sample (bit-exact comparison, `-0.0 != 0.0` in the float
+/// build).
+#[cfg(not(feature = "fixed-point"))]
+const fn res_bits(x: OpusRes) -> u32 {
+    x.to_bits()
+}
+/// Bit pattern of one `opus_res` sample.
+#[cfg(feature = "fixed-point")]
+const fn res_bits(x: OpusRes) -> u32 {
+    x as u32
+}
+
 struct Harness {
     r: Box<SilkDecoder>,
     c: c::SilkDec,
@@ -264,9 +277,10 @@ impl Harness {
             }
         }
         let mut cctrl = ctrl_to_c(&self.ctrl);
-        let mut cout = vec![0f32; OUT_LEN];
+        // `Vec<OpusRes>`: also checks at compile time that port and oracle agree on `opus_res`.
+        let mut cout: Vec<OpusRes> = vec![Default::default(); OUT_LEN];
         let (cret, cn) = self.c.decode(&mut cctrl, lost, new_packet, &mut cout);
-        let mut rout = vec![0f32; OUT_LEN];
+        let mut rout: Vec<OpusRes> = vec![Default::default(); OUT_LEN];
         let mut rn = 0;
         let rret = self
             .r
@@ -278,8 +292,8 @@ impl Harness {
         assert_eq!(ec_dump(rdec), self.c.ec_state(), "{tag}: range decoder");
         if cret == 0 {
             let n = cn as usize * self.ctrl.n_channels_api as usize;
-            let rb: Vec<u32> = rout[..n].iter().map(|x| x.to_bits()).collect();
-            let cb: Vec<u32> = cout[..n].iter().map(|x| x.to_bits()).collect();
+            let rb: Vec<u32> = rout[..n].iter().map(|&x| res_bits(x)).collect();
+            let cb: Vec<u32> = cout[..n].iter().map(|&x| res_bits(x)).collect();
             assert_slice_eq(&format!("{tag}: pcm"), &rb, &cb);
         }
         if cret == 0 {
@@ -819,7 +833,7 @@ fn invalid_control() {
     );
     let pkts = encode_stream(&EncCfg { n_packets: 4, ..c1 });
     let payload = &pkts[1][1..];
-    let mut out = vec![0f32; OUT_LEN];
+    let mut out: Vec<OpusRes> = vec![Default::default(); OUT_LEN];
     let mut n = 0;
     let base = SilkDecControlStruct {
         n_channels_api: 1,

@@ -1032,7 +1032,8 @@ impl SilkDecoder {
     ///   2 = decode FEC ([`FLAG_DECODE_LBRR`]).
     /// * `new_packet_flag`: nonzero on the first call for a packet.
     /// * `samples_out`: receives `*n_samples_out` samples per API channel (interleaved when
-    ///   `n_channels_api == 2`), as `opus_res` (float in the float build).
+    ///   `n_channels_api == 2`), as `opus_res` (`INT16TORES`: float in the float build,
+    ///   16-bit PCM with `fixed-point`, Q8-scaled `i32` with `fixed-res24`).
     ///
     /// Returns a SILK error code (0 on success; C `int` codes from `silk/errors.h`, or the sum
     /// of the negative resampler init codes, exactly as C).

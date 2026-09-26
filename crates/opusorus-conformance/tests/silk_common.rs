@@ -409,6 +409,29 @@ fn insertion_sorts_match_oracle() {
     }
 }
 
+/// `silk_insertion_sort_decreasing_int16` exists only in the fixed-point build (used by
+/// `pitch_analysis_core_FIX.c` with `L` = 2 * 4 kHz lag range and `K` = the search count).
+#[cfg(feature = "fixed-point")]
+#[test]
+fn insertion_sort_decreasing_int16_matches_oracle() {
+    let mut rng = Rng::new(0x5041);
+    for iter in 0..30_000 {
+        let l = rng.range_i32(1, if iter % 4 == 0 { 160 } else { 48 }) as usize;
+        let k = rng.range_i32(1, l as i32) as usize;
+        let spread = [3, 100, 32767][iter % 3];
+        let a0: Vec<i16> = (0..l)
+            .map(|_| rng.range_i32(-spread - 1, spread) as i16)
+            .collect();
+        let mut ar = a0.clone();
+        let mut ac = a0;
+        let mut idx = vec![0i32; k];
+        silk_insertion_sort_decreasing_int16(&mut ar, &mut idx, l, k);
+        let idc = c::insertion_sort_decreasing_int16(&mut ac, l, k);
+        assert_slice_eq("sort a", &ar, &ac);
+        assert_slice_eq("sort idx", &idx, &idc);
+    }
+}
+
 #[test]
 fn bwexpander_match_oracle() {
     let mut rng = Rng::new(23);
