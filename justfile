@@ -11,7 +11,7 @@ export OPUSORUS_DNN_BLOB := env_var_or_default("OPUSORUS_DNN_BLOB", justfile_dir
 # two "everything on" configurations (docs/FIXED_POINT.md). float_all excludes
 # `dnn-weights-embedded` (covered by `test-dnn`) and `opusorus-capi/osce` (OSCE makes
 # `Decoder::get_size` exceed the 256 KiB bound upstream's test_opus_api checks).
-float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-tools/dred,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/dred,opusorus-capi/internal-api,opusorus-bench/qext"
+float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-tools/dred,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/dred,opusorus-capi/osce,opusorus-capi/internal-api,opusorus-bench/qext"
 fixed_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-bench/fixed-res24,opusorus-bench/qext,opusorus-tools/qext"
 
 default:
