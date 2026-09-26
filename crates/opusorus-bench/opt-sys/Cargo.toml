@@ -1,0 +1,29 @@
+[package]
+name = "opus-sys-optimized"
+description = "Benchmark-only FFI to vendored libopus v1.6.1 built with its default optimized CMake Release configuration (symbols prefixed `optopus_`), plus micro-benchmark shims over an oracle-configured scalar copy (prefixed `scalopus_`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+links = "opus_opt"
+
+[features]
+# Builds both C libraries with ENABLE_QEXT.
+qext = []
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[lints.rust]
+# This crate exists to call C (like opusorus-oracle); unsafe is expected but must be documented.
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+allow_attributes_without_reason = "warn"
+missing_const_for_fn = "warn"
+unwrap_or_default = "warn"

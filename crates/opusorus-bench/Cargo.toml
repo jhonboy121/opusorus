@@ -1,0 +1,46 @@
+[package]
+name = "opusorus-bench"
+description = "Criterion benchmarks: opusorus vs the scalar C oracle vs an optimized upstream libopus build, plus a markdown report."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Adds the 96 kHz Opus HD (QEXT) encode/decode benchmarks (all three implementations built with
+# QEXT; upstream CMake has no QEXT switch, so the optimized build gets -DENABLE_QEXT).
+qext = ["opusorus/qext", "opusorus-oracle/qext", "opus-sys-optimized/qext"]
+
+[dependencies]
+# `internals` exposes the MDCT/FFT/range coder/resampler for the micro benchmarks; `std` selects
+# the platform libm (as in the bit-exactness tests).
+opusorus = { workspace = true, features = ["internals", "std"] }
+opusorus-oracle = { workspace = true }
+opusorus-conformance = { path = "../opusorus-conformance" }
+opus-sys-optimized = { path = "opt-sys" }
+# Parses Criterion's `estimates.json` in `bench_report`.
+serde_json = "1.0.151"
+
+[dev-dependencies]
+# No plotting/HTML: `bench_report` reads Criterion's JSON estimates instead.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bin]]
+name = "bench_report"
+path = "src/bin/bench_report.rs"
+
+[[bin]]
+name = "bench_profile"
+path = "src/bin/bench_profile.rs"
+
+[lints]
+workspace = true
