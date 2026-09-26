@@ -1,28 +1,54 @@
 //! Oracle bindings for unit `celt_fft`: kiss FFT, MDCT and (QEXT) mini kiss FFT.
 //!
-//! Complex buffers are passed as interleaved `f32` (`re, im, re, im, ...`), matching the C
-//! `kiss_fft_cpx` layout.
+//! Complex buffers are passed as interleaved [`Scalar`] values (`re, im, re, im, ...`), matching
+//! the C `kiss_fft_cpx` layout. The shim is built in both oracles (`// oracle-build: any`):
+//! [`Scalar`] is `kiss_fft_scalar` and [`Coef`] is `celt_coef` of the oracle build. The mini
+//! kiss FFT (QEXT) is float-only in both builds.
 
 use core::ffi::c_int;
 use core::ptr;
+
+/// `kiss_fft_scalar` of the oracle build (float).
+#[cfg(not(feature = "fixed-point"))]
+pub type Scalar = f32;
+/// `kiss_fft_scalar` of the oracle build (fixed point: `opus_int32`).
+#[cfg(feature = "fixed-point")]
+pub type Scalar = i32;
+/// `celt_coef` of the oracle build (float).
+#[cfg(not(feature = "fixed-point"))]
+pub type Coef = f32;
+/// `celt_coef` of the oracle build (fixed point + QEXT: Q31 `opus_int32`).
+#[cfg(all(feature = "fixed-point", feature = "qext"))]
+pub type Coef = i32;
+/// `celt_coef` of the oracle build (fixed point: Q15 `opus_int16`).
+#[cfg(all(feature = "fixed-point", not(feature = "qext")))]
+pub type Coef = i16;
 
 unsafe extern "C" {
     fn oracle_celt_fft_static_info(
         fs: c_int,
         idx: c_int,
         nfft: *mut c_int,
-        scale: *mut f32,
+        scale: *mut Coef,
+        scale_shift: *mut c_int,
         shift: *mut c_int,
         factors: *mut i16,
         bitrev: *mut i16,
     );
-    fn oracle_celt_fft_static(fs: c_int, idx: c_int, kind: c_int, fin: *const f32, fout: *mut f32);
+    fn oracle_celt_fft_static(
+        fs: c_int,
+        idx: c_int,
+        kind: c_int,
+        fin: *const Scalar,
+        fout: *mut Scalar,
+        downshift: c_int,
+    );
     fn oracle_celt_mdct_static(
         fs: c_int,
         dir: c_int,
-        input: *const f32,
-        out: *mut f32,
-        window: *const f32,
+        input: *const Scalar,
+        out: *mut Scalar,
+        window: *const Coef,
         overlap: c_int,
         shift: c_int,
         stride: c_int,
@@ -31,27 +57,29 @@ unsafe extern "C" {
     fn oracle_celt_fft_alloc(
         nfft: c_int,
         base_nfft: c_int,
-        scale: *mut f32,
+        scale: *mut Coef,
+        scale_shift: *mut c_int,
         shift: *mut c_int,
         factors: *mut i16,
         bitrev: *mut i16,
-        twiddles: *mut f32,
+        twiddles: *mut Coef,
         ntw: *mut c_int,
         kind: c_int,
-        fin: *const f32,
-        fout: *mut f32,
+        fin: *const Scalar,
+        fout: *mut Scalar,
+        downshift: c_int,
     ) -> c_int;
     #[cfg(feature = "custom-modes")]
     fn oracle_celt_mdct_init(
         n: c_int,
         maxshift: c_int,
-        trig: *mut f32,
+        trig: *mut Coef,
         nffts: *mut c_int,
         shifts: *mut c_int,
         dir: c_int,
-        input: *const f32,
-        out: *mut f32,
-        window: *const f32,
+        input: *const Scalar,
+        out: *mut Scalar,
+        window: *const Coef,
         overlap: c_int,
         shift: c_int,
         stride: c_int,
@@ -79,11 +107,23 @@ unsafe extern "C" {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FftKind {
     /// `opus_fft_c`.
-    Fft = 0,
+    Fft,
     /// `opus_ifft_c`.
-    Ifft = 1,
-    /// `opus_fft_impl` in place on a copy of the input.
-    Impl = 2,
+    Ifft,
+    /// `opus_fft_impl` in place on a copy of the input (with the given `downshift` in
+    /// fixed-point builds; ignored in float builds).
+    Impl(i32),
+}
+
+impl FftKind {
+    /// `(kind, downshift)` as passed to the shims.
+    const fn code(self) -> (c_int, c_int) {
+        match self {
+            Self::Fft => (0, 0),
+            Self::Ifft => (1, 0),
+            Self::Impl(d) => (2, d),
+        }
+    }
 }
 
 /// Fields of a C `kiss_fft_state`.
@@ -92,7 +132,9 @@ pub struct FftStateInfo {
     /// `nfft`.
     pub nfft: i32,
     /// `scale`.
-    pub scale: f32,
+    pub scale: Coef,
+    /// `scale_shift` (fixed point; 0 in float builds).
+    pub scale_shift: i32,
     /// `shift`.
     pub shift: i32,
     /// `factors`.
@@ -100,7 +142,7 @@ pub struct FftStateInfo {
     /// `bitrev` (`nfft` entries).
     pub bitrev: Vec<i16>,
     /// Twiddle table the state points to (interleaved; only filled by [`fft_alloc`]).
-    pub twiddles: Vec<f32>,
+    pub twiddles: Vec<Coef>,
 }
 
 /// Maximum static FFT size (`nfft` of `kfft[0]` of the 96 kHz QEXT mode).
@@ -112,7 +154,8 @@ const MAX_STATIC_NFFT: usize = 960;
 pub fn fft_static_info(fs: i32, idx: usize) -> FftStateInfo {
     assert!(idx < 4);
     let mut nfft = 0;
-    let mut scale = 0.0f32;
+    let mut scale = Coef::default();
+    let mut scale_shift = 0;
     let mut shift = 0;
     let mut factors = [0i16; 16];
     let mut bitrev = vec![0i16; MAX_STATIC_NFFT];
@@ -123,6 +166,7 @@ pub fn fft_static_info(fs: i32, idx: usize) -> FftStateInfo {
             idx as c_int,
             &mut nfft,
             &mut scale,
+            &mut scale_shift,
             &mut shift,
             factors.as_mut_ptr(),
             bitrev.as_mut_ptr(),
@@ -132,6 +176,7 @@ pub fn fft_static_info(fs: i32, idx: usize) -> FftStateInfo {
     FftStateInfo {
         nfft,
         scale,
+        scale_shift,
         shift,
         factors,
         bitrev,
@@ -140,20 +185,22 @@ pub fn fft_static_info(fs: i32, idx: usize) -> FftStateInfo {
 }
 
 /// Runs `kind` on static FFT state `idx` of the static mode at `fs`. `fin` is interleaved
-/// complex with `2 * nfft` floats; returns the interleaved output.
+/// complex with `2 * nfft` values; returns the interleaved output.
 #[must_use]
-pub fn fft_static(fs: i32, idx: usize, kind: FftKind, fin: &[f32]) -> Vec<f32> {
+pub fn fft_static(fs: i32, idx: usize, kind: FftKind, fin: &[Scalar]) -> Vec<Scalar> {
     let info = fft_static_info(fs, idx);
     assert_eq!(fin.len(), 2 * info.nfft as usize);
-    let mut fout = vec![0.0f32; fin.len()];
-    // SAFETY: fin/fout hold 2*nfft floats (nfft complex values) as the C code expects.
+    let mut fout = vec![Scalar::default(); fin.len()];
+    let (kind, downshift) = kind.code();
+    // SAFETY: fin/fout hold 2*nfft values (nfft complex values) as the C code expects.
     unsafe {
         oracle_celt_fft_static(
             fs,
             idx as c_int,
-            kind as c_int,
+            kind,
             fin.as_ptr(),
             fout.as_mut_ptr(),
+            downshift,
         );
     }
     fout
@@ -164,9 +211,9 @@ pub fn fft_static(fs: i32, idx: usize, kind: FftKind, fin: &[f32]) -> Vec<f32> {
 fn check_mdct_sizes(
     n: usize,
     dir: i32,
-    input: &[f32],
-    out: &[f32],
-    window: Option<&[f32]>,
+    input: &[Scalar],
+    out: &[Scalar],
+    window: Option<&[Coef]>,
     overlap: usize,
     shift: usize,
     stride: usize,
@@ -193,9 +240,9 @@ fn check_mdct_sizes(
 pub fn mdct_static(
     fs: i32,
     dir: i32,
-    input: &[f32],
-    out: &mut [f32],
-    window: Option<&[f32]>,
+    input: &[Scalar],
+    out: &mut [Scalar],
+    window: Option<&[Coef]>,
     overlap: usize,
     shift: usize,
     stride: usize,
@@ -213,7 +260,7 @@ pub fn mdct_static(
             dir,
             input.as_ptr(),
             out.as_mut_ptr(),
-            window.map_or(ptr::null(), <[f32]>::as_ptr),
+            window.map_or(ptr::null(), <[Coef]>::as_ptr),
             overlap as c_int,
             shift as c_int,
             stride as c_int,
@@ -229,24 +276,25 @@ pub fn mdct_static(
 pub fn fft_alloc(
     nfft: i32,
     base_nfft: i32,
-    run: Option<(FftKind, &[f32])>,
-) -> Option<(FftStateInfo, Vec<f32>)> {
+    run: Option<(FftKind, &[Scalar])>,
+) -> Option<(FftStateInfo, Vec<Scalar>)> {
     assert!(nfft > 0);
     let cap = nfft.max(base_nfft) as usize;
-    let mut scale = 0.0f32;
+    let mut scale = Coef::default();
+    let mut scale_shift = 0;
     let mut shift = 0;
     let mut factors = [0i16; 16];
     let mut bitrev = vec![0i16; nfft as usize];
-    let mut twiddles = vec![0.0f32; 2 * cap];
+    let mut twiddles = vec![Coef::default(); 2 * cap];
     let mut ntw = 0;
-    let (kind, fin) = match run {
+    let ((kind, downshift), fin) = match run {
         Some((k, fin)) => {
             assert_eq!(fin.len(), 2 * nfft as usize);
-            (k as c_int, fin)
+            (k.code(), fin)
         }
-        None => (-1, &[][..]),
+        None => ((-1, 0), &[][..]),
     };
-    let mut fout = vec![0.0f32; fin.len()];
+    let mut fout = vec![Scalar::default(); fin.len()];
     // SAFETY: bitrev holds nfft, twiddles 2*max(nfft, base_nfft); fin/fout hold 2*nfft floats
     // when kind >= 0 (otherwise unused).
     let ok = unsafe {
@@ -254,6 +302,7 @@ pub fn fft_alloc(
             nfft,
             base_nfft,
             &mut scale,
+            &mut scale_shift,
             &mut shift,
             factors.as_mut_ptr(),
             bitrev.as_mut_ptr(),
@@ -262,6 +311,7 @@ pub fn fft_alloc(
             kind,
             fin.as_ptr(),
             fout.as_mut_ptr(),
+            downshift,
         )
     };
     if ok == 0 {
@@ -272,6 +322,7 @@ pub fn fft_alloc(
         FftStateInfo {
             nfft,
             scale,
+            scale_shift,
             shift,
             factors,
             bitrev,
@@ -286,7 +337,7 @@ pub fn fft_alloc(
 #[derive(Debug, Clone, PartialEq)]
 pub struct MdctInitInfo {
     /// `trig` table.
-    pub trig: Vec<f32>,
+    pub trig: Vec<Coef>,
     /// `kfft[i]->nfft` for `i <= maxshift`.
     pub nffts: Vec<i32>,
     /// `kfft[i]->shift` for `i <= maxshift`.
@@ -300,11 +351,11 @@ pub struct MdctRun<'a> {
     /// 0 forward, 1 backward.
     pub dir: i32,
     /// Input.
-    pub input: &'a [f32],
+    pub input: &'a [Scalar],
     /// Output (updated in place).
-    pub out: &'a mut [f32],
+    pub out: &'a mut [Scalar],
     /// Window (`overlap` values).
-    pub window: &'a [f32],
+    pub window: &'a [Coef],
     /// Overlap.
     pub overlap: usize,
     /// Shift.
@@ -319,7 +370,7 @@ pub struct MdctRun<'a> {
 #[must_use]
 pub fn mdct_init(n: i32, maxshift: i32, run: Option<MdctRun<'_>>) -> Option<MdctInitInfo> {
     assert!(n > 0 && (0..=3).contains(&maxshift));
-    let mut trig = vec![0.0f32; (n - ((n >> 1) >> maxshift)) as usize];
+    let mut trig = vec![Coef::default(); (n - ((n >> 1) >> maxshift)) as usize];
     let mut nffts = vec![0; maxshift as usize + 1];
     let mut shifts = vec![0; maxshift as usize + 1];
     // SAFETY: trig/nffts/shifts sized as the shim writes them; the optional run buffers are

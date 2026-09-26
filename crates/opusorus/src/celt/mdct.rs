@@ -1,9 +1,24 @@
-//! Port of celt/mdct.c, celt/mdct.h (float build).
+//! Port of celt/mdct.c, celt/mdct.h (float and fixed-point builds).
 //!
 //! [`MdctLookup`] lives in [`crate::celt::static_modes`]. `clt_mdct_clear` has no Rust
 //! counterpart: an owned lookup is released by `Drop`.
+//!
+//! The transforms are shared between the builds and written with the arithmetic macros of
+//! [`crate::celt::arch`] and the `S_MUL`/`S_MUL2` helpers of [`super::kiss_fft`] (plain float
+//! operations in the float build). The fixed-point build adds the headroom tracking of the
+//! forward transform (the FFT then downshifts by `scale_shift - headroom`) and the
+//! `pre_shift`/`post_shift`/`fft_shift` normalisation of the backward transform.
 
-use super::kiss_fft::{Interleaved, KissFftScalar, opus_fft_impl_buf};
+use super::arch::{
+    CeltCoef, add32, add32_ovflw, neg32, pshr32, pshr32_ovflw, shl32_ovflw, sub32, sub32_ovflw,
+};
+#[cfg(feature = "fixed-point")]
+use super::arch::{abs32, imax, imin, max32, shr32};
+use super::kiss_fft::{
+    Interleaved, KissFftScalar, KissTwiddleScalar, opus_fft_impl_buf, s_mul, s_mul2,
+};
+#[cfg(feature = "fixed-point")]
+use super::mathops::{celt_ilog2, celt_zlog2};
 use super::static_modes::{KissFftCpx, KissFftState, MdctLookup};
 
 #[cfg(feature = "custom-modes")]
@@ -34,7 +49,12 @@ pub const MAX_MDCT_N2: usize = 2048;
 const fn empty_fft_state() -> KissFftState {
     KissFftState {
         nfft: 0,
+        #[cfg(not(feature = "fixed-point"))]
         scale: 0.0,
+        #[cfg(feature = "fixed-point")]
+        scale: 0,
+        #[cfg(feature = "fixed-point")]
+        scale_shift: 0,
         shift: 0,
         factors: [0; 2 * MAXFACTORS],
         bitrev: Cow::Borrowed(&[]),
@@ -42,7 +62,40 @@ const fn empty_fft_state() -> KissFftState {
     }
 }
 
-/// Port of celt/mdct.c:clt_mdct_init (float build).
+/// `trig[i]` of an MDCT of size `n` (the "enough points that sine isn't necessary" loop of
+/// celt/mdct.c:clt_mdct_init), float build. `n2` is `n/2`.
+#[cfg(all(feature = "custom-modes", not(feature = "fixed-point")))]
+fn mdct_trig(i: i32, _n2: i32, n: i32) -> KissTwiddleScalar {
+    crate::math::cos(2.0 * super::mathops::PI * (i as f64 + 0.125) / n as f64) as KissTwiddleScalar
+}
+
+/// `trig[i]` of an MDCT of size `n`, fixed-point build (Q15 `celt_cos_norm`).
+#[cfg(all(
+    feature = "custom-modes",
+    feature = "fixed-point",
+    not(feature = "qext")
+))]
+fn mdct_trig(i: i32, n2: i32, n: i32) -> KissTwiddleScalar {
+    use super::arch::{div32, extend32, shl32};
+    // TRIG_UPSCALE == 1
+    super::mathops::celt_cos_norm(div32(add32(shl32(extend32(i), 17), n2 + 16384), n))
+}
+
+/// `trig[i]` of an MDCT of size `n`, fixed-point + QEXT build (Q31, computed in double).
+#[cfg(all(feature = "custom-modes", feature = "fixed-point", feature = "qext"))]
+fn mdct_trig(i: i32, _n2: i32, n: i32) -> KissTwiddleScalar {
+    // C `M_PI` (the platform <math.h> value, the double nearest to pi).
+    const M_PI: f64 = core::f64::consts::PI;
+    // (kiss_twiddle_scalar)MAX32(-2147483647,MIN32(2147483647,floor(.5+2147483648*cos(...))))
+    let x = crate::math::floor(
+        0.5 + 2147483648.0 * crate::math::cos(2.0 * M_PI * (i as f64 + 0.125) / n as f64),
+    );
+    let x = if 2147483647.0 < x { 2147483647.0 } else { x };
+    let x = if -2147483647.0 > x { -2147483647.0 } else { x };
+    x as i32
+}
+
+/// Port of celt/mdct.c:clt_mdct_init.
 ///
 /// Builds an owned MDCT lookup of size `n` with `maxshift + 1` FFT states.
 ///
@@ -71,15 +124,12 @@ pub fn clt_mdct_init(n: i32, maxshift: i32) -> Result<MdctLookup> {
         };
         kfft[i] = Cow::Owned(st);
     }
-    let mut trig = vec![0.0f32; (n - (n2 >> maxshift)) as usize];
+    let mut trig = vec![KissTwiddleScalar::default(); (n - (n2 >> maxshift)) as usize];
     let mut off = 0usize;
     for _shift in 0..=maxshift {
         // We have enough points that sine isn't necessary
-        // FIXED_POINT: not ported (float build).
         for i in 0..n2 {
-            trig[off + i as usize] =
-                crate::math::cos(2.0 * super::mathops::PI * (i as f64 + 0.125) / big_n as f64)
-                    as super::kiss_fft::KissTwiddleScalar;
+            trig[off + i as usize] = mdct_trig(i, n2, big_n);
         }
         off += n2 as usize;
         n2 >>= 1;
@@ -93,16 +143,16 @@ pub fn clt_mdct_init(n: i32, maxshift: i32) -> Result<MdctLookup> {
     })
 }
 
-/// Port of celt/mdct.c:clt_mdct_forward_c (the `clt_mdct_forward` macro), float build.
+/// Port of celt/mdct.c:clt_mdct_forward_c (the `clt_mdct_forward` macro).
 ///
 /// Forward MDCT of `input` (`N/2 + overlap` samples, `N = l.n >> shift`), scaled by `4/N`,
 /// written to `out[0], out[stride], ...` (`N/2` values). Unlike the C prototype the input is
-/// not trashed (the float build never writes it), so it is taken by shared reference.
+/// not trashed (neither build writes it), so it is taken by shared reference.
 pub fn clt_mdct_forward(
     l: &MdctLookup,
     input: &[KissFftScalar],
     out: &mut [KissFftScalar],
-    window: &[f32],
+    window: &[CeltCoef],
     overlap: usize,
     shift: usize,
     stride: usize,
@@ -145,37 +195,45 @@ pub fn clt_mdct_forward(
 #[inline(never)]
 fn clt_mdct_forward_impl(
     st: &KissFftState,
-    trig: &[f32],
+    trig: &[KissTwiddleScalar],
     input: &[KissFftScalar],
     out: &mut [KissFftScalar],
-    window: &[f32],
+    window: &[CeltCoef],
     overlap: usize,
     stride: usize,
     f2: &mut [KissFftCpx],
 ) {
     let scale = st.scale;
+    // Allows us to scale with MULT16_32_Q16(), which is faster than MULT16_32_Q15() on ARM.
+    #[cfg(feature = "fixed-point")]
+    let scale_shift = st.scale_shift - 1;
     let n4 = f2.len();
     let n2 = 2 * n4;
     // trig[i] and trig[N4 + i]
     let (trig0, trig1) = trig[..n2].split_at(n4);
     let bitrev = &st.bitrev[..n4];
 
+    #[cfg(feature = "fixed-point")]
+    let mut maxval: i32 = 1;
     // Pre-rotation of the folded pair (C f[2i], f[2i+1]), stored in bit-reversed order.
     let mut pre_rotate = |i: usize, re: KissFftScalar, im: KissFftScalar| {
         let t0 = trig0[i];
         let t1 = trig1[i];
-        let yr = re * t0 - im * t1;
-        let yi = im * t0 + re * t1;
+        let yr = sub32(s_mul(re, t0), s_mul(im, t1));
+        let yi = add32(s_mul(im, t0), s_mul(re, t1));
         // For QEXT, it's best to scale before the FFT, but otherwise it's best to scale
         // after. For floating-point it doesn't matter.
         #[cfg(feature = "qext")]
         let yc = KissFftCpx { r: yr, i: yi };
         #[cfg(not(feature = "qext"))]
         let yc = KissFftCpx {
-            r: yr * scale,
-            i: yi * scale,
+            r: s_mul2(yr, scale),
+            i: s_mul2(yi, scale),
         };
-        // FIXED_POINT: not ported (float build) — maxval/headroom tracking.
+        #[cfg(feature = "fixed-point")]
+        {
+            maxval = max32(maxval, max32(abs32(yc.r), abs32(yc.i)));
+        }
         f2[bitrev[i] as usize] = yc;
     };
 
@@ -194,8 +252,14 @@ fn clt_mdct_forward_impl(
             let wp1 = ov2 + 2 * i;
             let wp2 = ov2 - 1 - 2 * i;
             // Real part arranged as -d-cR, Imag part arranged as -b+aR
-            let re = input[xp1 + n2] * window[wp2] + input[xp2] * window[wp1];
-            let im = input[xp1] * window[wp1] - input[xp2 - n2] * window[wp2];
+            let re = add32(
+                s_mul(input[xp1 + n2], window[wp2]),
+                s_mul(input[xp2], window[wp1]),
+            );
+            let im = sub32(
+                s_mul(input[xp1], window[wp1]),
+                s_mul(input[xp2 - n2], window[wp2]),
+            );
             pre_rotate(i, re, im);
             i += 1;
         }
@@ -214,16 +278,28 @@ fn clt_mdct_forward_impl(
             let wp1 = 2 * j;
             let wp2 = overlap - 1 - 2 * j;
             // Real part arranged as a-bR, Imag part arranged as -c-dR
-            let re = -(input[xp1 - n2] * window[wp1]) + input[xp2] * window[wp2];
-            let im = input[xp1] * window[wp2] + input[xp2 + n2] * window[wp1];
+            let re = add32(
+                neg32(s_mul(input[xp1 - n2], window[wp1])),
+                s_mul(input[xp2], window[wp2]),
+            );
+            let im = add32(
+                s_mul(input[xp1], window[wp2]),
+                s_mul(input[xp2 + n2], window[wp1]),
+            );
             pre_rotate(i, re, im);
             i += 1;
             j += 1;
         }
     }
+    #[cfg(feature = "fixed-point")]
+    let headroom = imax(0, imin(scale_shift, 28 - celt_ilog2(maxval)));
+    #[cfg(feature = "fixed-point")]
+    let downshift = scale_shift - headroom;
+    #[cfg(not(feature = "fixed-point"))]
+    let (headroom, downshift) = (0, 0);
 
     // N/4 complex FFT, does not downscale anymore
-    opus_fft_impl_buf(st, f2);
+    opus_fft_impl_buf(st, f2, downshift);
 
     // Post-rotate
     {
@@ -231,16 +307,51 @@ fn clt_mdct_forward_impl(
         let out = &mut out[..stride * (n2 - 1) + 1];
         for (i, ((fp, &t0), &t1)) in f2.iter().zip(trig0).zip(trig1).enumerate() {
             #[cfg(feature = "qext")]
-            let (t0, t1) = (t0 * scale, t1 * scale);
-            let yr = fp.i * t1 - fp.r * t0;
-            let yi = fp.r * t1 + fp.i * t0;
+            let (t0, t1) = (s_mul2(t0, scale), s_mul2(t1, scale));
+            let yr = pshr32(sub32(s_mul(fp.i, t1), s_mul(fp.r, t0)), headroom);
+            let yi = pshr32(add32(s_mul(fp.r, t1), s_mul(fp.i, t0)), headroom);
             out[2 * stride * i] = yr;
             out[stride * (n2 - 1 - 2 * i)] = yi;
         }
     }
 }
 
-/// Port of celt/mdct.c:clt_mdct_backward_c (the `clt_mdct_backward` macro), float build.
+/// One post-rotation step of [`clt_mdct_backward`] for the pair `p0 = y[2i..2i+2]` and
+/// `p1 = y[N2-2-2i..N2-2i]` (pair `N4-1-i`), with `t[i], t[N4+i]` (`ta`) and
+/// `t[N4-i-1], t[N2-i-1]` (`tb`). Both pairs are read before either is written, as in C.
+/// Returns the new `[p0, p1]`.
+#[inline(always)]
+#[cfg_attr(
+    not(feature = "fixed-point"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "shared with the fixed-point build, whose arithmetic macros are not const"
+    )
+)]
+fn backward_post_step(
+    p0: [KissFftScalar; 2],
+    p1: [KissFftScalar; 2],
+    ta: (KissTwiddleScalar, KissTwiddleScalar),
+    tb: (KissTwiddleScalar, KissTwiddleScalar),
+    post_shift: i32,
+) -> [[KissFftScalar; 2]; 2] {
+    // We swap real and imag because we're using an FFT instead of an IFFT.
+    let (re, im) = (p0[1], p0[0]);
+    let (t0, t1) = ta;
+    // We'd scale up by 2 here, but instead it's done when mixing the windows
+    let yr0 = pshr32_ovflw(add32_ovflw(s_mul(re, t0), s_mul(im, t1)), post_shift);
+    let yi0 = pshr32_ovflw(sub32_ovflw(s_mul(re, t1), s_mul(im, t0)), post_shift);
+    // We swap real and imag because we're using an FFT instead of an IFFT.
+    let (re, im) = (p1[1], p1[0]);
+    let (t0, t1) = tb;
+    // We'd scale up by 2 here, but instead it's done when mixing the windows
+    let yr1 = pshr32_ovflw(add32_ovflw(s_mul(re, t0), s_mul(im, t1)), post_shift);
+    let yi1 = pshr32_ovflw(sub32_ovflw(s_mul(re, t1), s_mul(im, t0)), post_shift);
+    // y[yp0] = yr0, y[yp0+1] = yi1, y[yp1] = yr1, y[yp1+1] = yi0
+    [[yr0, yi1], [yr1, yi0]]
+}
+
+/// Port of celt/mdct.c:clt_mdct_backward_c (the `clt_mdct_backward` macro).
 ///
 /// Backward MDCT (no scaling) of `input[0], input[stride], ...` (`N/2` values,
 /// `N = l.n >> shift`) followed by the TDAC windowing of the first `overlap` output samples.
@@ -250,7 +361,7 @@ pub fn clt_mdct_backward(
     l: &MdctLookup,
     input: &[KissFftScalar],
     out: &mut [KissFftScalar],
-    window: &[f32],
+    window: &[CeltCoef],
     overlap: usize,
     shift: usize,
     stride: usize,
@@ -265,8 +376,25 @@ pub fn clt_mdct_backward(
     let n4 = n >> 2;
     let t = &l.trig[trig_off..trig_off + n2];
     let ov2 = overlap >> 1;
+    // x1 = in[2*stride*i], x2 = in[stride*(N2-1-2i)]
+    let input = &input[..stride * (n2 - 1) + 1];
 
-    // FIXED_POINT: not ported (float build) — pre_shift/post_shift/fft_shift computation.
+    #[cfg(feature = "fixed-point")]
+    let (pre_shift, post_shift, fft_shift) = {
+        let mut sumval: i32 = n2 as i32;
+        let mut maxval: i32 = 0;
+        for &x in input.iter().step_by(stride) {
+            maxval = max32(maxval, abs32(x));
+            sumval = add32_ovflw(sumval, abs32(shr32(x, 11)));
+        }
+        let pre_shift = imax(0, 29 - celt_zlog2(1 + maxval));
+        // Worst-case where all the energy goes to a single sample.
+        let post_shift = imax(0, 19 - celt_ilog2(abs32(sumval)));
+        let post_shift = imin(post_shift, pre_shift);
+        (pre_shift, post_shift, pre_shift - post_shift)
+    };
+    #[cfg(not(feature = "fixed-point"))]
+    let (pre_shift, post_shift, fft_shift) = (0, 0, 0);
 
     // Pre-rotate
     {
@@ -275,45 +403,27 @@ pub fn clt_mdct_backward(
         let (t0s, t1s) = t.split_at(n4);
         let yp = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
         let bitrev = &l.kfft[shift].bitrev[..n4];
-        // x1 = in[2*stride*i], x2 = in[stride*(N2-1-2i)]
-        let input = &input[..stride * (n2 - 1) + 1];
         for (i, ((&rev, &t0), &t1)) in bitrev.iter().zip(t0s).zip(t1s).enumerate() {
-            let x1 = input[2 * stride * i];
-            let x2 = input[stride * (n2 - 1 - 2 * i)];
-            let yr = x2 * t0 + x1 * t1;
-            let yi = x1 * t0 - x2 * t1;
+            let x1 = shl32_ovflw(input[2 * stride * i], pre_shift);
+            let x2 = shl32_ovflw(input[stride * (n2 - 1 - 2 * i)], pre_shift);
+            let yr = add32_ovflw(s_mul(x2, t0), s_mul(x1, t1));
+            let yi = sub32_ovflw(s_mul(x1, t0), s_mul(x2, t1));
             // We swap real and imag because we use an FFT instead of an IFFT.
             // Storing the pre-rotation directly in the bitrev order.
             yp[rev as usize] = [yi, yr];
         }
     }
 
-    opus_fft_impl_buf(&l.kfft[shift], &mut Interleaved(&mut out[ov2..ov2 + n2]));
+    opus_fft_impl_buf(
+        &l.kfft[shift],
+        &mut Interleaved(&mut out[ov2..ov2 + n2]),
+        fft_shift,
+    );
 
     // Post-rotate and de-shuffle from both ends of the buffer at once to make it in-place.
     {
         let (t0s, t1s) = t.split_at(n4);
         let y = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
-        // One step for the pair yp0 = y[2i..2i+2] and yp1 = y[N2-2-2i..N2-2i] (pair N4-1-i),
-        // with t[i], t[N4+i] (`ta`) and t[N4-i-1], t[N2-i-1] (`tb`). Both pairs are read
-        // before either is written, as in C.
-        #[inline(always)]
-        fn step(p0: [f32; 2], p1: [f32; 2], ta: (f32, f32), tb: (f32, f32)) -> [[f32; 2]; 2] {
-            // We swap real and imag because we're using an FFT instead of an IFFT.
-            let (re, im) = (p0[1], p0[0]);
-            let (t0, t1) = ta;
-            // We'd scale up by 2 here, but instead it's done when mixing the windows
-            let yr0 = re * t0 + im * t1;
-            let yi0 = re * t1 - im * t0;
-            // We swap real and imag because we're using an FFT instead of an IFFT.
-            let (re, im) = (p1[1], p1[0]);
-            let (t0, t1) = tb;
-            // We'd scale up by 2 here, but instead it's done when mixing the windows
-            let yr1 = re * t0 + im * t1;
-            let yi1 = re * t1 - im * t0;
-            // y[yp0] = yr0, y[yp0+1] = yi1, y[yp1] = yr1, y[yp1+1] = yi0
-            [[yr0, yi1], [yr1, yi0]]
-        }
         // Loop to (N4+1)>>1 to handle odd N4. When N4 is odd, the middle pair is computed
         // twice (here: once, with the same result).
         let half = n4 >> 1;
@@ -324,11 +434,12 @@ pub fn clt_mdct_backward(
         for (((p0, p1), (&ta0, &ta1)), (&tb0, &tb1)) in
             front.iter_mut().zip(back.iter_mut().rev()).zip(ta).zip(tb)
         {
-            [*p0, *p1] = step(*p0, *p1, (ta0, ta1), (tb0, tb1));
+            [*p0, *p1] = backward_post_step(*p0, *p1, (ta0, ta1), (tb0, tb1), post_shift);
         }
         if let Some(p) = mid.first_mut() {
             // yp0 == yp1: both halves of the step read the original pair.
-            let [a, b] = step(*p, *p, (t0s[half], t1s[half]), (t0s[half], t1s[half]));
+            let th = (t0s[half], t1s[half]);
+            let [a, b] = backward_post_step(*p, *p, th, th, post_shift);
             // C writes y[yp0] = yr0, y[yp1+1] = yi0, then y[yp1] = yr1, y[yp0+1] = yi1.
             *p = [b[0], a[1]];
         }
@@ -349,8 +460,8 @@ pub fn clt_mdct_backward(
         {
             let x1 = *xp1;
             let x2 = *yp1;
-            *yp1 = x2 * w2 - x1 * w1;
-            *xp1 = x2 * w1 + x1 * w2;
+            *yp1 = sub32_ovflw(s_mul(x2, w2), s_mul(x1, w1));
+            *xp1 = add32_ovflw(s_mul(x2, w1), s_mul(x1, w2));
         }
     }
 }

@@ -2,20 +2,26 @@
 //! scalar FFTs (used upstream by `qext_compare` and DNN tooling).
 //!
 //! Notes on the translation:
-//! * `mini_kiss_fft_cpx` has the same layout as [`KissFftCpx`], which is reused.
+//! * `mini_kiss_fft_cpx` is its own float complex type ([`MiniKissFftCpx`]): `mini_kfft.c` is
+//!   float-only, also in fixed-point builds (where `kiss_fft_cpx` holds integers).
 //! * The `mem`/`lenmem` caller-provided storage mode of the C allocators is dropped; states own
 //!   `Vec`s and are released by `Drop` (C uses `free`).
 //! * C `assert`s that would abort (odd real-FFT size, radix not in 2..=5) are turned into
 //!   [`Error::BadArg`] at allocation time, so the transforms themselves cannot fail.
 
-use super::static_modes::KissFftCpx;
 use crate::{Error, Result};
 use alloc::{vec, vec::Vec};
 
 /// `mini_kiss_fft_scalar`.
 pub type MiniKissFftScalar = f32;
 /// `mini_kiss_fft_cpx`.
-pub type MiniKissFftCpx = KissFftCpx;
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MiniKissFftCpx {
+    /// Real part.
+    pub r: MiniKissFftScalar,
+    /// Imaginary part.
+    pub i: MiniKissFftScalar,
+}
 
 /// `MINI_MAXFACTORS`.
 pub const MINI_MAXFACTORS: usize = 32;

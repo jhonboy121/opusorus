@@ -20,13 +20,11 @@ pub mod cwrs;
 pub mod entcode;
 pub mod entdec;
 pub mod entenc;
-#[cfg(not(feature = "fixed-point"))]
 pub mod kiss_fft;
 pub mod laplace;
 pub mod mathops;
-#[cfg(not(feature = "fixed-point"))]
 pub mod mdct;
-#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
+#[cfg(feature = "qext")]
 pub mod mini_kfft;
 #[cfg(not(feature = "fixed-point"))]
 pub mod modes;

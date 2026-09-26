@@ -1,4 +1,8 @@
-/* Oracle C shims for unit celt_fft (kiss_fft.c, mdct.c, mini_kfft.c). */
+/* Oracle C shims for unit celt_fft (kiss_fft.c, mdct.c, mini_kfft.c). Built in both oracles:
+   the data buffers are kiss_fft_scalar (float, or opus_int32 in fixed point), windows, twiddles,
+   trig tables and FFT scales are celt_coef (float, opus_int16 Q15, or opus_int32 Q31 with
+   QEXT). Complex buffers are interleaved (re, im). */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 #include "opus_types.h"
@@ -12,52 +16,67 @@ static const CELTMode *oracle_celt_fft_mode(int fs) {
   return opus_custom_mode_create(48000, 960, NULL);
 }
 
-static void oracle_celt_fft_state_info(const kiss_fft_state *st, int *nfft, float *scale,
-                                       int *shift, short *factors, short *bitrev) {
+static void oracle_celt_fft_state_info(const kiss_fft_state *st, int *nfft, celt_coef *scale,
+                                       int *scale_shift, int *shift, short *factors,
+                                       short *bitrev) {
   int i;
   *nfft = st->nfft;
   *scale = st->scale;
+#ifdef FIXED_POINT
+  *scale_shift = st->scale_shift;
+#else
+  *scale_shift = 0;
+#endif
   *shift = st->shift;
   for (i = 0; i < 2 * MAXFACTORS; i++) factors[i] = st->factors[i];
   for (i = 0; i < st->nfft; i++) bitrev[i] = st->bitrev[i];
 }
 
-/* kind: 0 opus_fft_c, 1 opus_ifft_c, 2 opus_fft_impl (fout := fin, then in place). */
-static void oracle_celt_fft_run(const kiss_fft_state *st, int kind, const float *fin,
-                                float *fout) {
+/* kind: 0 opus_fft_c, 1 opus_ifft_c, 2 opus_fft_impl (fout := fin, then in place, with
+   `downshift` in fixed-point builds; ignored in float builds). */
+static void oracle_celt_fft_run(const kiss_fft_state *st, int kind, const kiss_fft_scalar *fin,
+                                kiss_fft_scalar *fout, int downshift) {
+  (void)downshift;
   switch (kind) {
     case 0: opus_fft_c(st, (const kiss_fft_cpx *)fin, (kiss_fft_cpx *)fout); break;
     case 1: opus_ifft_c(st, (const kiss_fft_cpx *)fin, (kiss_fft_cpx *)fout); break;
     default:
       memcpy(fout, fin, sizeof(kiss_fft_cpx) * st->nfft);
+#ifdef FIXED_POINT
+      opus_fft_impl(st, (kiss_fft_cpx *)fout, downshift);
+#else
       opus_fft_impl(st, (kiss_fft_cpx *)fout);
+#endif
       break;
   }
 }
 
 /* dir: 0 forward, 1 backward. window NULL -> mode window. */
-static void oracle_celt_mdct_run(const mdct_lookup *l, int dir, const float *in, float *out,
-                                 const float *window, int overlap, int shift, int stride) {
+static void oracle_celt_mdct_run(const mdct_lookup *l, int dir, const kiss_fft_scalar *in,
+                                 kiss_fft_scalar *out, const celt_coef *window, int overlap,
+                                 int shift, int stride) {
   if (dir == 0)
-    clt_mdct_forward_c(l, (float *)in, out, window, overlap, shift, stride, 0);
+    clt_mdct_forward_c(l, (kiss_fft_scalar *)in, out, window, overlap, shift, stride, 0);
   else
-    clt_mdct_backward_c(l, (float *)in, out, window, overlap, shift, stride, 0);
+    clt_mdct_backward_c(l, (kiss_fft_scalar *)in, out, window, overlap, shift, stride, 0);
 }
 
 /* Info on static FFT state `idx` of the static mode at `fs`. bitrev must hold nfft values. */
-void oracle_celt_fft_static_info(int fs, int idx, int *nfft, float *scale, int *shift,
-                                 short *factors, short *bitrev) {
+void oracle_celt_fft_static_info(int fs, int idx, int *nfft, celt_coef *scale, int *scale_shift,
+                                 int *shift, short *factors, short *bitrev) {
   const CELTMode *m = oracle_celt_fft_mode(fs);
-  oracle_celt_fft_state_info(m->mdct.kfft[idx], nfft, scale, shift, factors, bitrev);
+  oracle_celt_fft_state_info(m->mdct.kfft[idx], nfft, scale, scale_shift, shift, factors,
+                             bitrev);
 }
 
-void oracle_celt_fft_static(int fs, int idx, int kind, const float *fin, float *fout) {
+void oracle_celt_fft_static(int fs, int idx, int kind, const kiss_fft_scalar *fin,
+                            kiss_fft_scalar *fout, int downshift) {
   const CELTMode *m = oracle_celt_fft_mode(fs);
-  oracle_celt_fft_run(m->mdct.kfft[idx], kind, fin, fout);
+  oracle_celt_fft_run(m->mdct.kfft[idx], kind, fin, fout, downshift);
 }
 
-void oracle_celt_mdct_static(int fs, int dir, const float *in, float *out, const float *window,
-                             int overlap, int shift, int stride) {
+void oracle_celt_mdct_static(int fs, int dir, const kiss_fft_scalar *in, kiss_fft_scalar *out,
+                             const celt_coef *window, int overlap, int shift, int stride) {
   const CELTMode *m = oracle_celt_fft_mode(fs);
   if (window == NULL) window = m->window;
   oracle_celt_mdct_run(&m->mdct, dir, in, out, window, overlap, shift, stride);
@@ -65,12 +84,13 @@ void oracle_celt_mdct_static(int fs, int dir, const float *in, float *out, const
 
 #ifdef CUSTOM_MODES
 /* opus_fft_alloc_twiddles(nfft, base) with base = opus_fft_alloc(base_nfft) if base_nfft > 0.
-   Returns 0 when C returns NULL. twiddles (cap 2*max(nfft, base_nfft) floats) receives the
+   Returns 0 when C returns NULL. twiddles (cap 2*max(nfft, base_nfft) values) receives the
    state's twiddle table and *ntw its length in complex values. If kind >= 0 also runs
-   oracle_celt_fft_run(kind, fin, fout). */
-int oracle_celt_fft_alloc(int nfft, int base_nfft, float *scale, int *shift, short *factors,
-                          short *bitrev, float *twiddles, int *ntw, int kind, const float *fin,
-                          float *fout) {
+   oracle_celt_fft_run(kind, fin, fout, downshift). */
+int oracle_celt_fft_alloc(int nfft, int base_nfft, celt_coef *scale, int *scale_shift,
+                          int *shift, short *factors, short *bitrev, celt_coef *twiddles,
+                          int *ntw, int kind, const kiss_fft_scalar *fin, kiss_fft_scalar *fout,
+                          int downshift) {
   kiss_fft_state *base = NULL;
   kiss_fft_state *st;
   int i, n;
@@ -83,24 +103,24 @@ int oracle_celt_fft_alloc(int nfft, int base_nfft, float *scale, int *shift, sho
     opus_fft_free(base, 0);
     return 0;
   }
-  oracle_celt_fft_state_info(st, &n, scale, shift, factors, bitrev);
+  oracle_celt_fft_state_info(st, &n, scale, scale_shift, shift, factors, bitrev);
   *ntw = base != NULL ? base->nfft : nfft;
   for (i = 0; i < *ntw; i++) {
     twiddles[2 * i] = st->twiddles[i].r;
     twiddles[2 * i + 1] = st->twiddles[i].i;
   }
-  if (kind >= 0) oracle_celt_fft_run(st, kind, fin, fout);
+  if (kind >= 0) oracle_celt_fft_run(st, kind, fin, fout, downshift);
   opus_fft_free(st, 0);
   opus_fft_free(base, 0);
   return 1;
 }
 
 /* clt_mdct_init(n, maxshift). Returns 0 on failure. trig receives the trig table
-   (n - (n/2 >> maxshift) floats), nffts[i] the FFT size of kfft[i], shifts[i] its shift.
+   (n - (n/2 >> maxshift) values), nffts[i] the FFT size of kfft[i], shifts[i] its shift.
    If dir >= 0 also runs oracle_celt_mdct_run on the lookup. */
-int oracle_celt_mdct_init(int n, int maxshift, float *trig, int *nffts, int *shifts, int dir,
-                          const float *in, float *out, const float *window, int overlap,
-                          int shift, int stride) {
+int oracle_celt_mdct_init(int n, int maxshift, celt_coef *trig, int *nffts, int *shifts, int dir,
+                          const kiss_fft_scalar *in, kiss_fft_scalar *out,
+                          const celt_coef *window, int overlap, int shift, int stride) {
   mdct_lookup l;
   int i;
   memset(&l, 0, sizeof(l));

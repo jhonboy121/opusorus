@@ -318,15 +318,20 @@ fn unit_dft() {
 #[cfg(feature = "qext")]
 #[test]
 fn unit_mini_kfft() {
-    use opusorus::celt::mini_kfft::{mini_kiss_fft, mini_kiss_fft_alloc};
+    use opusorus::celt::mini_kfft::{MiniKissFftCpx, mini_kiss_fft, mini_kiss_fft_alloc};
     let mut rand = GlibcRand::new(1);
     for nfft in [32, 128, 256, 36, 50, 60, 120, 240, 480] {
         for isinverse in [false, true] {
             let fft = mini_kiss_fft_alloc(nfft as i32, false).unwrap();
             let ifft = mini_kiss_fft_alloc(nfft as i32, true).unwrap();
             let input = random_cpx(nfft, isinverse, &mut rand);
-            let mut out = vec![KissFftCpx::default(); nfft];
-            mini_kiss_fft(if isinverse { &ifft } else { &fft }, &input, &mut out);
+            let min: Vec<MiniKissFftCpx> = input
+                .iter()
+                .map(|c| MiniKissFftCpx { r: c.r, i: c.i })
+                .collect();
+            let mut mout = vec![MiniKissFftCpx::default(); nfft];
+            mini_kiss_fft(if isinverse { &ifft } else { &fft }, &min, &mut mout);
+            let out: Vec<KissFftCpx> = mout.iter().map(|c| KissFftCpx { r: c.r, i: c.i }).collect();
             // The mini FFT does not scale the forward transform (`if (0&&isinverse)` in C).
             check_dft(&input, &out, isinverse, false);
         }
