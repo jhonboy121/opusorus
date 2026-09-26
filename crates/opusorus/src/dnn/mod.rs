@@ -26,3 +26,23 @@ pub mod parse_lpcnet_weights;
 pub mod pitchdnn;
 pub mod tansig_table;
 pub mod vec;
+
+// Deep PLC (unit `dnn_plc`).
+#[cfg(feature = "deep-plc")]
+pub mod fargan;
+#[cfg(feature = "deep-plc")]
+pub mod lpcnet_plc;
+// DRED (unit `dnn_dred`).
+#[cfg(feature = "dred")]
+pub mod dred_coding;
+#[cfg(feature = "dred")]
+pub mod dred_decoder;
+#[cfg(feature = "dred")]
+pub mod dred_encoder;
+#[cfg(feature = "dred")]
+pub mod dred_rdovae;
+// OSCE (unit `dnn_osce`).
+#[cfg(feature = "osce")]
+pub mod osce;
+#[cfg(feature = "osce")]
+pub mod osce_features;
