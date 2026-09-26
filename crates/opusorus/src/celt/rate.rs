@@ -761,18 +761,9 @@ static LAST_CAP: [u8; 3] = [110, 60, 0];
 #[cfg(feature = "qext")]
 static LAST_OTHER: [u8; 4] = [120, 112, 70, 0];
 
-/// `eMeans` (float build) from celt/quant_bands.c.
-///
-/// Private copy: owned by the `celt_bands` unit (`celt/quant_bands.rs`); deduplicate on merge.
+// `eMeans` lives in celt/quant_bands.rs (its C home).
 #[cfg(feature = "qext")]
-#[rustfmt::skip]
-static E_MEANS: [OpusVal16; 25] = [
-    6.437500, 6.250000, 5.750000, 5.312500, 5.062500,
-    4.812500, 4.500000, 4.375000, 4.875000, 4.687500,
-    4.562500, 4.437500, 4.875000, 4.625000, 4.312500,
-    4.500000, 4.375000, 4.625000, 4.750000, 4.437500,
-    3.750000, 3.750000, 3.750000, 3.750000, 3.750000,
-];
+use crate::celt::quant_bands::E_MEANS;
 
 /// Port of celt/rate.c:ec_enc_depth.
 #[cfg(feature = "qext")]
