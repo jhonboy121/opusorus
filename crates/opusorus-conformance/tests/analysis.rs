@@ -3,10 +3,11 @@
 //!
 //! Every function is compared bit-for-bit, including the complete `TonalityAnalysisState` after
 //! stateful calls.
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Shared by the float and the fixed-point builds (`fixed-point`, `fixed-res24`, with or
+//! without `qext`): the analysis is float in both, but in fixed-point builds its input signal
+//! (`opus_val32`: downmix output, `inmem`, the resampler state and energy) is `celt_sig` (`i32`)
+//! and `is_digital_silence` takes `opus_res` (`i16`, or `i32` with `fixed-res24`).
 
 use opusorus::analysis::{
     self as a, AnalysisInfo, DETECT_SIZE, DownmixFunc, TonalityAnalysisState,
@@ -14,7 +15,56 @@ use opusorus::analysis::{
 use opusorus::celt::modes::opus_custom_mode_create;
 use opusorus::celt::static_modes::CeltMode;
 use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq, signals};
-use opusorus_oracle::analysis::{self as c, CAnalysisInfo, CTonalityAnalysisState, Pcm};
+use opusorus_oracle::analysis::{
+    self as c, CAnalysisInfo, CTonalityAnalysisState, Pcm, Res, Val32,
+};
+
+/// Bit-exact comparison of `opus_val32` buffers (float bits, or integers in fixed point).
+#[cfg(not(feature = "fixed-point"))]
+#[track_caller]
+fn assert_val32_eq(what: &str, r: &[Val32], c: &[Val32]) {
+    assert_bits_eq_f32(what, r, c);
+}
+
+/// Bit-exact comparison of `opus_val32` buffers (float bits, or integers in fixed point).
+#[cfg(feature = "fixed-point")]
+#[track_caller]
+fn assert_val32_eq(what: &str, r: &[Val32], c: &[Val32]) {
+    assert_slice_eq(what, r, c);
+}
+
+/// An `opus_val32` signal sample `x * amp` (float build), with `amp` the float amplitude.
+#[cfg(not(feature = "fixed-point"))]
+const fn val32(x: f32, amp: f32) -> Val32 {
+    x * amp
+}
+
+/// An `opus_val32` signal sample (fixed point: `celt_sig`, where 16-bit full scale is
+/// `2^(15+SIG_SHIFT)` = `2^27`); `amp` is the float-build amplitude (full scale 32768).
+#[cfg(feature = "fixed-point")]
+const fn val32(x: f32, amp: f32) -> Val32 {
+    (x as f64 * amp as f64 * 4096.0) as i32
+}
+
+/// An `opus_res` sample from a float sample (±1.0 full scale).
+#[cfg(not(feature = "fixed-point"))]
+const fn to_res(x: f32) -> Res {
+    x
+}
+
+/// An `opus_res` sample from a float sample (±1.0 full scale): 16-bit.
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+fn to_res(x: f32) -> Res {
+    (x as f64 * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+}
+
+/// An `opus_res` sample from a float sample (±1.0 full scale): 24-bit.
+#[cfg(feature = "fixed-res24")]
+fn to_res(x: f32) -> Res {
+    (x as f64 * 8_388_608.0)
+        .round()
+        .clamp(-8_388_608.0, 8_388_607.0) as i32
+}
 
 #[expect(
     clippy::unwrap_used,
@@ -130,7 +180,7 @@ fn assert_state_eq(what: &str, r: &TonalityAnalysisState, c: &CTonalityAnalysisS
     f("angle", &r.angle, &c.angle);
     f("d_angle", &r.d_angle, &c.d_angle);
     f("d2_angle", &r.d2_angle, &c.d2_angle);
-    f("inmem", &r.inmem, &c.inmem);
+    assert_val32_eq(&format!("{what}: inmem"), &r.inmem, &c.inmem);
     f(
         "prev_band_tonality",
         &r.prev_band_tonality,
@@ -150,7 +200,11 @@ fn assert_state_eq(what: &str, r: &TonalityAnalysisState, c: &CTonalityAnalysisS
         &[c.prev_tonality, c.e_tracker, c.low_e_count, c.hp_ener_accum],
     );
     f("rnn_state", &r.rnn_state, &c.rnn_state);
-    f("downmix_state", &r.downmix_state, &c.downmix_state);
+    assert_val32_eq(
+        &format!("{what}: downmix_state"),
+        &r.downmix_state,
+        &c.downmix_state,
+    );
     for k in 0..DETECT_SIZE {
         assert_info_eq(&format!("{what}: info[{k}]"), &r.info[k], &c.info[k]);
     }
@@ -357,19 +411,19 @@ fn downmix_functions() {
             .collect();
         let what = format!("iter {iter} C={ch} sub={subframe} off={offset} c1={c1} c2={c2}");
 
-        let mut yr = vec![0.0f32; subframe as usize];
-        let mut yc = vec![0.0f32; subframe as usize];
+        let mut yr = vec![Val32::default(); subframe as usize];
+        let mut yc = vec![Val32::default(); subframe as usize];
         a::downmix_float(&x, &mut yr, subframe, offset, c1, c2, ch);
         c::downmix(Pcm::Float(&x), &mut yc, subframe, offset, c1, c2, ch);
-        assert_bits_eq_f32(&format!("{what} float"), &yr, &yc);
+        assert_val32_eq(&format!("{what} float"), &yr, &yc);
 
         a::downmix_int(&xi16, &mut yr, subframe, offset, c1, c2, ch);
         c::downmix(Pcm::Int16(&xi16), &mut yc, subframe, offset, c1, c2, ch);
-        assert_bits_eq_f32(&format!("{what} int16"), &yr, &yc);
+        assert_val32_eq(&format!("{what} int16"), &yr, &yc);
 
         a::downmix_int24(&xi24, &mut yr, subframe, offset, c1, c2, ch);
         c::downmix(Pcm::Int24(&xi24), &mut yc, subframe, offset, c1, c2, ch);
-        assert_bits_eq_f32(&format!("{what} int24"), &yr, &yc);
+        assert_val32_eq(&format!("{what} int24"), &yr, &yc);
     }
 }
 
@@ -387,12 +441,12 @@ fn is_digital_silence() {
             3 => 1.0,
             _ => 2.0 / (1i32 << lsb) as f32,
         };
-        let mut x: Vec<f32> = (0..(fsz * ch) as usize)
-            .map(|_| amp * rng.f32_sym())
+        let mut x: Vec<Res> = (0..(fsz * ch) as usize)
+            .map(|_| to_res(amp * rng.f32_sym()))
             .collect();
         if rng.range_i32(0, 3) == 0 {
             let k = rng.range_i32(0, x.len() as i32 - 1) as usize;
-            x[k] = if rng.range_i32(0, 1) == 0 { amp } else { -amp };
+            x[k] = to_res(if rng.range_i32(0, 1) == 0 { amp } else { -amp });
         }
         assert_eq!(
             a::is_digital_silence(&x, fsz, ch, lsb),
@@ -405,23 +459,32 @@ fn is_digital_silence() {
 #[test]
 fn silk_resampler_down2_hp() {
     let mut rng = Rng::new(0x2D);
+    #[cfg(feature = "fixed-point")]
+    let mut saturated = false;
     for stream in 0..200 {
-        let mut sr = [0.0f32; 3];
-        let mut sc = [0.0f32; 3];
+        let mut sr = [Val32::default(); 3];
+        let mut sc = [Val32::default(); 3];
         let amp = [32768.0f32, 1.0, 65536.0, 1e-3][stream % 4];
         for call in 0..20 {
             let len = rng.range_i32(0, 961);
-            let x: Vec<f32> = (0..len).map(|_| amp * rng.f32_sym()).collect();
-            let mut or = vec![0.0f32; (len / 2) as usize];
-            let mut oc = vec![0.0f32; (len / 2) as usize];
+            let x: Vec<Val32> = (0..len).map(|_| val32(rng.f32_sym(), amp)).collect();
+            let mut or = vec![Val32::default(); (len / 2) as usize];
+            let mut oc = vec![Val32::default(); (len / 2) as usize];
             let er = a::silk_resampler_down2_hp(&mut sr, &mut or, &x, len);
             let ec = c::silk_resampler_down2_hp(&mut sc, &mut oc, &x);
             let what = format!("stream {stream} call {call} len {len}");
-            assert_bits_eq_f32(&format!("{what}: out"), &or, &oc);
-            assert_bits_eq_f32(&format!("{what}: state"), &sr, &sc);
-            assert_eq!(er.to_bits(), ec.to_bits(), "{what}: hp_ener");
+            assert_val32_eq(&format!("{what}: out"), &or, &oc);
+            assert_val32_eq(&format!("{what}: state"), &sr, &sc);
+            assert_val32_eq(&format!("{what}: hp_ener"), &[er], &[ec]);
+            #[cfg(feature = "fixed-point")]
+            {
+                // The 32-bit saturation of the fixed-point energy.
+                saturated |= ec == i32::MAX;
+            }
         }
     }
+    #[cfg(feature = "fixed-point")]
+    assert!(saturated, "hp_ener saturation not exercised");
 }
 
 #[test]
@@ -436,8 +499,8 @@ fn downmix_and_resample() {
             1 => (0, -2),
             _ => (0, ch - 1),
         };
-        let mut sr = [0.0f32; 3];
-        let mut sc = [0.0f32; 3];
+        let mut sr = [Val32::default(); 3];
+        let mut sc = [Val32::default(); 3];
         let n_in = fs as usize / 50 * 2;
         let sig = signals::music_like(n_in, ch as usize, fs as u32, stream as u64);
         let pcm = PcmBuf::from_float(&sig, ty);
@@ -451,7 +514,7 @@ fn downmix_and_resample() {
                 48000 => subframe as usize,
                 _ => subframe as usize,
             };
-            let mut yr = vec![0.0f32; n_out.max(subframe as usize)];
+            let mut yr = vec![Val32::default(); n_out.max(subframe as usize)];
             let mut yc = yr.clone();
             let er = with_pcm!(&pcm, |x, d| a::downmix_and_resample(
                 d, x, &mut yr, &mut sr, subframe, offset, c1, c2, ch, fs
@@ -468,9 +531,9 @@ fn downmix_and_resample() {
                 fs,
             );
             let what = format!("stream {stream} Fs {fs} ty {ty} call {call} sub {subframe}");
-            assert_bits_eq_f32(&format!("{what}: y"), &yr, &yc);
-            assert_bits_eq_f32(&format!("{what}: S"), &sr, &sc);
-            assert_eq!(er.to_bits(), ec.to_bits(), "{what}: ret");
+            assert_val32_eq(&format!("{what}: y"), &yr, &yc);
+            assert_val32_eq(&format!("{what}: S"), &sr, &sc);
+            assert_val32_eq(&format!("{what}: ret"), &[er], &[ec]);
         }
     }
 }

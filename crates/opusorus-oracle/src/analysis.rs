@@ -4,8 +4,27 @@
 //! The C state `TonalityAnalysisState` and `AnalysisInfo` are mirrored as `#[repr(C)]` structs
 //! ([`CTonalityAnalysisState`], [`CAnalysisInfo`]) so tests can read and write the complete C
 //! state; [`layout_matches`] checks the mirror against the C compiler's layout.
+//!
+//! Built in both oracles: [`Val32`] (`opus_val32`: signal buffers, `inmem`, the resampler
+//! state) and [`Res`] (`opus_res`) follow the build.
 
 use core::ffi::{c_int, c_void};
+
+/// `opus_val32` (float build).
+#[cfg(not(feature = "fixed-point"))]
+pub type Val32 = f32;
+/// `opus_val32` (fixed-point build).
+#[cfg(feature = "fixed-point")]
+pub type Val32 = i32;
+/// `opus_res` (float build).
+#[cfg(not(feature = "fixed-point"))]
+pub type Res = f32;
+/// `opus_res` (fixed-point build, 16-bit resolution).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type Res = i16;
+/// `opus_res` (fixed-point build, `ENABLE_RES24`).
+#[cfg(feature = "fixed-res24")]
+pub type Res = i32;
 
 /// `NB_FRAMES`.
 pub const NB_FRAMES: usize = 8;
@@ -39,7 +58,7 @@ pub struct CAnalysisInfo {
     pub leak_boost: [u8; LEAK_BANDS],
 }
 
-/// `#[repr(C)]` mirror of `TonalityAnalysisState` (src/analysis.h), float build.
+/// `#[repr(C)]` mirror of `TonalityAnalysisState` (src/analysis.h).
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq)]
 #[allow(missing_docs, reason = "fields mirror the C struct")]
@@ -50,7 +69,7 @@ pub struct CTonalityAnalysisState {
     pub angle: [f32; 240],
     pub d_angle: [f32; 240],
     pub d2_angle: [f32; 240],
-    pub inmem: [f32; ANALYSIS_BUF_SIZE],
+    pub inmem: [Val32; ANALYSIS_BUF_SIZE],
     pub mem_fill: c_int,
     pub prev_band_tonality: [f32; NB_TBANDS],
     pub prev_tonality: f32,
@@ -74,7 +93,7 @@ pub struct CTonalityAnalysisState {
     pub hp_ener_accum: f32,
     pub initialized: c_int,
     pub rnn_state: [f32; MAX_NEURONS],
-    pub downmix_state: [f32; 3],
+    pub downmix_state: [Val32; 3],
     pub info: [CAnalysisInfo; DETECT_SIZE],
 }
 
@@ -89,7 +108,7 @@ impl CTonalityAnalysisState {
             angle: [0.0; 240],
             d_angle: [0.0; 240],
             d2_angle: [0.0; 240],
-            inmem: [0.0; ANALYSIS_BUF_SIZE],
+            inmem: [Val32::default(); ANALYSIS_BUF_SIZE],
             mem_fill: 0,
             prev_band_tonality: [0.0; NB_TBANDS],
             prev_tonality: 0.0,
@@ -113,7 +132,7 @@ impl CTonalityAnalysisState {
             hp_ener_accum: 0.0,
             initialized: 0,
             rnn_state: [0.0; MAX_NEURONS],
-            downmix_state: [0.0; 3],
+            downmix_state: [Val32::default(); 3],
             info: [CAnalysisInfo::default(); DETECT_SIZE],
         })
     }
@@ -155,7 +174,7 @@ unsafe extern "C" {
     fn oracle_downmix(
         pcm_type: c_int,
         x: *const c_void,
-        y: *mut f32,
+        y: *mut Val32,
         subframe: c_int,
         offset: c_int,
         c1: c_int,
@@ -163,29 +182,29 @@ unsafe extern "C" {
         c: c_int,
     );
     fn oracle_is_digital_silence(
-        pcm: *const f32,
+        pcm: *const Res,
         frame_size: c_int,
         channels: c_int,
         lsb_depth: c_int,
     ) -> c_int;
     fn oracle_silk_resampler_down2_hp(
-        s: *mut f32,
-        out: *mut f32,
-        input: *const f32,
+        s: *mut Val32,
+        out: *mut Val32,
+        input: *const Val32,
         in_len: c_int,
-    ) -> f32;
+    ) -> Val32;
     fn oracle_downmix_and_resample(
         pcm_type: c_int,
         x: *const c_void,
-        y: *mut f32,
-        s: *mut f32,
+        y: *mut Val32,
+        s: *mut Val32,
         subframe: c_int,
         offset: c_int,
         c1: c_int,
         c2: c_int,
         c: c_int,
         fs: c_int,
-    ) -> f32;
+    ) -> Val32;
     fn oracle_tonality_analysis(
         st: *mut c_void,
         pcm_type: c_int,
@@ -330,7 +349,15 @@ pub fn run_analysis(
 
 /// C `downmix_float` / `downmix_int` / `downmix_int24` (by `pcm` type) into `y[..subframe]`.
 #[allow(clippy::too_many_arguments, reason = "mirrors C signature")]
-pub fn downmix(pcm: Pcm<'_>, y: &mut [f32], subframe: i32, offset: i32, c1: i32, c2: i32, c: i32) {
+pub fn downmix(
+    pcm: Pcm<'_>,
+    y: &mut [Val32],
+    subframe: i32,
+    offset: i32,
+    c1: i32,
+    c2: i32,
+    c: i32,
+) {
     let (ty, ptr, len) = pcm.raw();
     assert!(len >= downmix_extent(subframe, offset, c));
     assert!(y.len() >= subframe as usize);
@@ -338,16 +365,16 @@ pub fn downmix(pcm: Pcm<'_>, y: &mut [f32], subframe: i32, offset: i32, c1: i32,
     unsafe { oracle_downmix(ty, ptr, y.as_mut_ptr(), subframe, offset, c1, c2, c) }
 }
 
-/// C `is_digital_silence` (float build).
+/// C `is_digital_silence` (on `opus_res` samples).
 #[must_use]
-pub fn is_digital_silence(pcm: &[f32], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
+pub fn is_digital_silence(pcm: &[Res], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
     assert!(pcm.len() >= (frame_size * channels) as usize);
     // SAFETY: bounds checked above.
     unsafe { oracle_is_digital_silence(pcm.as_ptr(), frame_size, channels, lsb_depth) != 0 }
 }
 
 /// C `silk_resampler_down2_hp` (static in analysis.c).
-pub fn silk_resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32]) -> f32 {
+pub fn silk_resampler_down2_hp(s: &mut [Val32; 3], out: &mut [Val32], input: &[Val32]) -> Val32 {
     let in_len = input.len() as c_int;
     assert!(out.len() >= input.len() / 2);
     // SAFETY: bounds checked above; `s` holds the 3 state values.
@@ -360,15 +387,15 @@ pub fn silk_resampler_down2_hp(s: &mut [f32; 3], out: &mut [f32], input: &[f32])
 #[allow(clippy::too_many_arguments, reason = "mirrors C signature")]
 pub fn downmix_and_resample(
     pcm: Pcm<'_>,
-    y: &mut [f32],
-    s: &mut [f32; 3],
+    y: &mut [Val32],
+    s: &mut [Val32; 3],
     subframe: i32,
     offset: i32,
     c1: i32,
     c2: i32,
     c: i32,
     fs: i32,
-) -> f32 {
+) -> Val32 {
     let (ty, ptr, len) = pcm.raw();
     let (sub_in, off_in) = match fs {
         48000 => (subframe * 2, offset * 2),

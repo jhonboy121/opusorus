@@ -1,5 +1,12 @@
-//! Port of src/analysis.c, src/analysis.h (float build): the tonality / speech-music analysis
-//! that drives the encoder's mode, bandwidth and CELT tuning decisions.
+//! Port of src/analysis.c, src/analysis.h: the tonality / speech-music analysis that drives the
+//! encoder's mode, bandwidth and CELT tuning decisions.
+//!
+//! The analysis itself is float in both builds (as in C, where `analysis.c` is part of the
+//! float API that fixed-point builds keep). In fixed-point builds (`FIXED_POINT`) it is fed
+//! fixed-point signal: the downmixed input and `inmem` are `celt_sig` (Q27, `SIG_SHIFT` above
+//! 16-bit PCM), `silk_resampler_down2_hp` is integer, the FFT is the fixed-point kiss FFT
+//! (`kiss_fft_cpx` of `i32`), and the energies are rescaled (`SCALE_ENER`, the high-band energy
+//! compensation).
 //!
 //! Also contains:
 //! * [`AnalysisInfo`] and [`LEAK_BANDS`] from `celt/celt.h` (the `celt_bands` unit owns
@@ -19,17 +26,24 @@
 )]
 
 use crate::celt::arch::{
-    OpusVal32, abs16, celt_isnan, float2sig, half32, imax, imin, int16tosig, int24tosig, max16,
-    max32, min16, min32, mult16_32_q15, qconst16,
+    OpusRes, OpusVal32, float2sig, half32, imax, imin, int16tosig, int24tosig, max16, max32, min16,
+    min32, mult16_32_q15, qconst16,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{OpusVal16, SIG_SHIFT, shr64};
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::{abs16, celt_isnan};
 use crate::celt::kiss_fft::opus_fft;
+#[cfg(feature = "fixed-point")]
+use crate::celt::mathops::celt_maxabs32;
 use crate::celt::mathops::{PI, celt_maxabs_res, fast_atan2f, float2int};
-use crate::celt::static_modes::{CeltMode, KissFftCpx};
+use crate::celt::static_modes::{CeltMode, KissFftCpx, KissFftScalar};
 use crate::math;
 use crate::mlp::{
     LAYER0, LAYER1, LAYER2, MAX_NEURONS, analysis_compute_dense, analysis_compute_gru,
 };
 
+#[cfg(not(feature = "fixed-point"))]
 pub use crate::celt::celt::LEAK_BANDS;
 
 /// `NB_FRAMES`.
@@ -52,7 +66,74 @@ const LEAKAGE_OFFSET: f32 = 2.5;
 /// `LEAKAGE_SLOPE`.
 const LEAKAGE_SLOPE: f32 = 2.0;
 
+#[cfg(not(feature = "fixed-point"))]
 pub use crate::celt::celt::AnalysisInfo;
+
+/// `LEAK_BANDS` (celt/celt.h).
+///
+/// Fixed-point builds: private copy while `celt/celt.rs` is not converted yet (the float build
+/// re-exports `crate::celt::celt::LEAK_BANDS`); to be replaced by that re-export once it is.
+#[cfg(feature = "fixed-point")]
+pub const LEAK_BANDS: usize = 19;
+
+/// Port of celt/celt.h:AnalysisInfo: tonality analysis results passed from the Opus encoder to
+/// CELT.
+///
+/// Fixed-point builds: private copy while `celt/celt.rs` is not converted yet (the float build
+/// re-exports `crate::celt::celt::AnalysisInfo`); to be replaced by that re-export once it is.
+#[cfg(feature = "fixed-point")]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AnalysisInfo {
+    pub valid: i32,
+    pub tonality: f32,
+    pub tonality_slope: f32,
+    pub noisiness: f32,
+    pub activity: f32,
+    pub music_prob: f32,
+    pub music_prob_min: f32,
+    pub music_prob_max: f32,
+    pub bandwidth: i32,
+    pub activity_probability: f32,
+    pub max_pitch_ratio: f32,
+    /// Store as Q6 char to save space.
+    pub leak_boost: [u8; LEAK_BANDS],
+}
+
+/// `ABS16` on a float in a fixed-point build: the `fixed_generic.h` ternary
+/// `((x) < 0 ? (-(x)) : (x))` (keeps the sign of `-0.0`, unlike `fabsf`).
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn abs16(x: f32) -> f32 {
+    if x < 0.0 { -x } else { x }
+}
+
+/// C `(float)x` of an `opus_val32` / `kiss_fft_scalar` (identity in the float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+const fn to_float(x: f32) -> f32 {
+    x
+}
+
+/// C `(float)x` of an `opus_val32` / `kiss_fft_scalar` (`i32` in fixed-point builds).
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn to_float(x: i32) -> f32 {
+    x as f32
+}
+
+/// C `(kiss_fft_scalar)(w*x)`: windowed FFT input sample.
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+const fn windowed(w: f32, x: OpusVal32) -> KissFftScalar {
+    w * x
+}
+
+/// C `(kiss_fft_scalar)(w*x)`: windowed FFT input sample (float product truncated to `i32`).
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn windowed(w: f32, x: OpusVal32) -> KissFftScalar {
+    (w * x as f32) as KissFftScalar
+}
 
 /// `downmix_func` (src/opus_private.h): `downmix(x, y, subframe, offset, c1, c2, C)` mixes
 /// `subframe` samples starting at sample `offset` of the interleaved `C`-channel buffer `x`
@@ -110,7 +191,7 @@ impl TonalityAnalysisState {
             angle: [0.0; 240],
             d_angle: [0.0; 240],
             d2_angle: [0.0; 240],
-            inmem: [0.0; ANALYSIS_BUF_SIZE],
+            inmem: [OpusVal32::default(); ANALYSIS_BUF_SIZE],
             mem_fill: 0,
             prev_band_tonality: [0.0; NB_TBANDS],
             prev_tonality: 0.0,
@@ -134,7 +215,7 @@ impl TonalityAnalysisState {
             hp_ener_accum: 0.0,
             initialized: 0,
             rnn_state: [0.0; MAX_NEURONS],
-            downmix_state: [0.0; 3],
+            downmix_state: [OpusVal32::default(); 3],
             info: [AnalysisInfo::default(); DETECT_SIZE],
         };
         tonality_analysis_init(&mut s, fs);
@@ -208,12 +289,28 @@ static STD_FEATURE_BIAS: [f32; 9] = [
 const MAX_DOWNMIX: usize = 960;
 
 /// `SCALE_ENER` (float build): `(1.f/32768/32768)*e`.
+#[cfg(not(feature = "fixed-point"))]
 #[inline(always)]
 const fn scale_ener(e: f32) -> f32 {
     (1.0f32 / 32768.0 / 32768.0) * e
 }
 
+/// `SCALE_COMPENS` (fixed-point build): the input is ±2^15 shifted up by `SIG_SHIFT`, so the
+/// energy is compensated for that.
+#[cfg(feature = "fixed-point")]
+const SCALE_COMPENS: f32 = 1.0f32 / (1i32 << (15 + SIG_SHIFT)) as f32;
+
+/// `SCALE_ENER` (fixed-point build): `(SCALE_COMPENS*SCALE_COMPENS)*(e)`.
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+const fn scale_ener(e: f32) -> f32 {
+    (SCALE_COMPENS * SCALE_COMPENS) * e
+}
+
 /// Port of src/opus_encoder.c:downmix_float. `x` is interleaved float PCM (±1.0 full scale).
+///
+/// In fixed-point builds `FLOAT2SIG` converts (and clamps) each sample to `celt_sig`, and the
+/// float-only +6 dBFS cap / NaN removal is not applied (as in C).
 pub fn downmix_float(
     x: &[f32],
     y: &mut [OpusVal32],
@@ -240,6 +337,7 @@ pub fn downmix_float(
         }
     }
     // Cap signal to +6 dBFS to avoid problems in the analysis.
+    #[cfg(not(feature = "fixed-point"))]
     for yj in y.iter_mut() {
         // Same as the C pair of comparisons (a NaN passes through and is zeroed below).
         *yj = (*yj).clamp(-65536.0, 65536.0);
@@ -305,19 +403,59 @@ pub fn downmix_int24(
     }
 }
 
-/// Port of src/opus_encoder.c:is_digital_silence (float build): true when every sample of
-/// `pcm` (`frame_size * channels` values) is within one LSB at `lsb_depth` bits.
+/// Port of src/opus_encoder.c:is_digital_silence: true when every sample of `pcm`
+/// (`frame_size * channels` values) is within one LSB at `lsb_depth` bits (float build), or
+/// exactly zero (fixed-point builds, where `lsb_depth` is unused).
 #[must_use]
-pub fn is_digital_silence(pcm: &[f32], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
+pub fn is_digital_silence(pcm: &[OpusRes], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
     // MLP_TRAINING: not ported (training-only instrumentation).
     let sample_max = celt_maxabs_res(&pcm[..(frame_size * channels) as usize]);
-    // FIXED_POINT: not ported (float build)
-    sample_max <= 1.0f32 / (1i32 << lsb_depth) as f32
+    #[cfg(feature = "fixed-point")]
+    {
+        let _ = lsb_depth;
+        sample_max == 0
+    }
+    #[cfg(not(feature = "fixed-point"))]
+    {
+        sample_max <= 1.0f32 / (1i32 << lsb_depth) as f32
+    }
 }
 
-/// Port of src/analysis.c:silk_resampler_down2_hp (float build): 2x downsampler that also
-/// returns the energy of the high-pass (upper half-band) signal. `s` is the 3-value state,
-/// `out` receives `in_len/2` samples.
+/// Port of src/analysis.c:is_digital_silence32 (fixed-point build): true when every sample of
+/// the `opus_val32` buffer is zero.
+#[cfg(feature = "fixed-point")]
+#[must_use]
+fn is_digital_silence32(pcm: &[OpusVal32], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
+    // MLP_TRAINING: not ported (training-only instrumentation).
+    let sample_max = celt_maxabs32(&pcm[..(frame_size * channels) as usize]);
+    let _ = lsb_depth;
+    sample_max == 0
+}
+
+/// `is_digital_silence32` is `is_digital_silence` in the float build.
+#[cfg(not(feature = "fixed-point"))]
+#[must_use]
+fn is_digital_silence32(pcm: &[OpusVal32], frame_size: i32, channels: i32, lsb_depth: i32) -> bool {
+    is_digital_silence(pcm, frame_size, channels, lsb_depth)
+}
+
+/// `QCONST16(0.6074371f, 15)`: first all-pass coefficient of [`silk_resampler_down2_hp`].
+#[cfg(feature = "fixed-point")]
+const DOWN2_COEF0: OpusVal16 = qconst16(0.6074371f32 as f64, 15);
+/// `QCONST16(0.15063f, 15)`: second all-pass coefficient of [`silk_resampler_down2_hp`].
+#[cfg(feature = "fixed-point")]
+const DOWN2_COEF1: OpusVal16 = qconst16(0.15063f32 as f64, 15);
+/// `QCONST16(0.6074371f, 15)` (float build: the value itself).
+#[cfg(not(feature = "fixed-point"))]
+const DOWN2_COEF0: f32 = qconst16(0.6074371, 15);
+/// `QCONST16(0.15063f, 15)` (float build: the value itself).
+#[cfg(not(feature = "fixed-point"))]
+const DOWN2_COEF1: f32 = qconst16(0.15063, 15);
+
+/// Port of src/analysis.c:silk_resampler_down2_hp: 2x downsampler that also returns the energy
+/// of the high-pass (upper half-band) signal. `s` is the 3-value state, `out` receives
+/// `in_len/2` samples. In fixed-point builds the energy is accumulated in 64 bits (each term
+/// shifted right by 8), then shifted right by `2*SIG_SHIFT` and saturated to 32 bits.
 pub fn silk_resampler_down2_hp(
     s: &mut [OpusVal32; 3],
     out: &mut [OpusVal32],
@@ -327,7 +465,10 @@ pub fn silk_resampler_down2_hp(
     let len2 = (in_len / 2) as usize;
     let out = &mut out[..len2];
     let input = &input[..2 * len2];
+    #[cfg(not(feature = "fixed-point"))]
     let mut hp_ener: f32 = 0.0;
+    #[cfg(feature = "fixed-point")]
+    let mut hp_ener: i64 = 0;
     // Internal variables and state are in Q10 format
     for k in 0..len2 {
         // Convert to Q10
@@ -335,7 +476,7 @@ pub fn silk_resampler_down2_hp(
 
         // All-pass section for even input sample
         let mut y = in32 - s[0];
-        let mut x = mult16_32_q15(qconst16(0.6074371, 15), y);
+        let mut x = mult16_32_q15(DOWN2_COEF0, y);
         let mut out32 = s[0] + x;
         s[0] = in32 + x;
         let mut out32_hp = out32;
@@ -344,23 +485,38 @@ pub fn silk_resampler_down2_hp(
 
         // All-pass section for odd input sample, and add to output of previous section
         y = in32 - s[1];
-        x = mult16_32_q15(qconst16(0.15063, 15), y);
+        x = mult16_32_q15(DOWN2_COEF1, y);
         out32 += s[1];
         out32 += x;
         s[1] = in32 + x;
 
         y = -in32 - s[2];
-        x = mult16_32_q15(qconst16(0.15063, 15), y);
+        x = mult16_32_q15(DOWN2_COEF1, y);
         out32_hp += s[2];
         out32_hp += x;
         s[2] = -in32 + x;
 
         // len2 can be up to 480, so we shift by 8 to make it fit (SHR64 is a no-op in float).
-        hp_ener += out32_hp * out32_hp;
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            hp_ener += out32_hp * out32_hp;
+        }
+        #[cfg(feature = "fixed-point")]
+        {
+            hp_ener += shr64(i64::from(out32_hp) * i64::from(out32_hp), 8);
+        }
         // Add, convert back to int16 and store to output
         out[k] = half32(out32);
     }
-    // FIXED_POINT: not ported (float build)
+    #[cfg(feature = "fixed-point")]
+    let hp_ener = {
+        // Fitting in 32 bits.
+        hp_ener >>= 2 * SIG_SHIFT;
+        if hp_ener > 2147483647 {
+            hp_ener = 2147483647;
+        }
+        hp_ener as OpusVal32
+    };
     hp_ener
 }
 
@@ -380,10 +536,10 @@ pub fn downmix_and_resample<T>(
     c: i32,
     fs: i32,
 ) -> OpusVal32 {
-    let mut ret: OpusVal32 = 0.0;
+    let mut ret = OpusVal32::default();
 
     if subframe == 0 {
-        return 0.0;
+        return OpusVal32::default();
     }
     if fs == 48000 {
         subframe *= 2;
@@ -396,7 +552,7 @@ pub fn downmix_and_resample<T>(
     }
     let n = subframe as usize;
     debug_assert!(n <= MAX_DOWNMIX);
-    let mut tmp_buf = [0.0f32; MAX_DOWNMIX];
+    let mut tmp_buf = [OpusVal32::default(); MAX_DOWNMIX];
     let tmp = &mut tmp_buf[..n];
 
     downmix(x, tmp, subframe, offset, c1, c2, c);
@@ -410,7 +566,7 @@ pub fn downmix_and_resample<T>(
     } else if fs == 24000 {
         y[..n].copy_from_slice(tmp);
     } else if fs == 16000 {
-        let mut tmp3x = [0.0f32; 3 * MAX_DOWNMIX / 2];
+        let mut tmp3x = [OpusVal32::default(); 3 * MAX_DOWNMIX / 2];
         let tmp3x = &mut tmp3x[..3 * n];
         // Don't do this at home! This resampler is horrible and it's only (barely)
         // usable for the purpose of the analysis because we don't care about all
@@ -422,7 +578,10 @@ pub fn downmix_and_resample<T>(
         }
         silk_resampler_down2_hp(s, y, tmp3x, 3 * subframe);
     }
-    ret *= 1.0f32 / 32768.0 / 32768.0;
+    #[cfg(not(feature = "fixed-point"))]
+    {
+        ret *= 1.0f32 / 32768.0 / 32768.0;
+    }
     ret
 }
 
@@ -440,7 +599,7 @@ pub fn tonality_analysis_reset(tonal: &mut TonalityAnalysisState) {
     tonal.angle = [0.0; 240];
     tonal.d_angle = [0.0; 240];
     tonal.d2_angle = [0.0; 240];
-    tonal.inmem = [0.0; ANALYSIS_BUF_SIZE];
+    tonal.inmem = [OpusVal32::default(); ANALYSIS_BUF_SIZE];
     tonal.mem_fill = 0;
     tonal.prev_band_tonality = [0.0; NB_TBANDS];
     tonal.prev_tonality = 0.0;
@@ -464,7 +623,7 @@ pub fn tonality_analysis_reset(tonal: &mut TonalityAnalysisState) {
     tonal.hp_ener_accum = 0.0;
     tonal.initialized = 0;
     tonal.rnn_state = [0.0; MAX_NEURONS];
-    tonal.downmix_state = [0.0; 3];
+    tonal.downmix_state = [OpusVal32::default(); 3];
     tonal.info = [AnalysisInfo::default(); DETECT_SIZE];
 }
 
@@ -703,13 +862,13 @@ fn tonality_analysis_impl(
     let kfft = &*celt_mode.mdct.kfft[0];
     {
         let mf = tonal.mem_fill as usize;
-        tonal.hp_ener_accum += downmix_and_resample(
+        tonal.hp_ener_accum += to_float(downmix_and_resample(
             &mut tonal.inmem[mf..],
             &mut tonal.downmix_state,
             imin(len, BUF - tonal.mem_fill),
             offset,
             tonal.fs,
-        );
+        ));
     }
     if tonal.mem_fill + len < BUF {
         tonal.mem_fill += len;
@@ -723,8 +882,7 @@ fn tonality_analysis_impl(
         tonal.write_pos -= DETECT_SIZE as i32;
     }
 
-    // is_digital_silence32 is is_digital_silence in the float build.
-    let is_silence = is_digital_silence(&tonal.inmem, BUF, 1, lsb_depth);
+    let is_silence = is_digital_silence32(&tonal.inmem, BUF, 1, lsb_depth);
 
     let mut input = [KissFftCpx::default(); N];
     let mut out = [KissFftCpx::default(); N];
@@ -732,20 +890,20 @@ fn tonality_analysis_impl(
     let mut noisiness = [0.0f32; 240];
     for i in 0..N2 {
         let w = ANALYSIS_WINDOW[i];
-        input[i].r = w * tonal.inmem[i];
-        input[i].i = w * tonal.inmem[N2 + i];
-        input[N - i - 1].r = w * tonal.inmem[N - i - 1];
-        input[N - i - 1].i = w * tonal.inmem[N + N2 - i - 1];
+        input[i].r = windowed(w, tonal.inmem[i]);
+        input[i].i = windowed(w, tonal.inmem[N2 + i]);
+        input[N - i - 1].r = windowed(w, tonal.inmem[N - i - 1]);
+        input[N - i - 1].i = windowed(w, tonal.inmem[N + N2 - i - 1]);
     }
     tonal.inmem.copy_within(ANALYSIS_BUF_SIZE - 240.., 0);
     let remaining = len - (BUF - tonal.mem_fill);
-    tonal.hp_ener_accum = downmix_and_resample(
+    tonal.hp_ener_accum = to_float(downmix_and_resample(
         &mut tonal.inmem[240..],
         &mut tonal.downmix_state,
         remaining,
         offset + BUF - tonal.mem_fill,
         tonal.fs,
-    );
+    ));
     tonal.mem_fill = 240 + remaining;
     if is_silence {
         // On silence, copy the previous analysis.
@@ -758,7 +916,8 @@ fn tonality_analysis_impl(
     }
     opus_fft(kfft, &input, &mut out);
     // If there's any NaN on the input, the entire output will be NaN, so we only need to check
-    // one value.
+    // one value (float build only).
+    #[cfg(not(feature = "fixed-point"))]
     if celt_isnan(out[0].r) {
         tonal.info[info_idx].valid = 0;
         return;
@@ -769,10 +928,10 @@ fn tonality_analysis_impl(
     let d2a = &mut tonal.d2_angle;
     let half_over_pi = (0.5f64 / PI) as f32;
     for i in 1..N2 {
-        let x1r = out[i].r + out[N - i].r;
-        let x1i = out[i].i - out[N - i].i;
-        let x2r = out[i].i + out[N - i].i;
-        let x2i = out[N - i].r - out[i].r;
+        let x1r = to_float(out[i].r) + to_float(out[N - i].r);
+        let x1i = to_float(out[i].i) - to_float(out[N - i].i);
+        let x2r = to_float(out[i].i) + to_float(out[N - i].i);
+        let x2i = to_float(out[N - i].r) - to_float(out[i].r);
 
         let angle = half_over_pi * fast_atan2f(x1i, x1r);
         let d_angle = angle - a[i];
@@ -820,15 +979,14 @@ fn tonality_analysis_impl(
     let mut relative_e: f32 = 0.0;
     let mut frame_loudness: f32 = 0.0;
     let bin_e = |i: usize| -> f32 {
-        out[i].r * out[i].r
-            + out[N - i].r * out[N - i].r
-            + out[i].i * out[i].i
-            + out[N - i].i * out[N - i].i
+        let (xr, xi) = (to_float(out[i].r), to_float(out[i].i));
+        let (yr, yi) = (to_float(out[N - i].r), to_float(out[N - i].i));
+        xr * xr + yr * yr + xi * xi + yi * yi
     };
     // The energy of the very first band is special because of DC.
     {
-        let x1r = 2.0f32 * out[0].r;
-        let x2r = 2.0f32 * out[0].i;
+        let x1r = 2.0f32 * to_float(out[0].r);
+        let x2r = 2.0f32 * to_float(out[0].i);
         let mut e = x1r * x1r + x2r * x2r;
         for i in 1..4 {
             e += bin_e(i);
@@ -846,11 +1004,14 @@ fn tonality_analysis_impl(
             t_e += be * max32(0.0, tonality[i]);
             n_e += be * 2.0 * (0.5 - noisiness[i]);
         }
-        // Check for extreme band energies that could cause NaNs later.
-        let below_limit = e < 1e9;
-        if !below_limit || celt_isnan(e) {
-            tonal.info[info_idx].valid = 0;
-            return;
+        // Check for extreme band energies that could cause NaNs later (float build only).
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            let below_limit = e < 1e9;
+            if !below_limit || celt_isnan(e) {
+                tonal.info[info_idx].valid = 0;
+                return;
+            }
         }
 
         let ec = tonal.e_count as usize;
@@ -1008,14 +1169,21 @@ fn tonality_analysis_impl(
     // off the band.
     if tonal.fs == 48000 {
         let b = NB_TBANDS;
+        #[cfg(not(feature = "fixed-point"))]
         let e = hp_ener * (1.0f32 / (60 * 60) as f32);
+        #[cfg(feature = "fixed-point")]
+        let mut e = hp_ener * (1.0f32 / (60 * 60) as f32);
         let noise_ratio: f32 = if tonal.prev_bandwidth == 20 {
             10.0
         } else {
             30.0
         };
 
-        // FIXED_POINT: not ported (float build)
+        #[cfg(feature = "fixed-point")]
+        {
+            // silk_resampler_down2_hp() shifted right by an extra 8 bits.
+            e *= 256.0f32 * (1.0f32 / 32767.0) * (1.0f32 / 32767.0);
+        }
         above_max_pitch += e;
         tonal.mean_e[b] = max32((1.0 - alpha_e2) * tonal.mean_e[b], e);
         let em = max32(e, tonal.mean_e[b]);

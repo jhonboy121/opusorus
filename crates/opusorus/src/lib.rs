@@ -98,10 +98,10 @@ pub mod dnn;
 pub(crate) mod dnn;
 
 // ---- Opus layer (src/*.c) ----
-#[cfg(all(not(feature = "fixed-point"), feature = "internals"))]
+#[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod analysis;
-#[cfg(all(not(feature = "fixed-point"), not(feature = "internals")))]
+#[cfg(not(feature = "internals"))]
 pub(crate) mod analysis;
 #[cfg(not(feature = "fixed-point"))]
 pub mod decoder;

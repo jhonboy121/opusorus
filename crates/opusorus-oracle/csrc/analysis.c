@@ -3,7 +3,12 @@
  * The static functions of analysis.c (silk_resampler_down2_hp, downmix_and_resample,
  * tonality_analysis) are reached by compiling a private copy of the translation unit with its
  * exported functions renamed (avoids duplicate symbols with the library). The exported
- * functions are called from the library itself. */
+ * functions are called from the library itself.
+ *
+ * Built in both oracles (analysis.c is part of the float API that fixed-point builds keep):
+ * signal buffers and the resampler state are opus_val32 (float, or opus_int32 in fixed point),
+ * is_digital_silence takes opus_res (float, short, or int with ENABLE_RES24). */
+// oracle-build: any
 #include <stddef.h>
 #include "opus_types.h"
 #include "opus_custom.h"
@@ -83,23 +88,24 @@ void oracle_run_analysis(void *st, int pcm_type, const void *pcm, int analysis_f
                c2, C, Fs, lsb_depth, pick(pcm_type), (AnalysisInfo *)info_out);
 }
 
-void oracle_downmix(int pcm_type, const void *x, float *y, int subframe, int offset, int c1,
+void oracle_downmix(int pcm_type, const void *x, opus_val32 *y, int subframe, int offset, int c1,
                     int c2, int C) {
   pick(pcm_type)(x, y, subframe, offset, c1, c2, C);
 }
 
-int oracle_is_digital_silence(const float *pcm, int frame_size, int channels, int lsb_depth) {
+int oracle_is_digital_silence(const opus_res *pcm, int frame_size, int channels, int lsb_depth) {
   return is_digital_silence(pcm, frame_size, channels, lsb_depth);
 }
 
 /* ---- Static functions (private copy) ---- */
 
-float oracle_silk_resampler_down2_hp(float *S, float *out, const float *in, int inLen) {
+opus_val32 oracle_silk_resampler_down2_hp(opus_val32 *S, opus_val32 *out, const opus_val32 *in,
+                                          int inLen) {
   return silk_resampler_down2_hp(S, out, in, inLen);
 }
 
-float oracle_downmix_and_resample(int pcm_type, const void *x, float *y, float *S, int subframe,
-                                  int offset, int c1, int c2, int C, int Fs) {
+opus_val32 oracle_downmix_and_resample(int pcm_type, const void *x, opus_val32 *y, opus_val32 *S,
+                                       int subframe, int offset, int c1, int c2, int C, int Fs) {
   return downmix_and_resample(pick(pcm_type), x, y, S, subframe, offset, c1, c2, C, Fs);
 }
 
