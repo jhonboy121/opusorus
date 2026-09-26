@@ -37,6 +37,7 @@
 use alloc::vec::Vec;
 
 use crate::celt::arch::OpusRes;
+use crate::decoder::OPTIONAL_CLIP;
 use crate::mapping_matrix::{
     MappingMatrix, mapping_matrix_get_size, mapping_matrix_multiply_channel_out_float,
     mapping_matrix_multiply_channel_out_int24, mapping_matrix_multiply_channel_out_short,
@@ -266,7 +267,6 @@ impl ProjectionDecoder {
         decode_fec: i32,
     ) -> Result<i32> {
         let m = &self.demixing_matrix;
-        // FIXED_POINT: not ported (float build) — OPTIONAL_CLIP is 1.
         self.ms.opus_multistream_decode_native(
             data,
             pcm,
@@ -275,7 +275,7 @@ impl ProjectionDecoder {
             },
             frame_size,
             decode_fec,
-            true,
+            OPTIONAL_CLIP,
         )
     }
 
@@ -329,8 +329,8 @@ impl ProjectionDecoder {
         )
     }
 
-    /// Decodes a projection packet to interleaved 16-bit PCM (soft-clipped). Arguments and
-    /// errors as [`MsDecoder::decode`].
+    /// Decodes a projection packet to interleaved 16-bit PCM (soft-clipped in the float build).
+    /// Arguments and errors as [`MsDecoder::decode`].
     ///
     /// # Errors
     /// As [`MsDecoder::decode`].

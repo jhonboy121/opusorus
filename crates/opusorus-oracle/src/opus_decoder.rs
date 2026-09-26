@@ -7,7 +7,8 @@
 //! * [`ProjDec`]: a C `OpusProjectionDecoder` (incl. `opus_projection_decode24`, missing from
 //!   [`crate::api`]) with per-stream state access.
 //!
-//! Errors are raw negative libopus codes (`Err(code)`).
+//! Errors are raw negative libopus codes (`Err(code)`). The shim compiles in both oracles
+//! (`// oracle-build: any`); the public API has the same C types in every build.
 
 use crate::sys;
 use core::ffi::c_int;
@@ -48,7 +49,7 @@ pub struct DecState {
     /// complexity, ignore_extensions, stream_channels, bandwidth, mode, prev_mode, frame_size,
     /// prev_redundancy, last_packet_duration, rangeFinal, 0`.
     pub ints: [i32; 21],
-    /// `softclip_mem`.
+    /// `softclip_mem` (zeros in a fixed-point oracle, whose `OpusDecoder` has none).
     pub softclip_mem: [f32; 2],
 }
 

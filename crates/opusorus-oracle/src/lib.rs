@@ -44,7 +44,6 @@ pub mod dnn_integration;
 pub mod dnn_osce;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_plc;
-#[cfg(not(feature = "fixed-point"))]
 pub mod opus_decoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod opus_encoder;

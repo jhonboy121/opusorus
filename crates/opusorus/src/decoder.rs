@@ -1,9 +1,20 @@
-//! The Opus decoder: port of `src/opus_decoder.c` (float build).
+//! The Opus decoder: port of `src/opus_decoder.c`.
 //!
 //! [`Decoder`] is the C `OpusDecoder`: it owns a SILK decoder and a CELT decoder and decodes
 //! Opus packets of any mode (SILK-only, hybrid, CELT-only), including mode transitions with
-//! redundant CELT frames, in-band FEC (LBRR), packet-loss concealment, DTX, output gain and the
-//! float→int16 soft clipper.
+//! redundant CELT frames, in-band FEC (LBRR), packet-loss concealment, DTX, output gain and (in
+//! the float build) the float→int16 soft clipper.
+//!
+//! # Fixed-point builds
+//!
+//! With the `fixed-point` feature (C `FIXED_POINT`) the decoder works on `opus_res` = `i16`
+//! samples (`i32` Q8 samples with `fixed-res24`, C `ENABLE_RES24`), exactly like a fixed-point
+//! libopus: SILK and CELT are mixed and faded (`smooth_fade`) in `opus_res`, the output gain
+//! uses the fixed-point `celt_exp2`, and there is no soft clipper. [`Decoder::decode`]
+//! (16-bit build) or [`Decoder::decode24`] (24-bit build) decodes directly into the caller's
+//! buffer; the other formats go through an internal `opus_res` buffer and are converted with
+//! `RES2INT16` / `RES2INT24` / `RES2FLOAT`, so [`Decoder::decode_float`] returns the integer
+//! decoder output scaled to floats (never soft-clipped).
 //!
 //! # Example
 //!
@@ -74,15 +85,22 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::res2float;
+#[cfg(feature = "fixed-res24")]
+use crate::celt::arch::{COEF_ONE, add32, mult_coef, mult_coef_32, mult32_32_q16, res2int16};
+use crate::celt::arch::{CeltCoef, OpusRes, extract16, imin, mult16_16_p15, qconst16, saturate};
+#[cfg(not(feature = "fixed-res24"))]
 use crate::celt::arch::{
-    OpusRes, Q15ONE, coef2val16, imin, mac16_16, mult16_16, mult16_16_p15, mult16_16_q15,
-    mult16_32_p16, qconst16, res2int24, saturate, shr32,
+    Q15ONE, coef2val16, mac16_16, mult16_16, mult16_16_q15, mult16_32_p16, res2int24, shr32,
 };
 #[cfg(feature = "qext")]
 use crate::celt::celt::QEXT_EXTENSION_ID;
 use crate::celt::celt_decoder::CeltDecoder;
 use crate::celt::entdec::EcDec;
-use crate::celt::mathops::{celt_exp2, celt_float2int16};
+use crate::celt::mathops::celt_exp2;
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::mathops::celt_float2int16;
 use crate::celt::static_modes::CeltMode;
 #[cfg(feature = "dred")]
 use crate::dnn::dred_decoder::OpusDred;
@@ -99,9 +117,11 @@ use crate::dnn::osce::{
 };
 #[cfg(feature = "qext")]
 use crate::extensions::ExtensionIterator;
+#[cfg(not(feature = "fixed-point"))]
+use crate::packet::opus_pcm_soft_clip_impl;
 use crate::packet::{
-    MODE_CELT_ONLY, MODE_HYBRID, MODE_SILK_ONLY, get_nb_samples, opus_pcm_soft_clip_impl,
-    parse_impl, toc_bandwidth, toc_mode, toc_nb_channels, toc_samples_per_frame,
+    MODE_CELT_ONLY, MODE_HYBRID, MODE_SILK_ONLY, get_nb_samples, parse_impl, toc_bandwidth,
+    toc_mode, toc_nb_channels, toc_samples_per_frame,
 };
 use crate::silk::decoder::SilkDecoder;
 #[cfg(feature = "osce")]
@@ -193,10 +213,21 @@ pub(crate) fn max_over_rates(size: impl Fn(i32) -> usize) -> usize {
 /// uninitialized; every caller writes the samples it reads.
 pub(crate) fn res_buf(buf: &mut Vec<OpusRes>, n: usize) -> &mut [OpusRes] {
     if buf.len() < n {
-        buf.resize(n, 0.0);
+        buf.resize(n, RES_ZERO);
     }
     &mut buf[..n]
 }
+
+/// A zero `opus_res` sample.
+#[cfg(not(feature = "fixed-point"))]
+pub(crate) const RES_ZERO: OpusRes = 0.0;
+/// A zero `opus_res` sample.
+#[cfg(feature = "fixed-point")]
+pub(crate) const RES_ZERO: OpusRes = 0;
+
+/// C `OPTIONAL_CLIP` of `opus_decode` (and the multistream/projection int16 decoders): the
+/// float build soft-clips the int16 output, the fixed-point build has no soft clipper.
+pub(crate) const OPTIONAL_CLIP: bool = !cfg!(feature = "fixed-point");
 
 /// Where a `smooth_fade` input comes from: a separate buffer, or the output buffer itself (the
 /// C calls pass the same pointer as an input and as `out`; each output sample only depends on
@@ -207,15 +238,26 @@ enum FadeIn<'a> {
     Out,
 }
 
-/// Port of `src/opus_decoder.c:smooth_fade` (float build, not `ENABLE_RES24`): cross-fades from
-/// `in1` to `in2` over `overlap` samples using the squared CELT window.
+/// Reads a `smooth_fade` input sample.
+#[inline(always)]
+const fn fade_in(src: FadeIn<'_>, out: &[OpusRes], k: usize) -> OpusRes {
+    match src {
+        FadeIn::Buf(b) => b[k],
+        FadeIn::Out => out[k],
+    }
+}
+
+/// Port of `src/opus_decoder.c:smooth_fade` (float build and fixed-point without
+/// `ENABLE_RES24`): cross-fades from `in1` to `in2` over `overlap` samples using the squared
+/// CELT window.
+#[cfg(not(feature = "fixed-res24"))]
 fn smooth_fade(
     in1: FadeIn<'_>,
     in2: FadeIn<'_>,
     out: &mut [OpusRes],
     overlap: usize,
     channels: usize,
-    window: &[f32],
+    window: &[CeltCoef],
     fs: i32,
 ) {
     // Note: 48000/Fs is 0 at 96 kHz (QEXT), so C then uses window[0] throughout.
@@ -224,18 +266,53 @@ fn smooth_fade(
         for i in 0..overlap {
             let k = i * channels + c;
             let mut w = coef2val16(window[i * inc]);
-            w = mult16_16_q15(w, w);
-            let a = match in1 {
-                FadeIn::Buf(b) => b[k],
-                FadeIn::Out => out[k],
-            };
-            let b = match in2 {
-                FadeIn::Buf(b) => b[k],
-                FadeIn::Out => out[k],
-            };
-            out[k] = shr32(mac16_16(mult16_16(w, b), Q15ONE - w, a), 15);
+            w = extract16(mult16_16_q15(w, w));
+            let a = fade_in(in1, out, k);
+            let b = fade_in(in2, out, k);
+            out[k] = extract16(shr32(mac16_16(mult16_16(w, b), Q15ONE - w, a), 15));
         }
     }
+}
+
+/// Port of `src/opus_decoder.c:smooth_fade` (`ENABLE_RES24`): cross-fades from `in1` to `in2`
+/// over `overlap` samples using the squared CELT window.
+#[cfg(feature = "fixed-res24")]
+fn smooth_fade(
+    in1: FadeIn<'_>,
+    in2: FadeIn<'_>,
+    out: &mut [OpusRes],
+    overlap: usize,
+    channels: usize,
+    window: &[CeltCoef],
+    fs: i32,
+) {
+    // Note: 48000/Fs is 0 at 96 kHz (QEXT), so C then uses window[0] throughout.
+    let inc = (48000 / fs) as usize;
+    for c in 0..channels {
+        for i in 0..overlap {
+            let k = i * channels + c;
+            // C stores the product in a `celt_coef`.
+            let w = mult_coef(window[i * inc], window[i * inc]) as CeltCoef;
+            let a = fade_in(in1, out, k);
+            let b = fade_in(in2, out, k);
+            out[k] = add32(mult_coef_32(w, b), mult_coef_32(COEF_ONE - w, a));
+        }
+    }
+}
+
+/// Stores an `opus_val32` into an `opus_res` (C implicit conversion: identity in the float and
+/// the `ENABLE_RES24` builds, narrowing to `opus_int16` in the 16-bit fixed-point build).
+#[cfg(any(not(feature = "fixed-point"), feature = "fixed-res24"))]
+#[inline(always)]
+const fn res_from_val32(x: OpusRes) -> OpusRes {
+    x
+}
+/// Stores an `opus_val32` into an `opus_res` (C implicit conversion: identity in the float and
+/// the `ENABLE_RES24` builds, narrowing to `opus_int16` in the 16-bit fixed-point build).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+#[inline(always)]
+const fn res_from_val32(x: i32) -> OpusRes {
+    x as OpusRes
 }
 
 /// The C code discards the return value of these calls (concealment into scratch buffers and
@@ -301,6 +378,8 @@ pub struct Decoder {
     frame_size: i32,
     prev_redundancy: bool,
     last_packet_duration: i32,
+    /// Soft-clip memory (float build only, like C).
+    #[cfg(not(feature = "fixed-point"))]
     softclip_mem: [f32; 2],
     range_final: u32,
 
@@ -325,6 +404,8 @@ pub struct DecoderSnapshot {
     pub frame_size: i32,
     pub prev_redundancy: i32,
     pub last_packet_duration: i32,
+    /// Float build only (the fixed-point `OpusDecoder` has no soft-clip memory).
+    #[cfg(not(feature = "fixed-point"))]
     pub softclip_mem: [f32; 2],
     pub range_final: u32,
 }
@@ -380,6 +461,7 @@ impl Decoder {
             frame_size: fs / 400,
             prev_redundancy: false,
             last_packet_duration: 0,
+            #[cfg(not(feature = "fixed-point"))]
             softclip_mem: [0.0; 2],
             range_final: 0,
             out_buf: Vec::new(),
@@ -550,7 +632,7 @@ impl Decoder {
             if mode == 0 {
                 // If we haven't got any packet yet, all we can do is return zeros
                 let n = audiosize as usize * ch;
-                pcm[..n].fill(0.0);
+                pcm[..n].fill(RES_ZERO);
                 return Ok(audiosize);
             }
 
@@ -601,7 +683,7 @@ impl Decoder {
         // transition needs it.
         let mut pcm_transition: Option<[OpusRes; 2 * MAX_F5]> = None;
         if transition && mode == MODE_CELT_ONLY {
-            let buf = pcm_transition.insert([0.0; 2 * MAX_F5]);
+            let buf = pcm_transition.insert([RES_ZERO; 2 * MAX_F5]);
             c_ignores_result(self.opus_decode_frame(
                 None,
                 &mut buf[..],
@@ -686,7 +768,7 @@ impl Decoder {
             // `pcm_silk` (C: a stack VLA of F10*channels samples).
             let mut pcm_silk: Option<[OpusRes; 2 * MAX_F10]> = None;
             let pcm_ptr: &mut [OpusRes] = if pcm_too_small {
-                &mut pcm_silk.insert([0.0; 2 * MAX_F10])[..]
+                &mut pcm_silk.insert([RES_ZERO; 2 * MAX_F10])[..]
             } else {
                 &mut pcm[..]
             };
@@ -712,7 +794,7 @@ impl Decoder {
                         // PLC failure should not be fatal
                         silk_frame_size = frame_size;
                         let end = (off + frame_size as usize * ch).min(pcm_ptr.len());
-                        pcm_ptr[off..end].fill(0.0);
+                        pcm_ptr[off..end].fill(RES_ZERO);
                     } else {
                         return Err(Error::InternalError);
                     }
@@ -774,7 +856,7 @@ impl Decoder {
         }
 
         if transition && mode != MODE_CELT_ONLY {
-            let buf = pcm_transition.insert([0.0; 2 * MAX_F5]);
+            let buf = pcm_transition.insert([RES_ZERO; 2 * MAX_F5]);
             c_ignores_result(self.opus_decode_frame(
                 None,
                 &mut buf[..],
@@ -816,7 +898,7 @@ impl Decoder {
             // the final range is still needed (for testing), so the redundancy is
             // always decoded but the decoded audio may not be used
             must_succeed(self.celt_dec.set_start_band(0))?;
-            let ra = redundant_audio.insert([0.0; 2 * MAX_F5]);
+            let ra = redundant_audio.insert([RES_ZERO; 2 * MAX_F5]);
             if let Some(d) = data {
                 c_ignores_result(self.celt_dec.celt_decode_with_ec(
                     Some(&d[len as usize..]),
@@ -876,7 +958,7 @@ impl Decoder {
         } else {
             let silence: [u8; 2] = [0xFF, 0xFF];
             if !celt_accum {
-                pcm[..frame_size as usize * ch].fill(0.0);
+                pcm[..frame_size as usize * ch].fill(RES_ZERO);
             }
             // For hybrid -> SILK transitions, we let the CELT MDCT
             // do a fade-out by decoding a silence frame
@@ -897,14 +979,14 @@ impl Decoder {
         }
 
         let celt_mode: &'static CeltMode = self.celt_dec.mode();
-        let window: &[f32] = &celt_mode.window;
+        let window: &[CeltCoef] = &celt_mode.window;
 
         // 5 ms redundant frame for SILK->CELT
         if redundancy && !celt_to_silk {
             self.celt_dec.reset();
             must_succeed(self.celt_dec.set_start_band(0))?;
 
-            let ra = redundant_audio.insert([0.0; 2 * MAX_F5]);
+            let ra = redundant_audio.insert([RES_ZERO; 2 * MAX_F5]);
             if let Some(d) = data {
                 c_ignores_result(self.celt_dec.celt_decode_with_ec(
                     Some(&d[len as usize..]),
@@ -983,13 +1065,20 @@ impl Decoder {
         }
 
         if self.decode_gain != 0 {
-            let gain = celt_exp2(mult16_16_p15(
-                qconst16(6.48814081e-4f32, 25),
-                self.decode_gain as f32,
-            ));
+            // `QCONST16(6.48814081e-4f, 25)` and `st->decode_gain` as the build's values.
+            #[cfg(not(feature = "fixed-point"))]
+            let (q, decode_gain) = (qconst16(6.48814081e-4f32, 25), self.decode_gain as f32);
+            #[cfg(feature = "fixed-point")]
+            let (q, decode_gain) = (qconst16(6.48814081e-4f32 as f64, 25), self.decode_gain);
+            let gain = celt_exp2(extract16(mult16_16_p15(q, decode_gain)));
             for x in &mut pcm[..frame_size as usize * ch] {
+                #[cfg(feature = "fixed-res24")]
+                let v = mult32_32_q16(*x, gain);
+                #[cfg(not(feature = "fixed-res24"))]
                 let v = mult16_32_p16(*x, gain);
-                *x = saturate(v, 32767);
+                // Note: the `ENABLE_RES24` build also saturates to +-32767, i.e. to +-1/256 of
+                // full scale in its Q8 samples (libopus 1.6.1 behaviour, ported as is).
+                *x = res_from_val32(saturate(v, 32767));
             }
         }
 
@@ -1009,7 +1098,7 @@ impl Decoder {
     }
 
     /// Port of `src/opus_decoder.c:opus_decode_native`: decodes a packet (or conceals a lost
-    /// one) into `opus_res` (float) samples. This is the entry point used by the multistream
+    /// one) into `opus_res` samples. This is the entry point used by the multistream
     /// layer and the C ABI.
     ///
     /// * `data`: the packet; `None` or empty = lost packet (PLC).
@@ -1018,7 +1107,8 @@ impl Decoder {
     /// * `self_delimited`: parse the packet with self-delimiting framing (multistream);
     ///   `packet_offset` then receives the offset of the next packet (it is left untouched for
     ///   PLC, as in C).
-    /// * `soft_clip`: apply the soft clipper (`opus_decode` int16 path).
+    /// * `soft_clip`: apply the soft clipper (`opus_decode` int16 path of the float build;
+    ///   ignored in fixed-point builds, which have no soft clipper).
     ///
     /// The C `dred` / `dred_offset` arguments are `NULL` / 0 here; see
     /// [`Decoder::dred_decode_float`].
@@ -1226,12 +1316,15 @@ impl Decoder {
             nb_samples += ret;
         }
         self.last_packet_duration = nb_samples;
+        #[cfg(not(feature = "fixed-point"))]
         if soft_clip {
             opus_pcm_soft_clip_impl(pcm, nb_samples, self.channels, &mut self.softclip_mem);
         } else {
             self.softclip_mem = [0.0; 2];
         }
-        // FIXED_POINT: not ported (float build) — the fixed build has no soft clip.
+        // The fixed-point build has no soft clipper (every caller passes 0 there).
+        #[cfg(feature = "fixed-point")]
+        let _ = soft_clip;
         Ok(nb_samples)
     }
 
@@ -1292,6 +1385,27 @@ impl Decoder {
         ret
     }
 
+    /// The `opus_decode*` variant whose output type is `opus_res` itself (`opus_decode_float`
+    /// in the float build, `opus_decode` in the 16-bit and `opus_decode24` in the 24-bit
+    /// fixed-point build): C's `frame_size` check, then `opus_decode_native` directly into
+    /// `pcm` without soft clipping.
+    fn decode_direct(
+        &mut self,
+        data: Option<&[u8]>,
+        pcm: &mut [OpusRes],
+        frame_size: i32,
+        decode_fec: i32,
+    ) -> Result<i32> {
+        if frame_size <= 0 {
+            return Err(Error::BadArg);
+        }
+        // Rust-only guard: C would write past the caller's buffer.
+        if self.required_len(data, frame_size as usize, decode_fec != 0) > pcm.len() {
+            return Err(Error::BadArg);
+        }
+        self.opus_decode_native(data, pcm, frame_size, decode_fec, false, None, false)
+    }
+
     /// Port of `src/opus_decoder.c:opus_decode` with C argument types (`frame_size` and
     /// `decode_fec` as `int`), for the C ABI. See [`Decoder::decode`].
     ///
@@ -1305,10 +1419,28 @@ impl Decoder {
         frame_size: i32,
         decode_fec: i32,
     ) -> Result<i32> {
-        let pcm_len = pcm.len();
-        self.decode_via_out(data, pcm_len, frame_size, decode_fec, true, &mut |out| {
-            celt_float2int16(out, &mut pcm[..out.len()]);
-        })
+        // FIXED_POINT && !ENABLE_RES24: the output is `opus_res` itself.
+        #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+        return self.decode_direct(data, pcm, frame_size, decode_fec);
+        #[cfg(any(not(feature = "fixed-point"), feature = "fixed-res24"))]
+        {
+            let pcm_len = pcm.len();
+            self.decode_via_out(
+                data,
+                pcm_len,
+                frame_size,
+                decode_fec,
+                OPTIONAL_CLIP,
+                &mut |out| {
+                    #[cfg(not(feature = "fixed-point"))]
+                    celt_float2int16(out, &mut pcm[..out.len()]);
+                    #[cfg(feature = "fixed-point")]
+                    for (o, &x) in pcm.iter_mut().zip(out) {
+                        *o = res2int16(x);
+                    }
+                },
+            )
+        }
     }
 
     /// Port of `src/opus_decoder.c:opus_decode24` with C argument types. See
@@ -1324,15 +1456,21 @@ impl Decoder {
         frame_size: i32,
         decode_fec: i32,
     ) -> Result<i32> {
-        let pcm_len = pcm.len();
-        self.decode_via_out(data, pcm_len, frame_size, decode_fec, false, &mut |out| {
-            for (o, &x) in pcm.iter_mut().zip(out) {
-                *o = res2int24(x);
-            }
-        })
+        // FIXED_POINT && ENABLE_RES24: the output is `opus_res` itself.
+        #[cfg(feature = "fixed-res24")]
+        return self.decode_direct(data, pcm, frame_size, decode_fec);
+        #[cfg(not(feature = "fixed-res24"))]
+        {
+            let pcm_len = pcm.len();
+            self.decode_via_out(data, pcm_len, frame_size, decode_fec, false, &mut |out| {
+                for (o, &x) in pcm.iter_mut().zip(out) {
+                    *o = res2int24(x);
+                }
+            })
+        }
     }
 
-    /// Port of `src/opus_decoder.c:opus_decode_float` (float build) with C argument types. See
+    /// Port of `src/opus_decoder.c:opus_decode_float` with C argument types. See
     /// [`Decoder::decode_float`].
     ///
     /// # Errors
@@ -1345,17 +1483,23 @@ impl Decoder {
         frame_size: i32,
         decode_fec: i32,
     ) -> Result<i32> {
-        if frame_size <= 0 {
-            return Err(Error::BadArg);
+        // Float build: the output is `opus_res` itself.
+        #[cfg(not(feature = "fixed-point"))]
+        return self.decode_direct(data, pcm, frame_size, decode_fec);
+        #[cfg(feature = "fixed-point")]
+        {
+            let pcm_len = pcm.len();
+            self.decode_via_out(data, pcm_len, frame_size, decode_fec, false, &mut |out| {
+                for (o, &x) in pcm.iter_mut().zip(out) {
+                    *o = res2float(x);
+                }
+            })
         }
-        if self.required_len(data, frame_size as usize, decode_fec != 0) > pcm.len() {
-            return Err(Error::BadArg);
-        }
-        self.opus_decode_native(data, pcm, frame_size, decode_fec, false, None, false)
     }
 
-    /// Decodes an Opus packet to interleaved 16-bit PCM (port of `opus_decode`, which applies
-    /// the soft clipper before the conversion).
+    /// Decodes an Opus packet to interleaved 16-bit PCM (port of `opus_decode`, which in the
+    /// float build applies the soft clipper before the conversion; fixed-point builds do not
+    /// clip).
     ///
     /// * `data`: the packet, or `None` (or an empty slice) to signal a lost packet; the
     ///   decoder then runs packet-loss concealment for `frame_size` samples.
@@ -1404,7 +1548,8 @@ impl Decoder {
     }
 
     /// Decodes an Opus packet to interleaved float PCM in `[-1, 1]` nominal range (port of
-    /// `opus_decode_float`; no soft clipping, so samples may exceed ±1). Arguments and errors
+    /// `opus_decode_float`; no soft clipping, so samples may exceed ±1; in fixed-point builds
+    /// `RES2FLOAT` of the integer output). Arguments and errors
     /// as [`Decoder::decode`].
     ///
     /// # Errors
@@ -1445,7 +1590,10 @@ impl Decoder {
         self.frame_size = 0;
         self.prev_redundancy = false;
         self.last_packet_duration = 0;
-        self.softclip_mem = [0.0; 2];
+        #[cfg(not(feature = "fixed-point"))]
+        {
+            self.softclip_mem = [0.0; 2];
+        }
         self.range_final = 0;
 
         self.celt_dec.reset();
@@ -1983,6 +2131,7 @@ impl Decoder {
             frame_size: self.frame_size,
             prev_redundancy: self.prev_redundancy as i32,
             last_packet_duration: self.last_packet_duration,
+            #[cfg(not(feature = "fixed-point"))]
             softclip_mem: self.softclip_mem,
             range_final: self.range_final,
         }

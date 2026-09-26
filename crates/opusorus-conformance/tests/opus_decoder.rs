@@ -21,10 +21,13 @@
 //! the `.dec` references. With `--features qext`, 96 kHz decoding and the Opus HD vectors
 //! (`testdata/vectors/opushd`) are checked the same way with `qext_compare`. Vector tests print a
 //! note and pass if the vectors are absent.
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Shared by the float and the fixed-point builds (`fixed-point`, `fixed-res24`, with or without
+//! `qext` / `custom-modes`): the streams then come from the fixed-point C encoder of the matching
+//! oracle, every comparison is against the fixed-point C decoder (bit-exact `opus_res`-derived
+//! output in all three formats, state, final ranges), the soft clipper does not exist (the
+//! oracle dumps its memory as zeros), and the RFC 8251 vectors must still pass `opus_compare`
+//! and match the final ranges of the `.bit` files.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -135,11 +138,15 @@ const fn snapshot_ints(s: &rd::DecoderSnapshot) -> [i32; 21] {
 fn assert_state(r: &Decoder, c: &c::DecState, what: &str) {
     let s = r.snapshot();
     assert_eq!(snapshot_ints(&s), c.ints, "{what}: decoder state");
+    #[cfg(not(feature = "fixed-point"))]
     assert_eq!(
         s.softclip_mem.map(f32::to_bits),
         c.softclip_mem.map(f32::to_bits),
         "{what}: softclip_mem"
     );
+    // The fixed-point OpusDecoder has no soft-clip memory (the shim dumps zeros).
+    #[cfg(feature = "fixed-point")]
+    assert_eq!(c.softclip_mem, [0.0; 2], "{what}: softclip_mem");
 }
 
 /// Coverage counters (to make sure the scenarios reach the interesting paths).
@@ -274,7 +281,10 @@ impl Pair {
                 st.redundancy += usize::from(after.prev_redundancy != 0);
                 st.transitions +=
                     usize::from(before.prev_mode > 0 && after.prev_mode != before.prev_mode);
-                st.softclip += usize::from(after.softclip_mem != [0.0; 2]);
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    st.softclip += usize::from(after.softclip_mem != [0.0; 2]);
+                }
                 if fec == 1
                     && let Some(d) = data
                     && opusorus::packet::has_lbrr(d) == Ok(true)
@@ -635,7 +645,12 @@ fn run_matrix(seed: u64, n_streams: usize, dynamic: bool, tag: &str) -> Stats {
         }
     }
     eprintln!("{tag}: {total:?}");
-    assert!(total.errors > 0 && total.transitions > 0 && total.fec_lbrr > 0);
+    assert!(total.errors > 0 && total.fec_lbrr > 0);
+    // The fixed-point encoder runs its signal analysis (which drives the automatic mode
+    // switches of static configurations) only at complexity 10, so a static matrix may not
+    // switch modes at all there; `mode_transitions` and the dynamic matrix cover them.
+    assert!(dynamic || cfg!(feature = "fixed-point") || total.transitions > 0);
+    assert!(!dynamic || total.transitions > 0);
     total
 }
 
@@ -898,7 +913,12 @@ fn plc_start_gain_softclip() {
         }
     }
     eprintln!("softclip: {total:?}");
-    assert!(total.softclip > 50);
+    // Only the float build has a soft clipper.
+    if cfg!(feature = "fixed-point") {
+        assert_eq!(total.softclip, 0);
+    } else {
+        assert!(total.softclip > 50);
+    }
 }
 
 /// Corrupted, truncated and garbage packets; every return code must match C.
@@ -1898,6 +1918,9 @@ fn rfc8251_vectors() {
 #[cfg(feature = "qext")]
 mod qext {
     use super::*;
+    // `qext_compare` is not compiled in fixed-point builds of opusorus-tools yet (it needs the
+    // float `mini_kfft`); there the Opus HD vectors are only checked bit-exact against C.
+    #[cfg(not(feature = "fixed-point"))]
     use opusorus_tools::compare::{QextCompareOptions, SampleFormat, qext_compare, read_pcm};
 
     /// Regression test for a `celt/bands.rs` aliasing bug: a 96 kHz QEXT stream (all 14 QEXT
@@ -1989,6 +2012,7 @@ mod qext {
         }
     }
 
+    #[cfg(not(feature = "fixed-point"))]
     fn f32_of(x: &[i32]) -> Vec<f32> {
         // opus_demo -f32: int24 * (1/8388608), then the tools read f32 * 32768.
         x.iter()
@@ -1996,7 +2020,17 @@ mod qext {
             .collect()
     }
 
+    /// `qext_compare -s -r 96000 -f32 -thresholds 0.05 .1 .1 reference out` (fixed-point
+    /// builds: not available, see the imports).
+    #[cfg(feature = "fixed-point")]
+    fn check(_reference: &Path, _out: &[i32], what: &str, _must_pass: bool) {
+        eprintln!(
+            "NOTE: {what}: qext_compare not available in fixed-point builds; bit-exact vs C only"
+        );
+    }
+
     /// `qext_compare -s -r 96000 -f32 -thresholds 0.05 .1 .1 reference out`.
+    #[cfg(not(feature = "fixed-point"))]
     fn check(reference: &Path, out: &[i32], what: &str, must_pass: bool) {
         let x = read_pcm(&std::fs::read(reference).unwrap(), 2, SampleFormat::F32Le);
         let opts = QextCompareOptions {

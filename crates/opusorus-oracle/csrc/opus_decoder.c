@@ -4,7 +4,10 @@
    The public API is used directly from Rust (opusorus_oracle::sys). These shims only expose what
    the public API cannot: a dump of the private OpusDecoder struct (its definition is copied
    verbatim from src/opus_decoder.c, including the same #ifdefs, so the layout matches the
-   library build), and the per-stream decoder of a multistream/projection decoder. */
+   library build), and the per-stream decoder of a multistream/projection decoder.
+
+   Built in both oracles: the fixed-point OpusDecoder has no softclip_mem (dumped as zeros). */
+// oracle-build: any
 
 #include <stdarg.h>
 #include "celt.h"
@@ -76,7 +79,8 @@ int oracle_odec_has_qext(void)
    channels, Fs, DecControl.{nChannelsAPI, nChannelsInternal, API_sampleRate,
    internalSampleRate, payloadSize_ms, prevPitchLag, enable_deep_plc}, decode_gain, complexity,
    ignore_extensions, stream_channels, bandwidth, mode, prev_mode, frame_size, prev_redundancy,
-   last_packet_duration, rangeFinal (bits), 0; softclip_mem[0..2]. */
+   last_packet_duration, rangeFinal (bits), 0; softclip_mem[0..2] (zeros in the fixed-point
+   build, which has no soft clipper). */
 void oracle_odec_dump(const OpusDecoder *dec, opus_int32 *iout, float *fout)
 {
    const struct oracle_odec_OpusDecoder *st = (const struct oracle_odec_OpusDecoder *)dec;
@@ -102,8 +106,13 @@ void oracle_odec_dump(const OpusDecoder *dec, opus_int32 *iout, float *fout)
    iout[k++] = st->last_packet_duration;
    iout[k++] = (opus_int32)st->rangeFinal;
    iout[k++] = 0;
+#ifndef FIXED_POINT
    fout[0] = st->softclip_mem[0];
    fout[1] = st->softclip_mem[1];
+#else
+   fout[0] = 0;
+   fout[1] = 0;
+#endif
 }
 
 /* OPUS_MULTISTREAM_GET_DECODER_STATE through the multistream CTL (NULL on error). */

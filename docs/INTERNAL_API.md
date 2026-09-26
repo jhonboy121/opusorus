@@ -1353,7 +1353,7 @@ Design and deviations (all documented in the module docs):
   - SilkDecoder is boxed (about 9 KB).
 - **Multistream copy-out:** the C function-pointer callbacks are a generic `&mut dyn FnMut`. Projection passes closures that capture its MappingMatrix.
 - **Integer arguments:** `decode_fec` and `frame_size` stay C ints in the hidden C-typed API, so the C ABI can reproduce every BAD_ARG ordering. The public API uses bool/usize.
-- **FIXED_POINT:** skipped with markers. QEXT (96 kHz, per-frame extension lookup) is under `cfg(feature = "qext")`.
+- **FIXED_POINT:** ported by FX4 `fixed_opus_decoder` (see docs/FIXED_POINT.md): `smooth_fade` (16-bit and `ENABLE_RES24` forms), fixed decode gain, no soft clipper (`softclip_mem` / `DecoderSnapshot::softclip_mem` are float-only; the oracle dump reports zeros), `opus_decode` (16-bit) / `opus_decode24` (res24) decode directly into the caller's buffer, the other formats convert from `opus_res` (`RES2INT16`/`RES2INT24`/`RES2FLOAT`). `decoder::OPTIONAL_CLIP` / `RES_ZERO` are shared with the multistream and projection decoders. QEXT (96 kHz, per-frame extension lookup) is under `cfg(feature = "qext")`.
 - **Files changed:**
   - crates/opusorus/src/decoder.rs
   - crates/opusorus/src/ms_decoder.rs

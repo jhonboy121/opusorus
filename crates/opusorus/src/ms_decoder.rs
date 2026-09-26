@@ -40,8 +40,8 @@ use alloc::vec::Vec;
 
 use crate::celt::arch::{OpusRes, imin, res2float, res2int16, res2int24};
 use crate::decoder::{
-    Decoder, OPUS_GET_BANDWIDTH_REQUEST, OPUS_GET_COMPLEXITY_REQUEST, OPUS_GET_FINAL_RANGE_REQUEST,
-    OPUS_GET_GAIN_REQUEST, OPUS_GET_LAST_PACKET_DURATION_REQUEST,
+    Decoder, OPTIONAL_CLIP, OPUS_GET_BANDWIDTH_REQUEST, OPUS_GET_COMPLEXITY_REQUEST,
+    OPUS_GET_FINAL_RANGE_REQUEST, OPUS_GET_GAIN_REQUEST, OPUS_GET_LAST_PACKET_DURATION_REQUEST,
     OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST, OPUS_GET_SAMPLE_RATE_REQUEST, OPUS_RESET_STATE,
     OPUS_SET_COMPLEXITY_REQUEST, OPUS_SET_GAIN_REQUEST, OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST,
     max_over_rates, res_buf,
@@ -418,14 +418,13 @@ impl MsDecoder {
         frame_size: i32,
         decode_fec: i32,
     ) -> Result<i32> {
-        // FIXED_POINT: not ported (float build) — OPTIONAL_CLIP is 1.
         self.opus_multistream_decode_native(
             data,
             pcm,
             &mut opus_copy_channel_out_short,
             frame_size,
             decode_fec,
-            true,
+            OPTIONAL_CLIP,
         )
     }
 
@@ -473,8 +472,8 @@ impl MsDecoder {
         )
     }
 
-    /// Decodes a multistream packet to interleaved 16-bit PCM (soft-clipped, like
-    /// `opus_multistream_decode`).
+    /// Decodes a multistream packet to interleaved 16-bit PCM (soft-clipped in the float build,
+    /// like `opus_multistream_decode`; fixed-point builds do not clip).
     ///
     /// * `data`: the packet, or `None` for a lost packet (PLC of every stream).
     /// * `pcm`: `frame_size * channels` interleaved samples (`frame_size` limited to 120 ms).
