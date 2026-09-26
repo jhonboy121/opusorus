@@ -3,14 +3,14 @@
 _Last updated: 2026-09-26_
 
 ## Summary
-Phase 0 (foundation) complete. Layer A units are being ported in parallel.
+Foundation, layer A (leaf DSP) and layer B (CELT bands, SILK decoder, SILK encoder common, analysis) complete and bit-exact. Layer C (CELT decoder/encoder, SILK FLP encoder, DNN core) in progress.
 
 | Area | State |
 |---|---|
 | Foundation (range coder, mathops, SILK macros, constants) | ✅ bit-exact vs libopus 1.6.1 |
-| CELT | ⬜ |
-| SILK | ⬜ |
-| Opus layer | ⬜ |
+| CELT | 🟨 FFT/MDCT/modes/rate/cwrs/laplace/pitch/lpc/bands/vq/energy ✅; decoder/encoder in progress |
+| SILK | 🟨 tables/sigproc/NLSF/resampler/decoder/NSQ/VAD ✅; FLP encoder in progress |
+| Opus layer | 🟨 packet/extensions/repacketizer/mapping matrix/MLP/analysis ✅; decoder/encoder pending |
 | Optional: QEXT / custom modes / fixed-point / DNN | ⬜ |
 | Conformance vectors | ⬜ |
 | Fuzzing | ⬜ |
