@@ -282,6 +282,23 @@ impl DemoRand {
         Self(GlibcRand::default())
     }
 
+    /// C `srand(seed)`: reseeds the process-wide generator in fuzzing builds (which `opus_demo`
+    /// shares with the library, as C does), otherwise this demo's own generator.
+    #[cfg_attr(
+        not(feature = "osce-training-data"),
+        allow(
+            dead_code,
+            reason = "only `-silk_random_switching` (osce-training-data) reseeds"
+        )
+    )]
+    fn reseed(&mut self, seed: u32) {
+        if glibc_rand::FUZZING {
+            glibc_rand::srand(seed);
+        } else {
+            self.0 = GlibcRand::new(seed);
+        }
+    }
+
     fn next_value(&mut self) -> i32 {
         if glibc_rand::FUZZING {
             glibc_rand::rand()
@@ -301,7 +318,7 @@ type SimLoss = Option<core::convert::Infallible>;
 /// `else if (lossgen_perc >= 0) lost = sample_loss(&lossgen, lossgen_perc*.01f);`: `None` when
 /// the branch is not taken.
 #[cfg(feature = "lossgen")]
-fn sim_loss_draw(sim: &mut SimLoss, rng: &mut GlibcRand) -> Option<i32> {
+fn sim_loss_draw(sim: &mut SimLoss, rng: &mut DemoRand) -> Option<i32> {
     match sim {
         Some((perc, st)) if *perc >= 0.0 => {
             Some(sample_loss(st, *perc * 0.01f32, &mut || rng.next_value()))
@@ -312,7 +329,7 @@ fn sim_loss_draw(sim: &mut SimLoss, rng: &mut GlibcRand) -> Option<i32> {
 
 /// Without `lossgen` the branch does not exist.
 #[cfg(not(feature = "lossgen"))]
-const fn sim_loss_draw(_sim: &mut SimLoss, _rng: &mut GlibcRand) -> Option<i32> {
+const fn sim_loss_draw(_sim: &mut SimLoss, _rng: &mut DemoRand) -> Option<i32> {
     None
 }
 
@@ -346,7 +363,7 @@ mod training {
 /// `randint(min, max, step)` (`ENABLE_OSCE_TRAINING_DATA`): `rand()` scaled to `[min, max]` in
 /// steps of `step`, with C's double arithmetic.
 #[cfg(feature = "osce-training-data")]
-fn randint(rng: &mut GlibcRand, min: i32, max: i32, step: i32) -> i32 {
+fn randint(rng: &mut DemoRand, min: i32, max: i32, step: i32) -> i32 {
     // RAND_MAX + 1. (glibc RAND_MAX = 2^31 - 1)
     let r = f64::from(rng.next_value()) / (2_147_483_647.0 + 1.0);
     // (int) ((max + 1 - min) * r / step) * step + min
@@ -358,7 +375,7 @@ fn randint(rng: &mut GlibcRand, min: i32, max: i32, step: i32) -> i32 {
 #[cfg(feature = "osce-training-data")]
 fn new_random_setting(
     enc: &mut Encoder,
-    rng: &mut GlibcRand,
+    rng: &mut DemoRand,
     stdout: &mut dyn Write,
 ) -> io::Result<()> {
     use training::*;
@@ -1183,12 +1200,11 @@ fn run(
     #[cfg(not(feature = "deep-plc"))]
     let _ = weights;
 
-    let mut rng = GlibcRand::default();
+    let mut rng = DemoRand::new();
     #[cfg(feature = "osce-training-data")]
     if reseed_rand {
-        rng = GlibcRand::new(0);
+        rng.reseed(0);
     }
-    let mut rng = DemoRand::new();
     let mut stop = false;
     let mut count = 0i32;
     let mut count_act = 0i32;

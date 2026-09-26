@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use opusorus::lossgen::{LossGenState, sample_loss};
 
 use crate::compare::{EXIT_SUCCESS, argv0, c_atof, c_atol};
-use crate::demo::GlibcRand;
+use opusorus::glibc_rand::GlibcRand;
 
 /// `main` of `lossgen_demo.c`: returns the exit status (0, or 1 on a usage error).
 ///
