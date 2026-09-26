@@ -1,0 +1,62 @@
+[package]
+name = "opusorus-capi"
+description = "Drop-in libopus C ABI (opus.h, opus_multistream.h, opus_projection.h, opus_custom.h) backed by opusorus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+# `libopusorus.so` / `libopusorus.a` (+ `.dylib`, `.dll`/`.lib` on other platforms). There is
+# deliberately no `rlib`: its uplifted `libopusorus.rlib` would collide with the `opusorus`
+# crate's own output in a workspace build.
+name = "opusorus"
+crate-type = ["cdylib", "staticlib"]
+
+[features]
+default = []
+# Opus HD (libopus `--enable-qext`): 96 kHz, `OPUS_SET_QEXT`.
+qext = ["opus/qext"]
+# The `opus_custom.h` API (libopus `--enable-custom-modes`). Needs the CELT layer, which the
+# `opusorus` crate only exposes with `internals`.
+custom-modes = ["opus/custom-modes", "opus/internals"]
+# DNN features: forwarded to `opusorus`. `OPUS_SET_DNN_BLOB` is wired where the Rust API has it;
+# the `opus_dred_*` API still returns `OPUS_UNIMPLEMENTED` (see `src/dred.rs`).
+deep-plc = ["opus/deep-plc"]
+dred = ["opus/dred"]
+osce = ["opus/osce"]
+# Also exports the libopus-internal helpers that upstream's `test_opus_extensions.c` links
+# against (`opus_packet_parse_impl`, `opus_repacketizer_out_range_impl`,
+# `opus_packet_extensions_*`). Not part of the libopus ABI; used by `tests/c_suite.rs`.
+internal-api = []
+
+[dependencies]
+# Renamed: this crate's own library is called `opusorus`.
+opus = { package = "opusorus", path = "../opusorus", features = ["std"] }
+
+[build-dependencies]
+cc = "1"
+
+# Own lint table: the workspace table forbids `unsafe_code`, which a C ABI cannot avoid.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_const_for_fn = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+allow_attributes_without_reason = "warn"
+unwrap_or_default = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"

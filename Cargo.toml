@@ -44,6 +44,11 @@ codegen-units = 1
 panic = "abort"
 debug = 1
 
+# Size-optimised release build (shared-library size comparison, `scripts/size_report.sh`).
+[profile.release-small]
+inherits = "release"
+opt-level = "s"
+
 [profile.bench]
 lto = "fat"
 codegen-units = 1
