@@ -12,8 +12,12 @@
 //! effects:
 //! * the decoder's `lowband_scratch` points into the tail of `X_` (from band
 //!   `effEBands-1`); the port uses that tail as scratch whenever the current band lies before
-//!   it, like C (when the band itself lies in the tail C aliases scratch and band; the decoder
-//!   never reads the band before writing it, so a separate buffer gives identical results);
+//!   it, like C. When the band itself is that tail (band `effEBands-1` when it is not the last
+//!   band, e.g. the QEXT bands of a 96 kHz stream decoded at 48 kHz, where the QEXT mode has
+//!   `effEBands = 2 < qext_end`), C aliases scratch and band: quant_band copies the lowband
+//!   over `X` and transforms that one buffer (`quant_band`'s `x_alias` reproduces it), and in
+//!   dual stereo quant_band(`Y`) copies its lowband over the `X` band decoded just before (the
+//!   write-back after the `Y` call);
 //! * the hybrid folding band (`start+1`) may read a `lowband` that overlaps the `lowband_out`
 //!   it writes; all `lowband` accesses happen before the `lowband_out` writes, so the port uses
 //!   copies and writes them back in that order;
@@ -1421,6 +1425,7 @@ fn quant_band(
     lowband_out: Option<&mut [CeltNorm]>,
     gain: OpusVal32,
     lowband_scratch: Option<&mut [CeltNorm]>,
+    x_alias: bool,
     mut fill: i32,
     #[cfg(feature = "qext")] ext_b: i32,
 ) -> u32 {
@@ -1449,10 +1454,19 @@ fn quant_band(
     // Band recombining to increase frequency resolution
 
     let mut lowband = lowband;
+    // C: `lowband_scratch` may be `X` itself (`x_alias`, see quant_all_bands): the lowband is
+    // then copied over `X` and every in-place transform below hits the same memory twice
+    // (`X` when encoding, then `lowband`). `alias` tracks that `X` and `lowband` are one buffer
+    // (`lowband` is kept equal to `x`).
+    let mut alias = false;
     if let (Some(scratch), Some(lb)) = (lowband_scratch, lowband.as_deref())
         && (recombine != 0 || ((n_b & 1) == 0 && tf_change < 0) || blk0 > 1)
     {
         scratch[..nu].copy_from_slice(&lb[..nu]);
+        if x_alias {
+            x.copy_from_slice(&scratch[..nu]);
+            alias = true;
+        }
         lowband = Some(&mut scratch[..nu]);
     }
 
@@ -1461,7 +1475,12 @@ fn quant_band(
             haar1(x, n >> k, 1 << k);
         }
         if let Some(lb) = lowband.as_deref_mut() {
-            haar1(lb, n >> k, 1 << k);
+            if alias {
+                haar1(x, n >> k, 1 << k);
+                lb.copy_from_slice(x);
+            } else {
+                haar1(lb, n >> k, 1 << k);
+            }
         }
         fill = i32::from(BIT_INTERLEAVE_TABLE[(fill & 0xF) as usize])
             | i32::from(BIT_INTERLEAVE_TABLE[(fill >> 4) as usize]) << 2;
@@ -1475,7 +1494,12 @@ fn quant_band(
             haar1(x, n_b, blk);
         }
         if let Some(lb) = lowband.as_deref_mut() {
-            haar1(lb, n_b, blk);
+            if alias {
+                haar1(x, n_b, blk);
+                lb.copy_from_slice(x);
+            } else {
+                haar1(lb, n_b, blk);
+            }
         }
         fill |= fill << blk;
         blk <<= 1;
@@ -1492,7 +1516,12 @@ fn quant_band(
             deinterleave_hadamard(x, n_b >> recombine, blk0 << recombine, long_blocks);
         }
         if let Some(lb) = lowband.as_deref_mut() {
-            deinterleave_hadamard(lb, n_b >> recombine, blk0 << recombine, long_blocks);
+            if alias {
+                deinterleave_hadamard(x, n_b >> recombine, blk0 << recombine, long_blocks);
+                lb.copy_from_slice(x);
+            } else {
+                deinterleave_hadamard(lb, n_b >> recombine, blk0 << recombine, long_blocks);
+            }
         }
     }
 
@@ -1560,6 +1589,7 @@ fn quant_band_stereo(
     lm: i32,
     lowband_out: Option<&mut [CeltNorm]>,
     lowband_scratch: Option<&mut [CeltNorm]>,
+    x_alias: bool,
     mut fill: i32,
     #[cfg(feature = "qext")] mut ext_b: i32,
     #[cfg(feature = "qext")] cap: Option<&[i32]>,
@@ -1668,6 +1698,10 @@ fn quant_band_stereo(
             lowband_out,
             Q31ONE,
             lowband_scratch,
+            // The scratch is `X`; it only aliases the band quantised here when that is `X`
+            // (with `c`, C copies the lowband over `y2`, which N=2 then overwrites in the
+            // decoder; the encoder case is not reproduced, see quant_all_bands).
+            x_alias && !c,
             orig_fill,
             #[cfg(feature = "qext")]
             ext_b,
@@ -1717,6 +1751,7 @@ fn quant_band_stereo(
                 lowband_out,
                 Q31ONE,
                 lowband_scratch,
+                x_alias,
                 fill,
                 #[cfg(feature = "qext")]
                 (ext_b / 2 + qext_extra),
@@ -1744,6 +1779,7 @@ fn quant_band_stereo(
                 None,
                 side,
                 None,
+                false,
                 fill >> blk,
                 #[cfg(feature = "qext")]
                 (ext_b / 2 - qext_extra),
@@ -1770,6 +1806,7 @@ fn quant_band_stereo(
                 None,
                 side,
                 None,
+                false,
                 fill >> blk,
                 #[cfg(feature = "qext")]
                 (ext_b / 2 + qext_extra),
@@ -1797,6 +1834,7 @@ fn quant_band_stereo(
                 lowband_out,
                 Q31ONE,
                 lowband_scratch,
+                x_alias,
                 fill,
                 #[cfg(feature = "qext")]
                 (ext_b / 2 - qext_extra),
@@ -2208,6 +2246,10 @@ pub fn quant_all_bands(
         // The band buffers (C `X`, `Y`) and the lowband scratch.
         let lb = (effective_lowband != -1).then_some(effective_lowband as usize);
         let lb_out = (!last).then_some((mm * eb(i) - norm_offset) as usize);
+        // C's `lowband_scratch` is this band's own `X` (band `effEBands-1` when it is not the
+        // last one; e.g. the QEXT bands of a 48 kHz mode): see quant_band and the dual-stereo
+        // write-back below.
+        let mut alias = false;
         let (xb, mut yb, mut lsel): (
             &mut [CeltNorm],
             Option<&mut [CeltNorm]>,
@@ -2226,6 +2268,7 @@ pub fn quant_all_bands(
             lsel = None;
         } else {
             let tail: Option<&mut [CeltNorm]>;
+            alias = scratch_sel == ScratchSel::XTail && x_off + nu > tail_off;
             if x_off + nu <= tail_off {
                 xb = &mut x_lo[x_off..x_off + nu];
                 tail = Some(&mut *x_hi);
@@ -2265,6 +2308,7 @@ pub fn quant_all_bands(
                         lowband_out,
                         Q31ONE,
                         lsel.as_deref_mut(),
+                        alias,
                         x_cm as i32,
                         #[cfg(feature = "qext")]
                         (ext_b / 2),
@@ -2273,6 +2317,14 @@ pub fn quant_all_bands(
             );
             // Dual stereo needs a second channel (C would dereference a NULL `Y`).
             debug_assert!(stereo);
+            // C: when `lowband_scratch` is `X` (`alias`), quant_band(Y) copies Y's lowband
+            // there (then transforms it in place), overwriting the band just decoded into `X`.
+            let y_copies_lowband = alias
+                && lb.is_some()
+                && n != 1
+                && (tf_change > 0
+                    || ((celt_udiv(n as u32, blk as u32) & 1) == 0 && tf_change < 0)
+                    || blk > 1);
             if let Some(ybd) = yb.as_deref_mut() {
                 y_cm = with_lowband(
                     norm2,
@@ -2293,12 +2345,16 @@ pub fn quant_all_bands(
                             lowband_out,
                             Q31ONE,
                             lsel.as_deref_mut(),
+                            false,
                             y_cm as i32,
                             #[cfg(feature = "qext")]
                             (ext_b / 2),
                         )
                     },
                 );
+            }
+            if y_copies_lowband && let Some(s) = lsel.as_deref() {
+                xb.copy_from_slice(&s[..nu]);
             }
         } else {
             if let Some(yb) = yb {
@@ -2333,6 +2389,7 @@ pub fn quant_all_bands(
                                 lm,
                                 lowband_out,
                                 lsel.as_deref_mut(),
+                                false,
                                 cm as i32,
                                 #[cfg(feature = "qext")]
                                 ext_b,
@@ -2389,6 +2446,7 @@ pub fn quant_all_bands(
                                 lm,
                                 lowband_out,
                                 lsel.as_deref_mut(),
+                                false,
                                 cm as i32,
                                 #[cfg(feature = "qext")]
                                 ext_b,
@@ -2435,6 +2493,7 @@ pub fn quant_all_bands(
                                 lm,
                                 lowband_out,
                                 lsel.as_deref_mut(),
+                                alias,
                                 (x_cm | y_cm) as i32,
                                 #[cfg(feature = "qext")]
                                 ext_b,
@@ -2464,6 +2523,7 @@ pub fn quant_all_bands(
                             lowband_out,
                             Q31ONE,
                             lsel,
+                            alias,
                             (x_cm | y_cm) as i32,
                             #[cfg(feature = "qext")]
                             ext_b,
