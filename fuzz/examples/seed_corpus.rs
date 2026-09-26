@@ -629,6 +629,125 @@ fn ms_encoder_seeds(out: &mut Out) {
     }
 }
 
+/// Seeds for `differential_dnn_decode`: real streams decoded with deep PLC / OSCE active
+/// (complexity 5-10, BWE on or off) and frequent losses, including bursts.
+#[cfg(feature = "deep-plc")]
+fn dnn_seeds(out: &mut Out, streams: &[(Cfg, Vec<Vec<u8>>)]) {
+    let mut rng = Rng::new(0xD1FF);
+    let fmts = [Fmt::I16, Fmt::I24, Fmt::F32];
+    for (idx, (cfg, packets)) in streams.iter().enumerate() {
+        // Every other stream is decoded at 48 kHz (OSCE BWE works on 16 kHz SILK at 48 kHz).
+        let fs = if idx % 2 == 0 { 48000 } else { cfg.fs };
+        let mut w = Writer::new();
+        // Complexity selector (5, 6, 7, 10, 8, 9, 4, 0) and BWE bit.
+        let dnn = (idx % 6) as u8 | if idx % 3 == 0 { 8 } else { 0 };
+        w.u8(fs_sel(fs)).u8((cfg.ch - 1) as u8).u8(dnn);
+        let mut i = 0;
+        while i < packets.len() {
+            let p = &packets[i];
+            let fmt = fmts[rng.below(3) as usize];
+            let dur = match packet::get_nb_samples(p, fs) {
+                Ok(d) => d.max(fs / 400),
+                Err(_) => fs / 50,
+            };
+            let k = (dur / (fs / 400)).clamp(1, 64) as u8;
+            match rng.below(10) {
+                0..=2 => {
+                    // A burst of 1-4 losses, then the packet.
+                    for _ in 0..=rng.below(4) {
+                        dec::write_lost(&mut w, fmt, fsel_2_5ms(k));
+                    }
+                    dec::write_decode(&mut w, p, fmt, false, FSEL_PACKET);
+                }
+                3 if i + 1 < packets.len() => {
+                    dec::write_decode(&mut w, &packets[i + 1], fmt, true, fsel_2_5ms(k));
+                    i += 1;
+                    dec::write_decode(&mut w, &packets[i], fmt, false, FSEL_PACKET);
+                }
+                _ => dec::write_decode(&mut w, p, fmt, false, FSEL_PACKET),
+            }
+            i += 1;
+        }
+        out.put("differential_dnn_decode", &w.0);
+    }
+}
+
+/// Seeds for `differential_custom`: static and custom modes, mono / stereo, every PCM format,
+/// CBR / VBR, packets decoded (some dropped: PLC), band limits and decoder CTLs.
+#[cfg(feature = "custom-modes")]
+fn custom_seeds(out: &mut Out) {
+    use opusorus::celt::celt::CELT_SET_SIGNALLING_REQUEST;
+    use opusorus_fuzz::custom::{self, DEC_SETS, ENC_SETS, FRAME, FS, index_of, set_index};
+    let mut rng = Rng::new(0xC057);
+    let mut modes = vec![
+        (48000, 960),
+        (48000, 480),
+        (48000, 240),
+        (48000, 120),
+        (44100, 882),
+        (44100, 1024),
+        (32000, 640),
+        (48000, 256),
+        (24000, 400),
+        (16000, 320),
+        (48000, 720),
+        (8000, 160),
+        (22050, 512),
+    ];
+    if cfg!(feature = "qext") {
+        modes.extend([(96000, 1920), (48000, 2048), (96000, 1440)]);
+    }
+    for (mi, &(fs, frame)) in modes.iter().enumerate() {
+        for ch in 0..4u8 {
+            let mut w = Writer::new();
+            w.u8(index_of(&FS, fs)).u8(index_of(&FRAME, frame)).u8(ch);
+            let enc_ctl = |w: &mut Writer, req: i32, v: i32| {
+                w.u8(custom::tag::ENC_CTL)
+                    .u8(set_index(&ENC_SETS, req))
+                    .u8(0x80)
+                    .i32(v);
+            };
+            enc_ctl(
+                &mut w,
+                OPUS_SET_BITRATE_REQUEST,
+                [32000, 64000, 128000][mi % 3] * (1 + i32::from(ch & 1)),
+            );
+            enc_ctl(&mut w, OPUS_SET_VBR_REQUEST, i32::from(mi % 2 == 0));
+            enc_ctl(&mut w, OPUS_SET_COMPLEXITY_REQUEST, (mi % 11) as i32);
+            if mi % 4 == 3 {
+                enc_ctl(&mut w, CELT_SET_SIGNALLING_REQUEST, 0);
+                w.u8(custom::tag::DEC_CTL)
+                    .u8(set_index(&DEC_SETS, CELT_SET_SIGNALLING_REQUEST))
+                    .u8(0x80)
+                    .i32(0);
+            }
+            if cfg!(feature = "qext") && mi % 4 == 1 {
+                enc_ctl(&mut w, OPUS_SET_QEXT_REQUEST, 1);
+            }
+            if mi % 5 == 2 {
+                // Hybrid-like band range on both sides.
+                w.u8(custom::tag::BANDS).u8(0).u8(2).u8(0);
+                w.u8(custom::tag::BANDS).u8(1).u8(2).u8(0);
+            }
+            for k in 0..8u8 {
+                let fin = rng.below(3) as u8;
+                let fout = rng.below(3) as u8;
+                let drop = u8::from(rng.below(6) == 0);
+                let fsel = if k % 4 == 3 { 1 } else { 0 };
+                w.u8(custom::tag::ENCODE)
+                    .u8(fin | (fout << 2) | (drop << 4))
+                    .u8(fsel)
+                    .u16(1 + [120, 200, 400, 1275][usize::from(k % 4)])
+                    .u8([3, 4, 1, 2, 6][usize::from(k % 5)])
+                    .u8(160)
+                    .u16(300 + 50 * u16::from(k));
+            }
+            w.u8(custom::tag::PLC).u8(0).u8(0);
+            out.put("differential_custom", &w.0);
+        }
+    }
+}
+
 fn main() {
     let root = std::env::args().nth(1).map_or_else(
         || Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus"),
@@ -651,6 +770,10 @@ fn main() {
     multistream_seeds(&mut out);
     projection_seeds(&mut out);
     ms_encoder_seeds(&mut out);
+    #[cfg(feature = "deep-plc")]
+    dnn_seeds(&mut out, &streams);
+    #[cfg(feature = "custom-modes")]
+    custom_seeds(&mut out);
     for (t, n) in &out.counts {
         println!("{t}: {n} seeds");
     }

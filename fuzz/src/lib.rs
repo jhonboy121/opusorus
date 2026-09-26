@@ -11,6 +11,8 @@
 //!   differential driver.
 //! * [`enc`]: the encoder operation stream (configuration, CTL changes, synthesized PCM) shared
 //!   by `encode`, `differential_encode` and `roundtrip_invariants`.
+//! * [`custom`] (`custom-modes`): the tables of `differential_custom`.
+//! * [`dnn`] (`deep-plc`): the DNN decoder adapters of `differential_dnn_decode`.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,7 +27,11 @@
     reason = "byte-level input decoding deliberately truncates and reinterprets"
 )]
 
+#[cfg(feature = "custom-modes")]
+pub mod custom;
 pub mod dec;
+#[cfg(feature = "deep-plc")]
+pub mod dnn;
 pub mod enc;
 
 use opusorus::Error;

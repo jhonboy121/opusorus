@@ -19,7 +19,8 @@
 //! * `AnalysisInfo` is [`crate::analysis::AnalysisInfo`] (what the Opus encoder produces).
 //! * `RESYNTH` (debug-only re-synthesis, never enabled in libopus builds) is not ported.
 //! * The QEXT mode (`compute_qext_mode(mode)`, a pure function of the mode) is computed once at
-//!   init instead of every frame.
+//!   init instead of every frame; its debug assertion (C `celt_assert(0)` for an unsupported
+//!   custom mode) stays where C calls it, when a frame carries QEXT data.
 //! * `FUZZING` branches are not ported.
 //! * There are no DNN (deep PLC / DRED / OSCE) hooks in this file.
 //!
@@ -78,7 +79,9 @@ use crate::celt::mathops::{celt_maxabs_res, celt_rcp};
 use crate::celt::mdct::clt_mdct_forward;
 use crate::celt::modes::opus_custom_mode_create;
 #[cfg(feature = "qext")]
-use crate::celt::modes::{NB_QEXT_BANDS, QEXT_PACKET_SIZE_CAP, compute_qext_mode};
+use crate::celt::modes::{
+    NB_QEXT_BANDS, QEXT_PACKET_SIZE_CAP, compute_qext_mode_unchecked, qext_mode_supported,
+};
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::{celt_inner_prod, pitch_downsample, pitch_search, remove_doubling};
 #[cfg(not(feature = "fixed-point"))]
@@ -370,7 +373,9 @@ impl CeltEncoder {
         let qext_mode = if (mode.fs == 48000 || mode.fs == 96000)
             && (mode.short_mdct_size == 120 * qext_scale || mode.short_mdct_size == 90 * qext_scale)
         {
-            Some(compute_qext_mode(&mode))
+            // Unchecked: C only calls (and asserts in) `compute_qext_mode` when a frame
+            // actually carries QEXT data; the assertion is at that point below.
+            Some(compute_qext_mode_unchecked(&mode))
         } else {
             None
         };
@@ -3552,6 +3557,11 @@ impl CeltEncoder {
                     && (mode.short_mdct_size == 120 * qext_scale
                         || mode.short_mdct_size == 90 * qext_scale)
                 {
+                    // C: `compute_qext_mode(&qext_mode_struct, mode)` (precomputed at init).
+                    debug_assert!(
+                        qext_mode_supported(mode),
+                        "compute_qext_mode: unsupported mode"
+                    );
                     qext_active_mode = true;
                     qext_end = if qext_scale == 2 { NB_QEXT_BANDS } else { 2 };
                 }

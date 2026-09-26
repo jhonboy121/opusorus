@@ -92,13 +92,35 @@ static QEXT_EBANDS_240: [i16; 15] = [
 #[cfg(feature = "qext")]
 static QEXT_LOGN_240: [i16; 14] = [27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27];
 
+/// Whether [`compute_qext_mode`] supports `m` (C `celt_assert(0)`s otherwise): a short MDCT of
+/// 2.5 ms (`qext_eBands_240`) or 1.875 ms (`qext_eBands_180`).
+#[cfg(feature = "qext")]
+#[must_use]
+pub const fn qext_mode_supported(m: &CeltMode) -> bool {
+    m.short_mdct_size * 48000 == 120 * m.fs || m.short_mdct_size * 48000 == 90 * m.fs
+}
+
 /// Port of celt/modes.c:compute_qext_mode.
 ///
 /// Returns a copy of `m` describing the QEXT extra bands (above 20 kHz), with `cache` set to
-/// `m.qext_cache`. Cheap for static modes (all tables are borrowed).
+/// `m.qext_cache`. Cheap for static modes (all tables are borrowed). Like C (whose
+/// `celt_assert(0)` is compiled out), an unsupported mode (see [`qext_mode_supported`]) keeps
+/// the bands of `m`; debug builds assert here.
 #[cfg(feature = "qext")]
 #[must_use]
 pub fn compute_qext_mode(m: &CeltMode) -> CeltMode {
+    debug_assert!(
+        qext_mode_supported(m),
+        "compute_qext_mode: unsupported mode"
+    );
+    compute_qext_mode_unchecked(m)
+}
+
+/// [`compute_qext_mode`] without its debug assertion, for callers that compute the QEXT mode
+/// ahead of time (the CELT encoder, at init) and assert where C calls `compute_qext_mode`.
+#[cfg(feature = "qext")]
+#[must_use]
+pub fn compute_qext_mode_unchecked(m: &CeltMode) -> CeltMode {
     use alloc::borrow::Cow;
 
     let mut qext = m.clone();
@@ -108,8 +130,6 @@ pub fn compute_qext_mode(m: &CeltMode) -> CeltMode {
     } else if m.short_mdct_size * 48000 == 90 * m.fs {
         qext.e_bands = Cow::Borrowed(&QEXT_EBANDS_180);
         qext.log_n = Cow::Borrowed(&QEXT_LOGN_180);
-    } else {
-        debug_assert!(false, "compute_qext_mode: unsupported mode");
     }
     qext.nb_ebands = NB_QEXT_BANDS;
     qext.eff_ebands = NB_QEXT_BANDS;

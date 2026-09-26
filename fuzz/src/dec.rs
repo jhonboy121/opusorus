@@ -19,9 +19,10 @@ use crate::{Reader, Writer, assert_f32_bits_eq, assert_slice_eq, code};
 use opusorus::decoder::{
     OPUS_GET_BANDWIDTH_REQUEST, OPUS_GET_COMPLEXITY_REQUEST, OPUS_GET_FINAL_RANGE_REQUEST,
     OPUS_GET_GAIN_REQUEST, OPUS_GET_IGNORE_EXTENSIONS_REQUEST,
-    OPUS_GET_LAST_PACKET_DURATION_REQUEST, OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST,
-    OPUS_GET_PITCH_REQUEST, OPUS_GET_SAMPLE_RATE_REQUEST, OPUS_RESET_STATE,
-    OPUS_SET_COMPLEXITY_REQUEST, OPUS_SET_GAIN_REQUEST, OPUS_SET_IGNORE_EXTENSIONS_REQUEST,
+    OPUS_GET_LAST_PACKET_DURATION_REQUEST, OPUS_GET_OSCE_BWE_REQUEST,
+    OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST, OPUS_GET_PITCH_REQUEST,
+    OPUS_GET_SAMPLE_RATE_REQUEST, OPUS_RESET_STATE, OPUS_SET_COMPLEXITY_REQUEST,
+    OPUS_SET_GAIN_REQUEST, OPUS_SET_IGNORE_EXTENSIONS_REQUEST, OPUS_SET_OSCE_BWE_REQUEST,
     OPUS_SET_PHASE_INVERSION_DISABLED_REQUEST,
 };
 use opusorus::{Decoder, MsDecoder, ProjectionDecoder, packet};
@@ -31,8 +32,9 @@ use opusorus_oracle::opus_decoder as od;
 /// allocations.
 pub const MAX_FRAME: i32 = 15360;
 
-/// Every GET request `opus_decoder_ctl` implements (default build).
-pub const DEC_GETS: [i32; 9] = [
+/// Every GET request `opus_decoder_ctl` implements (`OPUS_GET_OSCE_BWE` only with `osce`;
+/// both sides reject it identically otherwise).
+pub const DEC_GETS: [i32; 10] = [
     OPUS_GET_BANDWIDTH_REQUEST,
     OPUS_GET_COMPLEXITY_REQUEST,
     OPUS_GET_FINAL_RANGE_REQUEST,
@@ -42,10 +44,11 @@ pub const DEC_GETS: [i32; 9] = [
     OPUS_GET_LAST_PACKET_DURATION_REQUEST,
     OPUS_GET_PHASE_INVERSION_DISABLED_REQUEST,
     OPUS_GET_IGNORE_EXTENSIONS_REQUEST,
+    OPUS_GET_OSCE_BWE_REQUEST,
 ];
 
 /// SET requests the harness issues, with the values seeds pick from (`vsel < 128`).
-pub const DEC_SETS: [(i32, &[i32]); 6] = [
+pub const DEC_SETS: [(i32, &[i32]); 7] = [
     (
         OPUS_SET_COMPLEXITY_REQUEST,
         &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, 11],
@@ -59,6 +62,8 @@ pub const DEC_SETS: [(i32, &[i32]); 6] = [
     (OPUS_RESET_STATE, &[0]),
     // Not a decoder request: must be rejected identically (OPUS_UNIMPLEMENTED).
     (4002, &[64000]),
+    // OSCE bandwidth extension (`osce` builds; OPUS_UNIMPLEMENTED otherwise).
+    (OPUS_SET_OSCE_BWE_REQUEST, &[1, 0, 2, -1]),
 ];
 
 /// Tag values for the [`Writer`] helpers.
@@ -267,9 +272,17 @@ pub fn frame_size(fsel: u8, fs: i32, data: Option<&[u8]>) -> i32 {
     }
 }
 
-/// A decoder state dump: the Opus-level ints and the soft-clip memory bits.
+/// A decoder state dump: the Opus-level ints and the soft-clip memory bits (zeros in
+/// fixed-point builds, which have no soft clip).
 pub type StateDump = ([i32; 21], [u32; 2]);
 
+#[cfg_attr(
+    feature = "fixed-point",
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "const only in fixed-point builds (no soft-clip memory)"
+    )
+)]
 fn rust_state(d: &Decoder) -> StateDump {
     let s = d.snapshot();
     (
@@ -296,8 +309,20 @@ fn rust_state(d: &Decoder) -> StateDump {
             s.range_final as i32,
             0,
         ],
-        s.softclip_mem.map(f32::to_bits),
+        softclip_bits(&s),
     )
+}
+
+/// The soft-clip memory (float builds only; the fixed-point oracle dumps it as zeros).
+#[cfg(not(feature = "fixed-point"))]
+fn softclip_bits(s: &opusorus::decoder::DecoderSnapshot) -> [u32; 2] {
+    s.softclip_mem.map(f32::to_bits)
+}
+
+/// The soft-clip memory (float builds only; the fixed-point oracle dumps it as zeros).
+#[cfg(feature = "fixed-point")]
+const fn softclip_bits(_: &opusorus::decoder::DecoderSnapshot) -> [u32; 2] {
+    [0; 2]
 }
 
 fn c_state(s: &od::DecState) -> StateDump {
@@ -343,6 +368,10 @@ pub trait DecApi {
     }
     /// State dumps of every stream decoder.
     fn states(&mut self) -> Vec<StateDump>;
+    /// Further state compared bit for bit (the DNN decoder state in `differential_dnn_decode`).
+    fn extra_state(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
 }
 
 fn cnt(r: opusorus::Result<i32>) -> Result<usize, i32> {
@@ -539,6 +568,14 @@ pub fn check_state<R: DecApi, C: DecApi>(r: &mut R, c: &mut C, what: &str) {
         assert_eq!(r.ctl_get(req), c.ctl_get(req), "{what}: ctl_get({req})");
     }
     assert_eq!(r.states(), c.states(), "{what}: decoder state");
+    let (rx, cx) = (r.extra_state(), c.extra_state());
+    assert_eq!(rx.len(), cx.len(), "{what}: extra state size");
+    if let Some(k) = rx.iter().zip(&cx).position(|(a, b)| a != b) {
+        panic!(
+            "{what}: extra state [{k}] differs: rust={:#x} c={:#x}",
+            rx[k], cx[k]
+        );
+    }
 }
 
 /// Runs one operation on a Rust and a C decoder and asserts identical behaviour: return codes,

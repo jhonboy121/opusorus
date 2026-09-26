@@ -18,6 +18,17 @@ members = ["."]
 # Mirror the codec features on both the port and the oracle so they stay in the same config.
 qext = ["opusorus/qext", "opusorus-oracle/qext"]
 custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
+# Fixed-point build (not additive: replaces the float codec on both sides, docs/FIXED_POINT.md).
+fixed-point = ["opusorus/fixed-point", "opusorus-oracle/fixed-point"]
+fixed-res24 = ["fixed-point", "opusorus/fixed-res24", "opusorus-oracle/fixed-res24"]
+# DNN decoder features (float builds only; need scripts/fetch_dnn_models.sh). The C oracle has
+# compiled-in weights; the port loads the same weights serialized by the oracle.
+deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc"]
+osce = ["deep-plc", "opusorus/osce", "opusorus-oracle/osce"]
+# DRED (implies deep PLC). The DNN fuzz build uses `deep-plc,osce,dred`: the oracle's DRED
+# bindings (`dnn_integration::Dred`) only link when its C shims are compiled with DRED, and
+# the sanitizer-coverage build keeps them alive.
+dred = ["deep-plc", "opusorus/dred", "opusorus-oracle/dred"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
@@ -115,3 +126,19 @@ path = "fuzz_targets/projection_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "differential_dnn_decode"
+path = "fuzz_targets/differential_dnn_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["deep-plc"]
+
+[[bin]]
+name = "differential_custom"
+path = "fuzz_targets/differential_custom.rs"
+test = false
+doc = false
+bench = false
+required-features = ["custom-modes"]

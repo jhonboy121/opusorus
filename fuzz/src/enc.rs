@@ -363,7 +363,8 @@ fn to_pcm(x: &[f32], fmt: InFmt) -> Pcm {
 }
 
 /// Raw input: the samples come straight from the fuzz input (any bit pattern, including
-/// non-finite floats and out-of-range 24-bit values), repeated to fill the frame.
+/// non-finite floats and, in float builds, out-of-range 24-bit values; see [`raw_i24`]),
+/// repeated to fill the frame.
 fn raw_pcm(raw: &[u8], fmt: InFmt, total: usize) -> Pcm {
     match fmt {
         InFmt::I16 => {
@@ -380,7 +381,7 @@ fn raw_pcm(raw: &[u8], fmt: InFmt, total: usize) -> Pcm {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|&b| i32::from_le_bytes(b))
+                .map(|&b| raw_i24(i32::from_le_bytes(b)))
                 .collect();
             Pcm::I24(cycle(&s, total))
         }
@@ -403,6 +404,37 @@ fn cycle<T: Copy + Default>(s: &[T], total: usize) -> Vec<T> {
     s.iter().copied().cycle().take(total).collect()
 }
 
+/// Input classes that are undefined behaviour in C and panic in debug builds of the port (the
+/// overflow checks cargo-fuzz enables), avoided until the port hardens them:
+///
+/// * fixed-point: a stereo encoder with `OPUS_SET_LFE(1)` overflows in CELT's `stereo_itheta`
+///   (C wraps; docs/FIXED_POINT.md, FX4). Multistream LFE streams are mono, and
+///   `opus_multistream_encoder_ctl` does not forward `OPUS_SET_LFE`, so only single-stream
+///   stereo encoders are affected: their `OPUS_SET_LFE` value is forced to 0.
+#[must_use]
+pub const fn avoid_known_ub(req: i32, value: i32, h: &EncHeader) -> i32 {
+    if cfg!(feature = "fixed-point") && req == OPUS_SET_LFE_REQUEST && h.channels == 2 {
+        0
+    } else {
+        value
+    }
+}
+
+/// A raw 24-bit input sample. Float builds take any 32-bit pattern (out-of-range values are
+/// scaled like any other). Fixed-point builds keep the sample within 24 bits (sign-extending
+/// its low 24 bits): larger values are undefined behaviour in C there (`INT24TORES` =
+/// `SAT16(PSHR32(x, 8))` overflows near `i32::MAX` in 16-bit builds; `INT24TOSIG` = `x << 4`
+/// wraps and the analysis downmix / `silk_resampler_down2_hp` sums then overflow), and
+/// `opus_encode24` documents its input as 24-bit.
+#[must_use]
+pub const fn raw_i24(v: i32) -> i32 {
+    if cfg!(feature = "fixed-point") {
+        (v << 8) >> 8
+    } else {
+        v
+    }
+}
+
 /// Reads the next operation, or `None` at the end of the input.
 pub fn read_op(r: &mut Reader<'_>, h: &EncHeader, synth: &mut Synth) -> Option<EncOp> {
     if r.is_empty() {
@@ -411,7 +443,10 @@ pub fn read_op(r: &mut Reader<'_>, h: &EncHeader, synth: &mut Synth) -> Option<E
     Some(match r.u8() % 8 {
         5 => {
             let (req, value) = read_ctl(r, &ENC_SETS);
-            EncOp::Ctl { req, value }
+            EncOp::Ctl {
+                req,
+                value: avoid_known_ub(req, value, h),
+            }
         }
         6 => EncOp::Ctl {
             req: OPUS_RESET_STATE,
