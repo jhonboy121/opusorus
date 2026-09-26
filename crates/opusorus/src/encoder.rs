@@ -2992,7 +2992,20 @@ impl Encoder {
                 ch,
                 fs,
             );
-            // ENABLE_OSCE_TRAINING_DATA: training data dump not ported.
+            #[cfg(feature = "osce-training-data")]
+            {
+                // write out high pass filtered clean signal
+                // (C indexes `pcm_buf[total_buffer + idx]`, i.e. without the channel stride.)
+                let tbs = total_buffer as usize;
+                let mut b = Vec::with_capacity(2 * frame_size as usize);
+                for &x in &pcm_buf[tbs..tbs + frame_size as usize] {
+                    // `(opus_int16) (32768 * pcm_buf[..] + 0.5f)`: float to int, truncated to
+                    // 16 bits (out-of-range values are UB in C; this matches aarch64 gcc).
+                    let tmp = ((32768.0f32 * x + 0.5f32) as i32) as i16;
+                    b.extend_from_slice(&tmp.to_ne_bytes());
+                }
+                crate::osce_training_data::write(crate::osce_training_data::CLEAN_HP, &b);
+            }
         } else {
             #[cfg(feature = "qext")]
             let qext_copy = self.enable_qext != 0;

@@ -12,23 +12,44 @@
 //!
 //! Model weights are parsed from a libopus weight blob (upstream `USE_WEIGHTS_FILE` /
 //! `OPUS_SET_DNN_BLOB` path, PLAN D-015); with the `dnn-weights-embedded` feature a blob is
-//! compiled in and bound at initialization ([`embedded`]).
+//! compiled in and bound at initialization (`embedded`).
+//!
+//! With the `lossgen` feature the layer runtime also backs [`lossgen`], the packet loss
+//! generator of `opus_demo -sim_loss` (its small model is compiled in).
 
-pub mod burg;
-pub mod common;
-#[cfg(feature = "dnn-weights-embedded")]
-pub mod embedded;
-pub mod freq;
-pub mod kiss99;
-pub mod lpcnet_enc;
-pub mod lpcnet_tables;
-pub mod nndsp;
+// The layer runtime and weight-blob format (also all the `lossgen` model needs).
 pub mod nnet;
 pub mod nnet_arch;
 pub mod parse_lpcnet_weights;
-pub mod pitchdnn;
 pub mod tansig_table;
 pub mod vec;
+
+// Shared by the DNN features (compiled out in a `lossgen`-only build, which may be
+// fixed-point).
+#[cfg(feature = "deep-plc")]
+pub mod burg;
+#[cfg(feature = "deep-plc")]
+pub mod common;
+#[cfg(all(feature = "deep-plc", feature = "dnn-weights-embedded"))]
+pub mod embedded;
+#[cfg(feature = "deep-plc")]
+pub mod freq;
+#[cfg(feature = "deep-plc")]
+pub mod kiss99;
+#[cfg(feature = "deep-plc")]
+pub mod lpcnet_enc;
+#[cfg(feature = "deep-plc")]
+pub mod lpcnet_tables;
+#[cfg(feature = "deep-plc")]
+pub mod nndsp;
+#[cfg(feature = "deep-plc")]
+pub mod pitchdnn;
+
+// Packet loss generator (`--enable-lossgen`).
+#[cfg(feature = "lossgen")]
+pub mod lossgen;
+#[cfg(feature = "lossgen")]
+pub mod lossgen_data;
 
 // Deep PLC (unit `dnn_plc`).
 #[cfg(feature = "deep-plc")]

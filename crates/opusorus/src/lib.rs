@@ -50,6 +50,22 @@
 //! practice), such as a stereo encoder with `OPUS_SET_LFE(1)` in the fixed-point build, the
 //! port wraps explicitly, so debug and release builds behave like libopus and do not panic.
 //! See `docs/FIXED_POINT.md`.
+//!
+//! # DNN build options (features `dnn-debug-float`, `osce-training-data`, `lossgen`)
+//!
+//! * `dnn-debug-float` (libopus `--enable-dnn-debug-float`): the int8-quantized DNN layers keep
+//!   float copies of their weights and compute with them. Upstream's switch only changes the
+//!   compiled-in model tables; weight blobs carry their own arrays (a blob with the float
+//!   copies computes in float, with or without the feature, as in libopus' `USE_WEIGHTS_FILE`
+//!   builds). With `dnn-weights-embedded` the embedded blob must match the feature (checked at
+//!   compile time; `scripts/gen_dnn_blob.sh --debug-float` writes the debug-float blob).
+//! * `osce-training-data` (libopus `--enable-osce-training-data`, implies `osce` and `std`):
+//!   the encoder (`voip` application) and the OSCE enhancer append training data to files in
+//!   the current working directory, with upstream's names and formats; see
+//!   `osce_training_data` (a debugging/training aid, not for production builds).
+//! * `lossgen` (libopus `--enable-lossgen`): `lossgen`, the generative packet loss model of
+//!   `opus_demo -sim_loss` (upstream links it into its tools only). Its small model is compiled
+//!   in; it works in every build, float or fixed-point, without the DNN features.
 
 #![no_std]
 #![allow(
@@ -106,19 +122,33 @@ pub mod silk;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod silk;
 
+// The DNN runtime: the DNN features (float build only), or just its core for the `lossgen`
+// packet loss model (any build, like upstream's `--enable-lossgen`).
 #[cfg(all(
     feature = "internals",
-    not(feature = "fixed-point"),
-    any(feature = "deep-plc", feature = "dred", feature = "osce")
+    any(
+        all(
+            not(feature = "fixed-point"),
+            any(feature = "deep-plc", feature = "dred", feature = "osce")
+        ),
+        feature = "lossgen"
+    )
 ))]
 #[doc(hidden)]
 pub mod dnn;
 #[cfg(all(
     not(feature = "internals"),
-    not(feature = "fixed-point"),
-    any(feature = "deep-plc", feature = "dred", feature = "osce")
+    any(
+        all(
+            not(feature = "fixed-point"),
+            any(feature = "deep-plc", feature = "dred", feature = "osce")
+        ),
+        feature = "lossgen"
+    )
 ))]
 pub(crate) mod dnn;
+#[cfg(feature = "lossgen")]
+pub use dnn::lossgen;
 
 // ---- Opus layer (src/*.c) ----
 #[cfg(feature = "internals")]
@@ -144,6 +174,8 @@ pub(crate) mod mlp;
 pub mod ms_decoder;
 pub mod ms_encoder;
 pub mod multistream;
+#[cfg(feature = "osce-training-data")]
+pub mod osce_training_data;
 pub mod packet;
 pub mod projection_decoder;
 pub mod projection_encoder;

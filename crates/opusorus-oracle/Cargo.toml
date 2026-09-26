@@ -22,6 +22,15 @@ fixed-res24 = ["fixed-point"]
 deep-plc = []
 dred = ["deep-plc"]
 osce = ["deep-plc"]
+# libopus `--enable-dnn-debug-float`: DISABLE_DEBUG_FLOAT is not defined, so the model tables
+# keep float copies of the int8 layers and the DNN computes with them.
+dnn-debug-float = []
+# libopus `--enable-osce-training-data` (ENABLE_OSCE_TRAINING_DATA, implies OSCE): the encoder
+# and the OSCE enhancer dump training features into files in the working directory.
+osce-training-data = ["osce"]
+# The packet loss generator of `--enable-lossgen` (dnn/lossgen.c + lossgen_data.c, which upstream
+# links into opus_demo only), reached through the `csrc/dnn_lossgen.c` shim.
+lossgen = []
 
 [build-dependencies]
 cc = "1"

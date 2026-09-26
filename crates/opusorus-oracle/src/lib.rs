@@ -41,6 +41,8 @@ pub mod dnn_core;
 pub mod dnn_dred;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_integration;
+#[cfg(feature = "lossgen")]
+pub mod dnn_lossgen;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_osce;
 #[cfg(not(feature = "fixed-point"))]

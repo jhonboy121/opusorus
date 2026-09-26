@@ -13,6 +13,23 @@ custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
 deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc", "opusorus-tools/deep-plc"]
 dred = ["opusorus/dred", "opusorus-oracle/dred", "deep-plc", "opusorus-tools/dred"]
 osce = ["opusorus/osce", "opusorus-oracle/osce", "deep-plc", "opusorus-tools/osce"]
+# libopus `--enable-dnn-debug-float` on both sides (float copies of the int8 DNN layers).
+dnn-debug-float = [
+    "opusorus/dnn-debug-float",
+    "opusorus-oracle/dnn-debug-float",
+    "opusorus-tools/dnn-debug-float",
+]
+# libopus `--enable-osce-training-data` on both sides. Every SILK `voip` encode and 16 kHz SILK
+# decode then writes training files into the working directory: run only
+# `--test osce_training_data` in this configuration.
+osce-training-data = [
+    "osce",
+    "opusorus/osce-training-data",
+    "opusorus-oracle/osce-training-data",
+    "opusorus-tools/osce-training-data",
+]
+# libopus `--enable-lossgen` (the packet loss generator, `opus_demo -sim_loss`).
+lossgen = ["opusorus/lossgen", "opusorus-oracle/lossgen", "opusorus-tools/lossgen"]
 # Fixed-point port vs a fixed-point oracle (docs/FIXED_POINT.md). Float-only test files are
 # compiled out; run e.g. `cargo test -p opusorus-conformance --features fixed-point`.
 fixed-point = ["opusorus/fixed-point", "opusorus-oracle/fixed-point", "opusorus-tools/fixed-point"]

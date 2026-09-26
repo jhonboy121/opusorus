@@ -40,6 +40,9 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | O4 | Deep PLC (LPCNet/FARGAN-based concealment) | `--enable-deep-plc` | `deep-plc` | ✅ |
 | O5 | DRED: Deep REDundancy (encoder + decoder, `opus_dred_*` API) | `--enable-dred` | `dred` | ✅ |
 | O6 | OSCE: SILK speech enhancement (LACE/NoLACE) + BWE | `--enable-osce` | `osce` | ✅ |
+| O7 | DNN debug float: float copies of the int8 layers, float compute (`DISABLE_DEBUG_FLOAT` undefined) | `--enable-dnn-debug-float` | `dnn-debug-float` | ✅ |
+| O8 | OSCE training data output (`ENABLE_OSCE_TRAINING_DATA`: encoder + OSCE feature files, `opus_demo -silk_random_switching`) | `--enable-osce-training-data` | `osce-training-data` | ✅ |
+| O9 | Generative packet loss model (`dnn/lossgen.c`, `opus_demo -sim_loss`, `lossgen_demo`) | `--enable-lossgen` | `lossgen` | ✅ |
 
 ## Tooling & quality
 | # | Item | Status |

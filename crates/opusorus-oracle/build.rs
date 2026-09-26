@@ -70,6 +70,11 @@ fn main() {
     let dred = std::env::var_os("CARGO_FEATURE_DRED").is_some();
     let osce = std::env::var_os("CARGO_FEATURE_OSCE").is_some();
     let deep_plc = std::env::var_os("CARGO_FEATURE_DEEP_PLC").is_some() || dred || osce;
+    // --enable-dnn-debug-float (no DISABLE_DEBUG_FLOAT), --enable-osce-training-data (implies
+    // OSCE through the Cargo feature) and --enable-lossgen (sources for the csrc/dnn_lossgen.c shim).
+    let dnn_debug_float = std::env::var_os("CARGO_FEATURE_DNN_DEBUG_FLOAT").is_some();
+    let osce_training = std::env::var_os("CARGO_FEATURE_OSCE_TRAINING_DATA").is_some();
+    let lossgen = std::env::var_os("CARGO_FEATURE_LOSSGEN").is_some();
     // Upstream configure refuses this combination too.
     assert!(
         !(fixed && deep_plc),
@@ -155,7 +160,9 @@ fn main() {
             .include(root.join("dnn"))
             .define("ENABLE_DEEP_PLC", None);
         // Default upstream build: int8 weights for the quantized layers (no float copies).
-        b.define("DISABLE_DEBUG_FLOAT", None);
+        if !dnn_debug_float {
+            b.define("DISABLE_DEBUG_FLOAT", None);
+        }
         // Force the generic C path of dnn/vec.h (the port targets it): no NEON, no SSE/AVX
         // emulation. `__SSE2__` is implied on x86_64 and only tested by dnn/vec*.h.
         b.define("DISABLE_NEON", None)
@@ -168,6 +175,25 @@ fn main() {
             b.define("ENABLE_OSCE", None)
                 .define("ENABLE_OSCE_BWE", None);
         }
+        if osce_training {
+            b.define("ENABLE_OSCE_TRAINING_DATA", None);
+        }
+    }
+    if lossgen {
+        // The model data is part of the DNN model tarball (not vendored in git).
+        let data = root.join("dnn/lossgen_data.c");
+        assert!(
+            data.exists(),
+            "{} missing (feature lossgen); run scripts/fetch_dnn_models.sh",
+            data.display()
+        );
+        // lossgen.c runs the DNN kernels of dnn/vec.h: the generic C path, as for the DNN
+        // features (see below).
+        b.include(root.join("dnn"))
+            .define("ENABLE_LOSSGEN", None)
+            .define("DISABLE_NEON", None)
+            .flag_if_supported("-U__AVX__")
+            .flag_if_supported("-U__SSE2__");
     }
     // Per-unit C shims exposing internal functions with flat, FFI-friendly signatures.
     let csrc = manifest.join("csrc");

@@ -29,6 +29,16 @@ deep-plc = ["opusorus/deep-plc"]
 dred = ["opusorus/dred", "deep-plc"]
 osce = ["opusorus/osce", "deep-plc"]
 dnn-weights-embedded = ["opusorus/dnn-weights-embedded"]
+# libopus `--enable-dnn-debug-float`: float DNN weights (only changes the compiled-in weights of
+# `dnn-weights-embedded`, which must then come from `scripts/gen_dnn_blob.sh --debug-float`).
+dnn-debug-float = ["opusorus/dnn-debug-float"]
+# libopus `--enable-osce-training-data`: `opus_demo` forces SILK-only encoding, reseeds `rand()`
+# and takes `-silk_random_switching <n>`; the library writes the OSCE training files into the
+# working directory.
+osce-training-data = ["opusorus/osce-training-data", "osce"]
+# libopus `--enable-lossgen`: `opus_demo -sim_loss <perc>` (generative bursty packet loss) and
+# the `lossgen_demo` tool.
+lossgen = ["opusorus/lossgen"]
 
 [dependencies]
 # `internals` exposes `opusorus::celt::mini_kfft` and `opusorus::math`; `std` selects the platform
@@ -42,6 +52,11 @@ path = "src/bin/opus_demo.rs"
 [[bin]]
 name = "opus_compare"
 path = "src/bin/opus_compare.rs"
+
+[[bin]]
+name = "lossgen_demo"
+path = "src/bin/lossgen_demo.rs"
+required-features = ["lossgen"]
 
 [[bin]]
 name = "qext_compare"

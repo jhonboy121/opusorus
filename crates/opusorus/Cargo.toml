@@ -39,6 +39,22 @@ fixed-res24 = ["fixed-point"]
 # (`scripts/gen_dnn_blob.sh` generates one) and binds the models when a decoder, encoder or DRED
 # decoder is created. Only has an effect together with `deep-plc`, `dred` or `osce`.
 dnn-weights-embedded = []
+# libopus `--enable-dnn-debug-float` (DISABLE_DEBUG_FLOAT undefined): the model tables keep
+# float copies of the int8-quantized layers and the DNN computes with those. Weights loaded at
+# runtime carry their own choice (a blob with float copies computes in float, as in C's
+# `USE_WEIGHTS_FILE` builds, where the switch has no effect); with `dnn-weights-embedded` it
+# requires an embedded blob with the float copies (`scripts/gen_dnn_blob.sh --debug-float`),
+# and without it one without (checked at compile time).
+dnn-debug-float = []
+# libopus `--enable-osce-training-data` (ENABLE_OSCE_TRAINING_DATA, implies OSCE): the encoder
+# (VOIP high-pass output, `clean_hp.s16`) and the OSCE enhancer (`features_*.f32/s16/s32`,
+# `noisy_16k.s16`) append training data to files in the working directory, like upstream.
+# Needs `std`. See `osce_training_data`.
+osce-training-data = ["osce", "std"]
+# The generative packet loss model of libopus `--enable-lossgen` (dnn/lossgen.c, used by
+# `opus_demo -sim_loss`), as `opusorus::lossgen`; its small model is compiled in. Works in
+# every build (float or fixed-point, no DNN feature needed).
+lossgen = []
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

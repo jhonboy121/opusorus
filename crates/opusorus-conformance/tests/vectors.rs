@@ -28,7 +28,14 @@
 //! * `dnn_blob_matches_oracle` (features `dred` + `osce`): the blob written by
 //!   `scripts/gen_dnn_blob.sh` (`$OPUSORUS_DNN_BLOB` or `target/dnn/weights_blob.bin`; skipped
 //!   if absent) is byte-identical to the oracle's compiled-in tables serialized in the same
-//!   order, so embedding it (`dnn-weights-embedded`) gives exactly the oracle's models.
+//!   order, so embedding it (`dnn-weights-embedded`) gives exactly the oracle's models. With
+//!   `dnn-debug-float` both are the debug-float tables (`gen_dnn_blob.sh --debug-float`,
+//!   `target/dnn/weights_blob_debug_float.bin`).
+//!
+//! With `lossgen` the C `opus_demo` is built with `ENABLE_LOSSGEN` (+ `dnn/lossgen.c`,
+//! `lossgen_data.c`, as upstream's Makefile) and the matrix adds `-sim_loss` cases. With
+//! `osce-training-data` the comparison is skipped: the library then writes training files into
+//! the working directory from every run (`tests/osce_training_data.rs` covers that build).
 //!
 //! Fixed-point builds (`fixed-point`, `fixed-res24`, with `qext` / `custom-modes`) run the same
 //! procedure with the fixed-point decoder, and `opus_demo_matches_c` compares against the C
@@ -575,6 +582,9 @@ fn lib_config_matches(lib: &[u8]) -> bool {
             ))
         && has(b"-dred_decoder.o") == cfg!(feature = "dred")
         && has(b"-osce.o") == cfg!(feature = "osce")
+        // csrc/dnn_debug_float.c (no DISABLE_DEBUG_FLOAT) and the training file names.
+        && has(b"opusorus-oracle: dnn-debug-float build") == (DNN && cfg!(feature = "dnn-debug-float"))
+        && has(b"features_lpc.f32") == cfg!(feature = "osce-training-data")
 }
 
 /// The oracle `libopus.a` files whose optional components match this crate's features
@@ -702,6 +712,8 @@ fn build_c_opus_demo() -> Option<PathBuf> {
         (DNN, "_deepplc"),
         (cfg!(feature = "dred"), "_dred"),
         (cfg!(feature = "osce"), "_osce"),
+        (DNN && cfg!(feature = "dnn-debug-float"), "_dbgfloat"),
+        (cfg!(feature = "lossgen"), "_lossgen"),
     ] {
         if on {
             tag.push_str(t);
@@ -738,6 +750,17 @@ fn build_c_opus_demo() -> Option<PathBuf> {
     }
     if cfg!(feature = "osce") {
         cmd.args(["-DENABLE_OSCE", "-DENABLE_OSCE_BWE"]);
+    }
+    // Upstream links opus_demo with LOSSGEN_SOURCES (generic C DNN kernels, as the oracle).
+    if cfg!(feature = "lossgen") {
+        cmd.args([
+            "-DENABLE_LOSSGEN",
+            "-DDISABLE_NEON",
+            "-U__SSE2__",
+            "-U__AVX__",
+        ])
+        .arg(root.join("dnn/lossgen.c"))
+        .arg(root.join("dnn/lossgen_data.c"));
     }
     for inc in ["include", "celt", "silk", "src", "dnn"] {
         cmd.arg(format!("-I{}", root.join(inc).display()));
@@ -963,6 +986,13 @@ fn opus_demo_matches_c() {
         );
         return;
     }
+    if cfg!(feature = "osce-training-data") {
+        eprintln!(
+            "NOTE: osce-training-data: every run writes training files into the working \
+             directory; skipping (see tests/osce_training_data.rs)"
+        );
+        return;
+    }
     let Some(c_demo) = build_c_opus_demo() else {
         return;
     };
@@ -1144,6 +1174,25 @@ fn opus_demo_matches_c() {
             case("ed_osce_bwe_loss", &["voip", "48000", "2", "24000", "-bandwidth", "WB", "-enable_osce_bwe", "-loss", "10", "-dec_complexity", "7", &m48s, "OUT"]),
         ]);
     }
+    if cfg!(feature = "lossgen") {
+        // -sim_loss: the generative loss model, drawing from the same rand() as -random_*;
+        // -lossfile takes precedence, a negative percentage falls back to -loss.
+        #[rustfmt::skip]
+        phase1.extend([
+            case("ed_simloss16m_fec", &["voip", "16000", "1", "16000", "-sim_loss", "10", "-inbandfec", &s16m, "OUT"]),
+            case("ed_simloss48s_random", &["audio", "48000", "2", "64000", "-sim_loss", "25", "-random_framesize", "-random_fec", &m48s, "OUT"]),
+            case("e_simloss_encloss", &["-e", "voip", "16000", "1", "20000", "-sim_loss", "30", "-enc_loss", &s16m, "OUT"]),
+            case("ed_simloss_twice", &["voip", "48000", "1", "24000", "-sim_loss", "50", "-sim_loss", "3.5", &s48m, "OUT"]),
+            case("ed_simloss_negative", &["voip", "8000", "1", "8000", "-sim_loss", "-1", "-loss", "20", &s8m, "OUT"]),
+            case("ed_simloss_lossfile", &["audio", "48000", "2", "32000", "-sim_loss", "40", "-lossfile", &loss, &m48s, "OUT"]),
+            case("ed_simloss_and_loss", &["voip", "12000", "1", "12000", "-loss", "20", "-sim_loss", "15", &s12m, "OUT"]),
+            case("x_simloss_usage", &["-d", "48000", "1", "-bogus", &m48s, "OUT"]),
+        ]);
+        if DNN {
+            #[rustfmt::skip]
+            phase1.push(case("ed_simloss_deepplc", &["voip", "16000", "1", "24000", "-sim_loss", "20", "-dec_complexity", "5", "-dred", "40", &s16m, "OUT"]));
+        }
+    }
     let outs1 = check_cases(&c_demo, &dir, &phase1);
     let bitstream = |name: &str| -> PathBuf {
         let i = phase1.iter().position(|c| c.name == name).unwrap();
@@ -1224,6 +1273,13 @@ fn opus_demo_matches_c() {
         case("d_empty", &["-d", "48000", "2", &empty, "OUT"]),
         case("d_pcm_as_bitstream", &["-d", "48000", "2", &m48s, "OUT"]),
     ];
+    if cfg!(feature = "lossgen") {
+        #[rustfmt::skip]
+        phase2.extend([
+            case("d_simloss_48s", &["-d", "48000", "2", "-sim_loss", "15", &b48, "OUT"]),
+            case("d_simloss_16m_fec", &["-d", "16000", "1", "-inbandfec", "-sim_loss", "33.3", &b16, "OUT"]),
+        ]);
+    }
     if cfg!(feature = "qext") {
         let b96 = path_str(&bitstream("e_qext96")).to_owned();
         #[rustfmt::skip]
@@ -1322,9 +1378,14 @@ fn opus_demo_matches_c() {
 #[cfg(all(feature = "dred", feature = "osce"))]
 #[test]
 fn dnn_blob_matches_oracle() {
+    let default = if cfg!(feature = "dnn-debug-float") {
+        "../../target/dnn/weights_blob_debug_float.bin"
+    } else {
+        "../../target/dnn/weights_blob.bin"
+    };
     let path = match std::env::var_os("OPUSORUS_DNN_BLOB") {
         Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/dnn/weights_blob.bin"),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(default),
     };
     let Ok(blob) = std::fs::read(&path) else {
         eprintln!(

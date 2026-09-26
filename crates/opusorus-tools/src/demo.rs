@@ -35,8 +35,15 @@
 //!   `weights_blob.bin` from the working directory and sets it on the encoder, decoder and DRED
 //!   decoder like a libopus `USE_WEIGHTS_FILE` build (silently running without models if the
 //!   file does not exist); [`opus_demo_main_with_weights`] takes the blob as an argument.
-//! * Not ported: `-sim_loss` (`ENABLE_LOSSGEN`) and the `ENABLE_OSCE_TRAINING_DATA` options
-//!   (not in a default libopus build).
+//! * `-sim_loss <perc>` (feature `lossgen`, libopus `--enable-lossgen`): losses drawn from the
+//!   generative loss model (`opusorus::lossgen`), which takes its randomness from the same
+//!   [`GlibcRand`] as the other options, as C's `sample_loss` calls `rand()`.
+//! * `ENABLE_OSCE_TRAINING_DATA` (feature `osce-training-data`, libopus
+//!   `--enable-osce-training-data`): the encoder is forced to SILK-only mode and `rand()` is
+//!   reseeded with `srand(0)`, `-silk_random_switching <n>` picks a random bitrate, complexity,
+//!   loss percentage and VBR setting every `n`-th frame, and the library writes the training
+//!   files into the working directory (`opusorus::osce_training_data`; [`opus_demo_main`]
+//!   closes them before returning, as the C process exit does).
 //! * Where C has undefined behaviour (a negative sample count to `fread` after a frame-size
 //!   change, out-of-range float input), the Rust port reads nothing / saturates instead.
 //! * I/O errors while reading an opened input file are returned as `io::Error` (C treats them as
@@ -67,11 +74,15 @@ use opusorus::encoder::request::{
     OPUS_SET_LSB_DEPTH_REQUEST, OPUS_SET_PACKET_LOSS_PERC_REQUEST, OPUS_SET_VBR_CONSTRAINT_REQUEST,
     OPUS_SET_VBR_REQUEST,
 };
+#[cfg(feature = "lossgen")]
+use opusorus::lossgen::{LossGenState, sample_loss};
 use opusorus::packet::{
     MODE_CELT_ONLY, MODE_SILK_ONLY, get_nb_frames, get_samples_per_frame, has_lbrr,
 };
 use opusorus::{Decoder, Encoder};
 
+#[cfg(feature = "lossgen")]
+use crate::compare::c_atof;
 use crate::compare::{EXIT_FAILURE, EXIT_SUCCESS, argv0, c_atoi, c_fmt_f, c_isspace};
 
 /// `MAX_PACKET`: largest payload accepted by `-max_payload` (and the default).
@@ -83,6 +94,11 @@ pub const DEEP_PLC: bool = cfg!(feature = "deep-plc");
 pub const DRED: bool = cfg!(feature = "dred");
 /// Whether this build has OSCE (feature `osce`).
 pub const OSCE: bool = cfg!(feature = "osce");
+/// Whether this build has `-sim_loss` (feature `lossgen`, libopus `ENABLE_LOSSGEN`).
+pub const LOSSGEN: bool = cfg!(feature = "lossgen");
+/// Whether this build writes OSCE training data (feature `osce-training-data`, libopus
+/// `ENABLE_OSCE_TRAINING_DATA`).
+pub const OSCE_TRAINING_DATA: bool = cfg!(feature = "osce-training-data");
 /// Whether the DNN weights are compiled in (feature `dnn-weights-embedded`).
 pub const WEIGHTS_EMBEDDED: bool = cfg!(feature = "dnn-weights-embedded");
 
@@ -300,6 +316,101 @@ impl Default for GlibcRand {
     }
 }
 
+/// `-sim_loss` state: `(lossgen_perc, lossgen)` once the option was given.
+#[cfg(feature = "lossgen")]
+type SimLoss = Option<(f32, LossGenState)>;
+/// Without `lossgen` there is no `-sim_loss` (always `None`).
+#[cfg(not(feature = "lossgen"))]
+type SimLoss = Option<core::convert::Infallible>;
+
+/// `else if (lossgen_perc >= 0) lost = sample_loss(&lossgen, lossgen_perc*.01f);`: `None` when
+/// the branch is not taken.
+#[cfg(feature = "lossgen")]
+fn sim_loss_draw(sim: &mut SimLoss, rng: &mut GlibcRand) -> Option<i32> {
+    match sim {
+        Some((perc, st)) if *perc >= 0.0 => {
+            Some(sample_loss(st, *perc * 0.01f32, &mut || rng.next_value()))
+        }
+        _ => None,
+    }
+}
+
+/// Without `lossgen` the branch does not exist.
+#[cfg(not(feature = "lossgen"))]
+const fn sim_loss_draw(_sim: &mut SimLoss, _rng: &mut GlibcRand) -> Option<i32> {
+    None
+}
+
+/// `ENABLE_OSCE_TRAINING_DATA` settings of `new_random_setting`.
+#[cfg(feature = "osce-training-data")]
+mod training {
+    pub const COMPLEXITY_MIN: i32 = 0;
+    pub const COMPLEXITY_MAX: i32 = 10;
+    pub const PACKET_LOSS_PERC_MIN: i32 = 0;
+    pub const PACKET_LOSS_PERC_MAX: i32 = 50;
+    pub const PACKET_LOSS_PERC_STEP: i32 = 5;
+    pub const CBR_BITRATE_LIMIT: i32 = 80000;
+    pub const NUM_BITRATES: i32 = 102;
+    #[rustfmt::skip]
+    pub static BITRATES: [i32; NUM_BITRATES as usize] = [
+         6000,  6060,  6120,  6180,  6240,  6300,  6360,  6420,  6480,
+         6525,  6561,  6598,  6634,  6670,  6707,  6743,  6780,  6816,
+         6853,  6889,  6926,  6962,  6999,  7042,  7085,  7128,  7171,
+         7215,  7258,  7301,  7344,  7388,  7431,  7474,  7512,  7541,
+         7570,  7599,  7628,  7657,  7686,  7715,  7744,  7773,  7802,
+         7831,  7860,  7889,  7918,  7947,  7976,  8013,  8096,  8179,
+         8262,  8344,  8427,  8511,  8605,  8699,  8792,  8886,  8980,
+         9100,  9227,  9354,  9480,  9561,  9634,  9706,  9779,  9851,
+         9924,  9996, 10161, 10330, 10499, 10698, 10898, 11124, 11378,
+        11575, 11719, 11862, 12014, 12345, 12751, 13195, 13561, 13795,
+        14069, 14671, 15403, 15790, 16371, 17399, 17968, 19382, 20468,
+        22000, 32000, 64000,
+    ];
+}
+
+/// `randint(min, max, step)` (`ENABLE_OSCE_TRAINING_DATA`): `rand()` scaled to `[min, max]` in
+/// steps of `step`, with C's double arithmetic.
+#[cfg(feature = "osce-training-data")]
+fn randint(rng: &mut GlibcRand, min: i32, max: i32, step: i32) -> i32 {
+    // RAND_MAX + 1. (glibc RAND_MAX = 2^31 - 1)
+    let r = f64::from(rng.next_value()) / (2_147_483_647.0 + 1.0);
+    // (int) ((max + 1 - min) * r / step) * step + min
+    ((f64::from(max + 1 - min) * r / f64::from(step)) as i32) * step + min
+}
+
+/// `new_random_setting` (`ENABLE_OSCE_TRAINING_DATA`): random bitrate, complexity, loss
+/// percentage and VBR, announced on stdout.
+#[cfg(feature = "osce-training-data")]
+fn new_random_setting(
+    enc: &mut Encoder,
+    rng: &mut GlibcRand,
+    stdout: &mut dyn Write,
+) -> io::Result<()> {
+    use training::*;
+    let bitrate_bps = BITRATES[randint(rng, 0, NUM_BITRATES - 1, 1) as usize];
+    let complexity = randint(rng, COMPLEXITY_MIN, COMPLEXITY_MAX, 1);
+    let packet_loss_perc = randint(
+        rng,
+        PACKET_LOSS_PERC_MIN,
+        PACKET_LOSS_PERC_MAX,
+        PACKET_LOSS_PERC_STEP,
+    );
+    let use_vbr = if bitrate_bps < CBR_BITRATE_LIMIT {
+        1
+    } else {
+        randint(rng, 0, 1, 1)
+    };
+    writeln!(
+        stdout,
+        "changing settings to {bitrate_bps}\t{complexity}\t{packet_loss_perc}\t{use_vbr}"
+    )?;
+    ctl_ignored(enc.ctl_set(OPUS_SET_BITRATE_REQUEST, bitrate_bps));
+    ctl_ignored(enc.ctl_set(OPUS_SET_COMPLEXITY_REQUEST, complexity));
+    ctl_ignored(enc.ctl_set(OPUS_SET_PACKET_LOSS_PERC_REQUEST, packet_loss_perc));
+    ctl_ignored(enc.ctl_set(OPUS_SET_VBR_REQUEST, use_vbr));
+    Ok(())
+}
+
 /// The `-lossfile` stream, read with C `fscanf(f, "%d", &lost)` semantics.
 #[derive(Debug)]
 struct LossFile {
@@ -401,6 +512,11 @@ fn print_usage(stderr: &mut dyn Write, args: &[String]) -> io::Result<()> {
     writeln!(
         stderr,
         "-loss <perc>         : optimize for loss percentage and simulate packet loss, in percent (0-100); default: 0"
+    )?;
+    #[cfg(feature = "lossgen")]
+    writeln!(
+        stderr,
+        "-sim_loss <perc>     : simulate realistic (bursty) packet loss from percentage, using generative model"
     )?;
     writeln!(
         stderr,
@@ -530,11 +646,18 @@ pub fn opus_demo_main_with_weights(
     weights: Option<&[u8]>,
 ) -> io::Result<i32> {
     let mut fout = None;
-    let ret = run(args, stdout, stderr, &mut fout, weights)?;
+    let ret = run(args, stdout, stderr, &mut fout, weights);
+    // The OSCE training files are closed at process exit in C: close them (and report their
+    // first write error) on every path, so that the next run starts new files.
+    #[cfg(feature = "osce-training-data")]
+    let training = opusorus::osce_training_data::close_all();
+    let ret = ret?;
     // fclose(fout)
     if let Some(mut f) = fout {
         f.flush()?;
     }
+    #[cfg(feature = "osce-training-data")]
+    training?;
     Ok(ret)
 }
 
@@ -649,6 +772,12 @@ fn run(
     let mut ignore_extensions = false;
     #[cfg(feature = "qext")]
     let mut enable_qext = 0;
+    // `lossgen_perc` and `lossgen` (-sim_loss).
+    let mut sim_loss = SimLoss::default();
+    #[cfg(feature = "osce-training-data")]
+    let mut silk_random_switching = 0i32;
+    #[cfg(feature = "osce-training-data")]
+    let mut silk_frame_counter = 0i32;
     #[cfg(feature = "osce")]
     let mut enable_osce_bwe = false;
 
@@ -778,6 +907,12 @@ fn run(
                 packet_loss_perc = c_atoi(next());
                 a += 2;
             }
+            #[cfg(feature = "lossgen")]
+            "-sim_loss" => {
+                // `lossgen_perc = atof(...)` (double to float) and `lossgen_init(&lossgen)`.
+                sim_loss = Some((c_atof(next()) as f32, LossGenState::lossgen_init()));
+                a += 2;
+            }
             "-lossfile" => {
                 let name = next();
                 let Ok(mut f) = File::open(name) else {
@@ -867,6 +1002,15 @@ fn run(
                 enable_qext = 1;
                 a += 1;
             }
+            #[cfg(feature = "osce-training-data")]
+            "-silk_random_switching" => {
+                silk_random_switching = c_atoi(next());
+                writeln!(
+                    stdout,
+                    "switching encoding parameters every {silk_random_switching}th frame"
+                )?;
+                a += 2;
+            }
             #[cfg(feature = "osce")]
             "-enable_osce_bwe" => {
                 enable_osce_bwe = true;
@@ -922,6 +1066,8 @@ fn run(
 
     let mut skip = 0i32;
     let mut variable_duration = OPUS_FRAMESIZE_ARG;
+    #[cfg(feature = "osce-training-data")]
+    let mut reseed_rand = false;
     let mut enc: Option<Box<Encoder>> = None;
     if !decode_only {
         let mut e = match Encoder::new_raw(sampling_rate, channels, application) {
@@ -951,6 +1097,12 @@ fn run(
         ctl_ignored(e.ctl_set(OPUS_SET_EXPERT_FRAME_DURATION_REQUEST, variable_duration));
         if dred_duration > 0 {
             ctl_ignored(e.ctl_set(OPUS_SET_DRED_DURATION_REQUEST, dred_duration));
+        }
+        #[cfg(feature = "osce-training-data")]
+        {
+            ctl_ignored(e.ctl_set(OPUS_SET_FORCE_MODE_REQUEST, MODE_SILK_ONLY));
+            // srand(0), applied where `rng` is created below (nothing draws before it).
+            reseed_rand = true;
         }
         #[cfg(feature = "qext")]
         ctl_ignored(e.ctl_set(OPUS_SET_QEXT_REQUEST, enable_qext));
@@ -1057,6 +1209,10 @@ fn run(
     let _ = weights;
 
     let mut rng = GlibcRand::default();
+    #[cfg(feature = "osce-training-data")]
+    if reseed_rand {
+        rng = GlibcRand::new(0);
+    }
     let mut stop = false;
     let mut count = 0i32;
     let mut count_act = 0i32;
@@ -1123,6 +1279,13 @@ fn run(
                 ctl_ignored(e.ctl_set(OPUS_SET_FORCE_MODE_REQUEST, m[0]));
                 ctl_ignored(e.ctl_set(OPUS_SET_FORCE_CHANNELS_REQUEST, m[3]));
                 frame_size = m[2] * sampling_rate / 48000;
+            }
+            #[cfg(feature = "osce-training-data")]
+            if silk_random_switching != 0 {
+                silk_frame_counter += 1;
+                if silk_frame_counter % silk_random_switching == 0 {
+                    new_random_setting(e, &mut rng, stdout)?;
+                }
             }
             let fsz = format.size();
             // A negative count (frame size shrunk below the carried-over samples) is undefined
@@ -1233,6 +1396,8 @@ fn run(
                 Some(v) => lost = v,
                 None => lost = 0,
             }
+        } else if let Some(l) = sim_loss_draw(&mut sim_loss, &mut rng) {
+            lost = l;
         } else {
             lost = i32::from(packet_loss_perc > 0 && rng.next_value() % 100 < packet_loss_perc);
         }

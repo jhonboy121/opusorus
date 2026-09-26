@@ -55,6 +55,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | `dnn_plc` | `dnn/fargan.rs`, `dnn/lpcnet_plc.rs` | ✅ | dnn_plc.rs: FARGAN + neural PLC sequences vs C — bit-exact |
 | `dnn_dred` | `dnn/dred_*.rs` | ✅ | dnn_dred.rs: RDOVAE enc/dec, latents, payload bytes, dred_ec_decode — bit-exact |
 | `dnn_osce` | `dnn/osce.rs`, `dnn/osce_features.rs` | ✅ | dnn_osce.rs: LACE/NoLACE/BBWENet + features — bit-exact |
+| `dnn_extras` (phase G) | `dnn/lossgen.rs`, `dnn/lossgen_data.rs` (`lossgen`), `osce_training_data.rs` + hooks in `encoder.rs` / `dnn/osce.rs` (`osce-training-data`), `dnn/embedded.rs` check (`dnn-debug-float`); tools: `-sim_loss`, `-silk_random_switching`, `lossgen_demo` | ✅ | lossgen.rs (tables, decisions + GRU states for 91 seed/percentage streams, blob-loaded models, lossgen_demo vs C), osce_training_data.rs (13–14 opus_demo runs, all training files byte-identical to C), dnn_debug_float.rs (float copies, float-path layers, PLC/OSCE decoding vs the debug-float oracle) + every DNN suite with `dnn-debug-float`; vectors.rs `-sim_loss` cases — bit-exact |
 | `dnn_integration` | decoder/encoder/celt_decoder/silk decoder hooks, `Decoder::dred_decode*`, DRED parse/process, DNN blob CTLs | ✅ | dnn_integration.rs: 11k decode calls (neural PLC, LACE/NoLACE, BWE), 1259 DRED packets bytes-identical, 2000 DRED parses — bit-exact; all opus_* suites pass with DNN features |
 
 ## Infrastructure

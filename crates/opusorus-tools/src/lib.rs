@@ -8,6 +8,10 @@
 //!   `-enable_osce_bwe`; with `dred`, DRED decoding after packet losses (`deep-plc`, `dred`,
 //!   `osce` take the weights from `weights_blob.bin`, or compiled in with
 //!   `dnn-weights-embedded`).
+//!   With `lossgen`, `-sim_loss` (generative packet loss); with `osce-training-data`, the
+//!   OSCE training-data options (libopus `--enable-lossgen` / `--enable-osce-training-data`).
+//! * `lossgen_demo::lossgen_demo_main` (`dnn/lossgen_demo.c`, feature `lossgen`): prints a loss
+//!   pattern from the generative loss model (`lossgen_demo` binary).
 //! * [`compare::opus_compare`] (`src/opus_compare.c`): the RFC 6716 / RFC 8251 conformance
 //!   quality metric used with the decoder test vectors (`opus_compare` binary).
 //! * `compare::qext_compare` (`src/qext_compare.c`, feature `qext`): the Opus HD (QEXT) quality
@@ -32,3 +36,5 @@
 
 pub mod compare;
 pub mod demo;
+#[cfg(feature = "lossgen")]
+pub mod lossgen_demo;

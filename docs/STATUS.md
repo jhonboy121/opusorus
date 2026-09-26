@@ -23,6 +23,7 @@ resolution, with and without QEXT and custom modes; its decoder passes the RFC 8
 | QEXT (Opus HD) | ✅ bit-exact, Opus HD vectors pass |
 | Custom modes | ✅ bit-exact |
 | DNN: deep PLC / DRED / OSCE+BWE | ✅ integrated, bit-exact vs C built with the same features (weights via runtime blob) |
+| Phase G DNN options: `dnn-debug-float`, `osce-training-data`, `lossgen` | ✅ each vs the oracle built with the same define (`just test-dnn-extras`): all DNN suites + opus_demo (161 cases) bit-exact with float-weight models (runtime and embedded blob); training files byte-identical to the C opus_demo's over 13 runs (14 with `dred`); loss model decisions + GRU states bit-exact over 91 seed/percentage streams, `opus_demo -sim_loss` and `lossgen_demo` identical to C (float and fixed-point) |
 | Fixed-point build (`fixed-point`, `fixed-res24`, × `qext`, `custom-modes`) | ✅ bit-exact vs a fixed-point libopus oracle: all differential suites, libopus test-suite port (host + wasmtime), opus_demo vs the fixed C opus_demo, RFC 8251 vectors pass opus_compare (48 kHz quality 97.15/98.68 % 16-bit, 97.36/98.88 % 24-bit), Opus HD vectors pass qext_compare with `fixed-res24` |
 | Debug-build overflow hardening (public API) | ✅ C-UB overflows reachable from the API wrap like C (stereo LFE `stereo_itheta`; res24 decoder gain `MULT32_32_Q16`; CELT `alloc_trim_analysis`); public-API sweep 101 200 cases × 6 builds vs C and 40 000 Rust-only cases × 6 builds under wasmtime, 0 panics |
 | Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |

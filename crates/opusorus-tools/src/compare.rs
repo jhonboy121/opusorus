@@ -235,6 +235,13 @@ pub(crate) const fn c_isspace(b: u8) -> bool {
 /// saturating to the `long` range, then truncated to `int`).
 #[must_use]
 pub fn c_atoi(s: &str) -> i32 {
+    c_atol(s) as i32
+}
+
+/// glibc `atol` on LP64: `strtol(s, NULL, 10)` (leading whitespace, optional sign, decimal
+/// digits, saturating to the 64-bit `long` range).
+#[must_use]
+pub fn c_atol(s: &str) -> i64 {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() && c_isspace(b[i]) {
@@ -256,15 +263,14 @@ pub fn c_atoi(s: &str) -> i32 {
         }
         i += 1;
     }
-    let v = if overflow {
+    if overflow {
         if neg { i64::MIN } else { i64::MAX }
     } else if neg {
         acc
     } else {
         // `acc == i64::MIN` means the positive value overflows `long`: saturate like strtol.
         acc.saturating_neg()
-    };
-    v as i32
+    }
 }
 
 /// glibc `atof` (`strtod`) for the decimal and `inf`/`nan` forms: parses the longest valid

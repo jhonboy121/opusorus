@@ -17,6 +17,12 @@
 //! `init_*` result) and leaves a `DredDecoder` unloaded (C: `opus_dred_decoder_init` returns
 //! `OPUS_UNIMPLEMENTED`). The structure of the blob is validated at compile time.
 //!
+//! The compiled-in tables of libopus depend on `DISABLE_DEBUG_FLOAT`: by default the
+//! int8-quantized layers have no float copy; with `--enable-dnn-debug-float` (feature
+//! `dnn-debug-float`) they have one and the DNN computes with it. The embedded blob must match
+//! the feature (checked at compile time): generate it with `scripts/gen_dnn_blob.sh`, or
+//! `scripts/gen_dnn_blob.sh --debug-float` for `dnn-debug-float`.
+//!
 //! `set_dnn_blob` still works and replaces the embedded models.
 //!
 //! With `std`, each model of the embedded blob is bound once per process and shared (`Arc`)
@@ -78,9 +84,105 @@ const _: () = assert!(
     "OPUSORUS_DNN_BLOB is not a libopus DNN weight blob (generate one with scripts/gen_dnn_blob.sh)"
 );
 
+/// The NUL-terminated name of the record at `pos` (a well-formed blob, see [`is_weight_blob`]).
+const fn record_name(b: &[u8], pos: usize) -> &[u8] {
+    let name = b
+        .split_at(pos + 20)
+        .1
+        .split_at(super::nnet::WEIGHT_BLOCK_SIZE - 20)
+        .0;
+    let mut n = 0;
+    while name[n] != 0 {
+        n += 1;
+    }
+    name.split_at(n).0
+}
+
+/// Offset of the record after the one at `pos` (a well-formed blob).
+const fn next_record(b: &[u8], pos: usize) -> usize {
+    let block_size = i32::from_le_bytes([b[pos + 16], b[pos + 17], b[pos + 18], b[pos + 19]]);
+    pos + super::nnet::WEIGHT_BLOCK_SIZE + block_size as usize
+}
+
+/// Counts the int8-quantized weight arrays (`<layer>_weights_int8`) of a well-formed blob that
+/// are / are not followed by their float copy `<layer>_weights_float`, as the generated tables
+/// order them when `DISABLE_DEBUG_FLOAT` is undefined (`--enable-dnn-debug-float`).
+const fn int8_float_copies(b: &[u8]) -> (usize, usize) {
+    const INT8: &[u8] = b"_int8";
+    const FLOAT: &[u8] = b"_float";
+    let (mut with, mut without) = (0, 0);
+    let mut pos = 0;
+    while pos < b.len() {
+        let name = record_name(b, pos);
+        let next = next_record(b, pos);
+        if name.len() > INT8.len() && ends_with(name, INT8) {
+            let prefix = name.split_at(name.len() - INT8.len()).0;
+            let mut copy = false;
+            if next < b.len() {
+                let n2 = record_name(b, next);
+                copy = n2.len() == prefix.len() + FLOAT.len()
+                    && starts_with(n2, prefix)
+                    && ends_with(n2, FLOAT);
+            }
+            if copy {
+                with += 1;
+            } else {
+                without += 1;
+            }
+        }
+        pos = next;
+    }
+    (with, without)
+}
+
+const fn starts_with(s: &[u8], p: &[u8]) -> bool {
+    if s.len() < p.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < p.len() {
+        if s[i] != p[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn ends_with(s: &[u8], p: &[u8]) -> bool {
+    if s.len() < p.len() {
+        return false;
+    }
+    starts_with(s.split_at(s.len() - p.len()).1, p)
+}
+
+#[cfg(feature = "dnn-debug-float")]
+const _: () = assert!(
+    int8_float_copies(BLOB).1 == 0,
+    "feature dnn-debug-float: OPUSORUS_DNN_BLOB lacks the float copies of the int8 layers \
+     (generate it with scripts/gen_dnn_blob.sh --debug-float)"
+);
+#[cfg(not(feature = "dnn-debug-float"))]
+const _: () = assert!(
+    int8_float_copies(BLOB).0 == 0,
+    "OPUSORUS_DNN_BLOB has float copies of the int8 layers (a --debug-float blob): enable \
+     the dnn-debug-float feature or generate the blob with scripts/gen_dnn_blob.sh"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_float_copies_match_the_feature() {
+        let (with, without) = int8_float_copies(DNN_BLOB);
+        assert!(with + without > 0, "the models have int8 layers");
+        if cfg!(feature = "dnn-debug-float") {
+            assert_eq!(without, 0);
+        } else {
+            assert_eq!(with, 0);
+        }
+    }
 
     #[test]
     fn blob_validation() {

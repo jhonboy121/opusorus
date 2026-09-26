@@ -5,6 +5,8 @@ targets := "wasm32-unknown-unknown wasm32-wasip1 aarch64-linux-android armv7-lin
 # Weight blob embedded by the `dnn-weights-embedded` feature; made by the `dnn-blob` recipe.
 # Override with an absolute path in the environment.
 export OPUSORUS_DNN_BLOB := env_var_or_default("OPUSORUS_DNN_BLOB", justfile_directory() + "/target/dnn/weights_blob.bin")
+# The same with the float copies of the int8 layers (`dnn-debug-float`, `dnn-blob-debug-float`).
+export OPUSORUS_DNN_DEBUG_FLOAT_BLOB := env_var_or_default("OPUSORUS_DNN_DEBUG_FLOAT_BLOB", justfile_directory() + "/target/dnn/weights_blob_debug_float.bin")
 
 # `--all-features` is not a valid configuration: `fixed-point` replaces the float codec (not
 # additive) and upstream refuses fixed-point together with the DNN features. These lists are the
@@ -27,6 +29,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features qext,custom-modes,deep-plc,dred,osce
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features osce-training-data,dnn-debug-float,lossgen
 
 # Format check.
 fmt:
@@ -39,6 +42,9 @@ clippy: dnn-blob
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/fixed-point -- -D warnings
     cargo clippy -p opusorus --no-default-features -- -D warnings
     cargo clippy -p opusorus --no-default-features --features fixed-point -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/qext,opusorus-conformance/dred,opusorus-conformance/osce-training-data,opusorus-conformance/dnn-debug-float,opusorus-conformance/lossgen -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/fixed-res24,opusorus-conformance/lossgen -- -D warnings
+    cargo clippy -p opusorus --no-default-features --features lossgen -- -D warnings
 
 # All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
 # loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds: the full
@@ -78,6 +84,25 @@ test-dnn: dnn-blob
     cargo test -p opusorus-conformance --features qext,dred,osce,opusorus-tools/dred,opusorus-tools/dnn-weights-embedded --test vectors
     cargo test -p opusorus-capi --features qext,dred
 
+# The DNN build options of phase G vs the oracle built with the same defines: `lossgen`
+# (loss model + `opus_demo -sim_loss` + `lossgen_demo`, float and fixed-point),
+# `dnn-debug-float` (every DNN suite and the opus_demo comparison without DISABLE_DEBUG_FLOAT,
+# runtime-loaded and compiled-in debug-float weights) and `osce-training-data` (its own test
+# only: every SILK encode/decode of the other suites would write training files).
+# Phase-G DNN options (lossgen, dnn-debug-float, osce-training-data) vs the matching oracle.
+test-dnn-extras: dnn-blob dnn-blob-debug-float
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    cargo test -p opusorus --features lossgen --lib
+    cargo test -p opusorus-tools --features lossgen
+    cargo test -p opusorus-conformance --features lossgen --test lossgen --test vectors
+    cargo test -p opusorus-conformance --features fixed-res24,lossgen --test lossgen --test vectors
+    OPUSORUS_DNN_BLOB="$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" cargo test -p opusorus-conformance --features qext,deep-plc,dred,osce,dnn-debug-float,lossgen,opusorus-tools/dred
+    OPUSORUS_DNN_BLOB="$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" cargo test -p opusorus --features qext,dred,osce,dnn-weights-embedded,dnn-debug-float --lib
+    OPUSORUS_DNN_BLOB="$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" cargo test -p opusorus-conformance --features qext,dred,osce,dnn-debug-float,opusorus-tools/dred,opusorus-tools/dnn-weights-embedded --test vectors
+    cargo test -p opusorus-conformance --features osce-training-data --test osce_training_data
+    cargo test -p opusorus-conformance --features osce-training-data,dred,qext --test osce_training_data
+
 # Extract the DNN model data (vendor/libopus/dnn/*_data.c, gitignored) if missing.
 dnn-models:
     #!/usr/bin/env bash
@@ -89,6 +114,12 @@ dnn-blob: dnn-models
     #!/usr/bin/env bash
     set -euo pipefail
     [ -f "$OPUSORUS_DNN_BLOB" ] || ./scripts/gen_dnn_blob.sh "$OPUSORUS_DNN_BLOB"
+
+# Generate the debug-float DNN weight blob at $OPUSORUS_DNN_DEBUG_FLOAT_BLOB if missing.
+dnn-blob-debug-float: dnn-models
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f "$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" ] || ./scripts/gen_dnn_blob.sh --debug-float "$OPUSORUS_DNN_DEBUG_FLOAT_BLOB"
 
 # Build the library for every supported platform (+ no_std bare-metal).
 cross:

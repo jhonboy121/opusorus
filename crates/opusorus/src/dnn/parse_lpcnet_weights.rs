@@ -331,16 +331,28 @@ pub fn write_weights(list: &[WeightArray<'_>], out: &mut Vec<u8>) {
 
 /// Cache of one model bound from the embedded weight blob (`dnn-weights-embedded` with `std`):
 /// the model is bound once per process and shared by every state that loads it.
-#[cfg(all(feature = "std", feature = "dnn-weights-embedded"))]
+#[cfg(all(
+    feature = "std",
+    feature = "deep-plc",
+    feature = "dnn-weights-embedded"
+))]
 pub type ModelCache<T> = std::sync::OnceLock<Result<Arc<T>>>;
 
 /// Cache of one model bound from the embedded weight blob: without `std` (no `OnceLock`) or
 /// without an embedded blob there is nothing to cache.
-#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+#[cfg(not(all(
+    feature = "std",
+    feature = "deep-plc",
+    feature = "dnn-weights-embedded"
+)))]
 #[derive(Debug)]
 pub struct ModelCache<T>(core::marker::PhantomData<fn() -> T>);
 
-#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+#[cfg(not(all(
+    feature = "std",
+    feature = "deep-plc",
+    feature = "dnn-weights-embedded"
+)))]
 impl<T> ModelCache<T> {
     /// An empty cache.
     #[must_use]
@@ -349,7 +361,11 @@ impl<T> ModelCache<T> {
     }
 }
 
-#[cfg(not(all(feature = "std", feature = "dnn-weights-embedded")))]
+#[cfg(not(all(
+    feature = "std",
+    feature = "deep-plc",
+    feature = "dnn-weights-embedded"
+)))]
 impl<T> Default for ModelCache<T> {
     fn default() -> Self {
         Self::new()
@@ -365,7 +381,11 @@ impl<T> Default for ModelCache<T> {
 /// # Errors
 /// As `parse_weights` / `init`.
 #[cfg_attr(
-    not(all(feature = "std", feature = "dnn-weights-embedded")),
+    not(all(
+        feature = "std",
+        feature = "deep-plc",
+        feature = "dnn-weights-embedded"
+    )),
     expect(
         unused_variables,
         reason = "the cache only exists for the embedded blob with std"
@@ -376,7 +396,11 @@ pub fn load_shared<T>(
     init: fn(&[WeightArray<'_>]) -> Result<T>,
     cache: &'static ModelCache<T>,
 ) -> Result<Arc<T>> {
-    #[cfg(all(feature = "std", feature = "dnn-weights-embedded"))]
+    #[cfg(all(
+        feature = "std",
+        feature = "deep-plc",
+        feature = "dnn-weights-embedded"
+    ))]
     if core::ptr::eq(data, super::embedded::DNN_BLOB) {
         return cache.get_or_init(|| bind(data, init)).clone();
     }

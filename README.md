@@ -23,6 +23,9 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
 | Opus HD / scalable quality extension (96 kHz) | `qext` | upstream `--enable-qext` |
 | Opus Custom modes | `custom-modes` | upstream `--enable-custom-modes` |
 | Deep PLC (FARGAN), DRED, OSCE (LACE/NoLACE) + BWE | `deep-plc`, `dred`, `osce` | weights loaded at runtime from a libopus weight blob (`scripts/fetch_dnn_models.sh`) |
+| DNN debug build: float weights for the int8-quantized layers | `dnn-debug-float` | upstream `--enable-dnn-debug-float`; embedded weights from `scripts/gen_dnn_blob.sh --debug-float` |
+| OSCE training data dump (`clean_hp.s16`, `features_*`, `noisy_16k.s16` in the working directory) | `osce-training-data` | upstream `--enable-osce-training-data` (implies `osce`); `opus_demo -silk_random_switching` |
+| Generative packet loss model (`opusorus::lossgen`, `opus_demo -sim_loss`, `lossgen_demo`) | `lossgen` | upstream `--enable-lossgen`; model compiled in; float or fixed-point |
 | Fixed-point build (16- or 24-bit resolution) | `fixed-point`, `fixed-res24` | upstream `--enable-fixed-point` (+ `ENABLE_RES24`), see [docs/FIXED_POINT.md](docs/FIXED_POINT.md) |
 | `std` platform libm (bit-exact with C on the same platform) | `std` (default) | without it: pure-Rust `libm`, `no_std` |
 

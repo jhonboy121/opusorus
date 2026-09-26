@@ -6,7 +6,9 @@
 
 use alloc::vec::Vec;
 
-pub use super::nnet_arch::{compute_activation_inplace, compute_conv2d, compute_linear};
+#[cfg(feature = "deep-plc")]
+pub use super::nnet_arch::compute_conv2d;
+pub use super::nnet_arch::{compute_activation_inplace, compute_linear};
 use super::vec::MAX_INPUTS;
 
 /// `ACTIVATION_LINEAR`.

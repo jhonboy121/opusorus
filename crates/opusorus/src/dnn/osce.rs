@@ -1844,6 +1844,72 @@ fn scale_to_i16(x: f32) -> i16 {
     float2int(tmp) as i16
 }
 
+/// The `ENABLE_OSCE_TRAINING_DATA` block of dnn/osce.c:osce_enhance_frame (feature
+/// `osce-training-data`): appends the frame's features and the unenhanced signal to the
+/// training files (`crate::osce_training_data`).
+#[cfg(feature = "osce-training-data")]
+fn write_training_data(
+    ps_dec_osce: &SilkOsceStruct,
+    dec: OsceDecInfo,
+    ps_dec_ctrl: &SilkDecoderControl,
+    xq: &[i16],
+    num_bits: i32,
+) {
+    use crate::osce_training_data as td;
+    use crate::silk::define::{LTP_ORDER, SUB_FRAME_LENGTH_MS, TYPE_VOICED};
+    use alloc::vec::Vec;
+    // C opens all seven files on the first call.
+    td::open_all(&[
+        td::FEATURES_LPC,
+        td::FEATURES_GAIN,
+        td::FEATURES_LTP,
+        td::FEATURES_PERIOD,
+        td::NOISY_16K,
+        td::FEATURES_NUM_BITS,
+        td::FEATURES_NUM_BITS_SMOOTH,
+    ]);
+    td::write(td::FEATURES_NUM_BITS, &num_bits.to_ne_bytes());
+    td::write(
+        td::FEATURES_NUM_BITS_SMOOTH,
+        &ps_dec_osce.features.numbits_smooth.to_ne_bytes(),
+    );
+    let nb_subfr = dec.nb_subfr as usize;
+    for k in 0..nb_subfr {
+        // gain
+        let tmp = ps_dec_ctrl.gains_q16[k] as f32 / (1u32 << 16) as f32;
+        td::write(td::FEATURES_GAIN, &tmp.to_ne_bytes());
+
+        // LPC
+        let mut lpc_buffer = [0f32; 16];
+        let a_q12 = &ps_dec_ctrl.pred_coef_q12[k >> 1];
+        for (l, &a) in lpc_buffer.iter_mut().zip(&a_q12[..dec.lpc_order as usize]) {
+            *l = f32::from(a) / (1u32 << 12) as f32;
+        }
+        let b: Vec<u8> = lpc_buffer.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        td::write(td::FEATURES_LPC, &b);
+
+        // LTP
+        let b_q14 = &ps_dec_ctrl.ltp_coef_q14[k * LTP_ORDER as usize..];
+        let b: Vec<u8> = b_q14[..5]
+            .iter()
+            .flat_map(|&v| (f32::from(v) / (1u32 << 14) as f32).to_ne_bytes())
+            .collect();
+        td::write(td::FEATURES_LTP, &b);
+
+        // periods
+        let itmp = if dec.signal_type == TYPE_VOICED {
+            ps_dec_ctrl.pitch_l[k] as i16
+        } else {
+            0
+        };
+        td::write(td::FEATURES_PERIOD, &itmp.to_ne_bytes());
+    }
+    // `psDec->nb_subfr * psDec->subfr_length` samples (subfr_length = 5 ms at fs_kHz).
+    let n = nb_subfr * (SUB_FRAME_LENGTH_MS * dec.fs_khz) as usize;
+    let b: Vec<u8> = xq[..n].iter().flat_map(|v| v.to_ne_bytes()).collect();
+    td::write(td::NOISY_16K, &b);
+}
+
 /// Port of dnn/osce.c:osce_enhance_frame: enhances one decoded SILK frame `xq` in place.
 ///
 /// Only 20 ms frames at 16 kHz (320 samples) are enhanced; otherwise the state is reset.
@@ -1919,6 +1985,9 @@ pub fn osce_enhance_frame(
             out_buffer.copy_from_slice(&in_buffer);
         }
     }
+
+    #[cfg(feature = "osce-training-data")]
+    write_training_data(ps_dec_osce, dec, ps_dec_ctrl, xq, num_bits);
 
     if ps_dec_osce.features.reset > 1 {
         out_buffer.copy_from_slice(&in_buffer);
