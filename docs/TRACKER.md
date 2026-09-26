@@ -80,7 +80,6 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 |---|---|
 | Memory footprint | `Decoder::get_size`: Rust 75 KB (1 ch) vs C 18 KB without DNN, 245–280 KB vs 192–200 KB with OSCE. Causes: preallocated 120 ms output scratch (C uses stack), inline OSCE state. Plan: allocate DNN state lazily when weights load, shrink scratch. |
 | DNN fuzz targets, custom-modes fuzz target | fuzz crate has no DNN/OpusCustom targets yet |
-| C ABI size | ≈150 KB std panic/backtrace + ≈90 KB panic locations: needs a no_std capi (panic handler, malloc allocator, libm bridge) |
 | FFT/MDCT vectorisation | contiguous per-stage twiddles could let LLVM vectorise butterflies (still bit-exact) |
 | Shared parsed DNN models | each Decoder/Encoder re-parses the embedded 4 MB blob; share via `Arc` |
 

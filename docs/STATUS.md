@@ -86,8 +86,8 @@ are quantised by 64 KiB segment alignment on aarch64):
 
 Breakdown of the Rust C ABI: ≈390 KB codec code, ≈150 KB Rust std panic/backtrace machinery
 (gimli/addr2line/demangle), ≈90 KB panic location records (~1,400 sites), ≈47 KB `.eh_frame`,
-≈16 KB C ABI glue. Removing std from the C ABI (own panic handler/allocator/libm bridge) is the
-remaining big lever; see TRACKER open follow-ups.
+≈16 KB C ABI glue. The C ABI is kept only as a verification harness (upstream C tests), not as a shipped product
+(PLAN D-024), so its size is not optimised further.
 
 ## Fuzzing
 
