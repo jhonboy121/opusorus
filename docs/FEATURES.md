@@ -50,6 +50,13 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | O14 | Random encoder decisions from a process-wide glibc-compatible `rand()` (`opusorus::glibc_rand`) | `--enable-fuzzing` (`FUZZING`) | `fuzzing` | ✅ |
 | O15 | Pre-RFC 8251 bitstream behaviour (RFC 6716 folding, mono phase inversion on); passes the RFC 6716 vectors | `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`) | `disable-rfc8251` | ✅ |
 
+Upstream options intentionally not offered (PLAN D-026): `--disable-hardening` (only removes
+safety checks; the port is always hardened), `--enable-rtcd/asm/intrinsics/check-asm`,
+`--disable-dot-product` (C SIMD/assembly selection; the port has no C SIMD kernels), and
+`SMALL_FOOTPRINT` (not exposed by any upstream build system). Upstream-internal debug/training
+instrumentation that no build option enables (`RESYNTH`, `MLP_TRAINING`, `WRITE_FEATURES`,
+`DEBUG_PRINT`, `silk/debug.c` timers) is not ported.
+
 ## Tooling & quality
 | # | Item | Status |
 |---|---|---|
@@ -60,5 +67,5 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | T5 | Fuzzing (cargo-fuzz): decoder, encoder, repacketizer, multistream, extensions, differential | ✅ |
 | T6 | Benchmarks (criterion) Rust vs C, reported in STATUS | ✅ |
 | T7 | Shared library size comparison, reported in STATUS | ✅ |
-| T8 | Cross-platform builds: wasm32, Android (arm64/armv7/x86_64), iOS (+sim), host, no_std | ✅ (foundation) |
+| T8 | Cross-platform builds: wasm32, Android (arm64/armv7/x86_64), iOS (+sim), host, no_std (float and fixed-point) | ✅ |
 | T9 | `opus_demo`-compatible CLI (`opusorus-tools`) | ✅ |
