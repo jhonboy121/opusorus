@@ -43,7 +43,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | `dnn_plc` | `dnn/fargan.rs`, `dnn/lpcnet_plc.rs` | ✅ | dnn_plc.rs: FARGAN + neural PLC sequences vs C — bit-exact |
 | `dnn_dred` | `dnn/dred_*.rs` | ✅ | dnn_dred.rs: RDOVAE enc/dec, latents, payload bytes, dred_ec_decode — bit-exact |
 | `dnn_osce` | `dnn/osce.rs`, `dnn/osce_features.rs` | ✅ | dnn_osce.rs: LACE/NoLACE/BBWENet + features — bit-exact |
-| `dnn_integration` (wire deep PLC/DRED/OSCE into Opus/SILK/CELT + opus_dred_* API + DNN blob CTLs) | | ⬜ | opus_decoder/encoder tests currently fail with DNN features on (expected until integration) |
+| `dnn_integration` | decoder/encoder/celt_decoder/silk decoder hooks, `Decoder::dred_decode*`, DRED parse/process, DNN blob CTLs | ✅ | dnn_integration.rs: 11k decode calls (neural PLC, LACE/NoLACE, BWE), 1259 DRED packets bytes-identical, 2000 DRED parses — bit-exact; all opus_* suites pass with DNN features |
 
 ## Infrastructure
 
@@ -54,12 +54,18 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | Oracle crate (libopus 1.6.1 via cc) | ✅ | float, no intrinsics, -ffp-contract=off, qext/custom-modes features |
 | Conformance crate | ✅ | shared Rng, signal generators, bit-exact asserts |
 | justfile (check/clippy/test/cross/test-wasm/vectors/bench/size/fuzz) | ✅ | |
-| RFC test vectors | ⬜ | |
-| C ABI crate | ⬜ | |
-| Fuzz targets | ⬜ | |
-| Benchmarks | ⬜ | |
-| Size report | ⬜ | |
+| RFC 8251 + Opus HD vectors (`tests/vectors.rs`, `scripts/run_vectors.sh`) | ✅ | bit-exact, same quality numbers as C |
+| C ABI crate `opusorus-capi` (libopusorus.so/.a) | ✅ | upstream C tests all pass; `just cross-capi` builds staticlib for Android/iOS |
+| Fuzz targets (`fuzz/`) | 🟨 | differential vs C + invariants; runs in progress |
+| Benchmarks `opusorus-bench` (criterion, Rust vs C scalar vs C NEON) | ✅ | see STATUS |
+| Size report (`scripts/size_report.sh`) | ✅ | see STATUS |
+| opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C |
+| Rust port of libopus tests (`crates/opusorus/tests`, `libopus_unit.rs`) | ✅ | host + wasm |
 
 ## Performance log
 
-_(filled in phase E; see docs/STATUS.md for the latest numbers)_
+| Date | Item | Result |
+|---|---|---|
+| 2026-09-26 | Full benchmark suite (layer E) | Rust ≈ C scalar (0.87–1.05×), SILK decode 1.39×; vs C NEON 1.07–1.37× |
+| 2026-09-26 | CELT decoder (layer C) | 0.92× C time |
+| 2026-09-26 | Opus decoder (layer D) | 0.86–0.94× C time |
