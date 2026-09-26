@@ -2,6 +2,10 @@
 //!
 //! Library core of the command-line tools shipped with libopus v1.6.1, ported to safe Rust:
 //!
+//! * [`demo::opus_demo_main`] (`src/opus_demo.c`): the reference encoder/decoder front end
+//!   (`opus_demo` binary), which the conformance procedure uses to decode the test vectors.
+//!   With this crate's `qext` feature it accepts 96 kHz and `-qext`; with `osce`,
+//!   `-enable_osce_bwe`.
 //! * [`compare::opus_compare`] (`src/opus_compare.c`): the RFC 6716 / RFC 8251 conformance
 //!   quality metric used with the decoder test vectors (`opus_compare` binary).
 //! * `compare::qext_compare` (`src/qext_compare.c`, feature `qext`): the Opus HD (QEXT) quality
@@ -20,3 +24,4 @@
 )]
 
 pub mod compare;
+pub mod demo;

@@ -1,0 +1,1026 @@
+//! Conformance vectors and the `opus_demo` port.
+//!
+//! * `rfc8251_vectors`: the official decoder conformance procedure of `tests/run_vectors.sh`
+//!   (RFC 6716 as updated by RFC 8251): all 12 test vectors decoded by the Rust `opus_demo`
+//!   (`-d <rate> <channels> -ignore_extensions`) at 48, 24, 16, 12 and 8 kHz, mono and stereo,
+//!   each checked with the Rust `opus_compare` against `testvectorNN.dec` or `testvectorNNm.dec`;
+//!   prints the average quality like the script.
+//! * `opushd_vectors` (feature `qext`): `tests/run_opushd_vectors.sh`: 96 kHz float decoding of
+//!   the RFC vectors (vs `testvectorNN_96k.f32`), the Opus HD vectors and the Opus HD fuzzing
+//!   vectors, checked with the Rust `qext_compare` and the script's thresholds.
+//! * `opus_demo_matches_c` (unix): the Rust `opus_demo` against the unmodified C
+//!   `src/opus_demo.c`, compiled with the system C compiler (`$CC`, default `cc`) and linked
+//!   with the oracle's `libopus.a` (the one built for this test binary's configuration). A matrix
+//!   of encode (`-e`), decode (`-d`) and encode+decode runs over every application, rate, PCM
+//!   format and option (including simulated loss, which uses glibc `rand()`), plus argument and
+//!   input errors, must give identical output files, stdout/stderr text and exit status. The only
+//!   expected difference is the version line: the oracle is built without `PACKAGE_VERSION`
+//!   (`libopus unknown`).
+//!
+//! The vectors are read from `testdata/vectors` (see `scripts/fetch_vectors.sh`), searched
+//! upwards from this crate (so git worktrees find the main checkout's copy) or at
+//! `$OPUSORUS_VECTORS`; the vector tests print a note and pass if they are absent. The C
+//! comparison is skipped (with a note) without a C compiler, and with the DNN features, whose
+//! decoder integration (DRED decoding in particular) is not in the Rust `opus_demo` yet.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "test code: failures should panic; the procedure log goes to stdout, notes to stderr"
+)]
+
+use opusorus_conformance::signals;
+use opusorus_tools::compare::opus_compare_main;
+use opusorus_tools::demo::opus_demo_main;
+use std::path::{Path, PathBuf};
+
+/// Per-test scratch directory.
+fn tmp_dir(name: &str) -> PathBuf {
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("vectors")
+        .join(name);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Locates `testdata/vectors/<sub>` if present.
+fn vectors_dir(sub: &str) -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("OPUSORUS_VECTORS") {
+        let p = PathBuf::from(v).join(sub);
+        return p.is_dir().then_some(p);
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .map(|a| a.join("testdata/vectors").join(sub))
+        .find(|p| p.is_dir())
+}
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn path_str(p: &Path) -> &str {
+    p.to_str().unwrap()
+}
+
+/// Result of one tool run.
+#[derive(Debug, PartialEq, Eq)]
+struct Run {
+    /// Process exit status (low 8 bits, as the OS reports it).
+    status: u8,
+    stdout: String,
+    stderr: String,
+}
+
+/// Runs the Rust `opus_demo` in-process.
+fn rust_demo(args: &[String]) -> Run {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = opus_demo_main(args, &mut out, &mut err).unwrap();
+    Run {
+        status: code as u8,
+        stdout: String::from_utf8(out).unwrap(),
+        stderr: String::from_utf8(err).unwrap(),
+    }
+}
+
+/// Runs a Rust compare front end in-process, returning `(exit code, stderr)`.
+fn rust_compare(
+    f: fn(&[String], &mut dyn std::io::Write) -> std::io::Result<i32>,
+    args: &[&str],
+) -> (i32, String) {
+    let mut err = Vec::new();
+    let code = f(&strings(args), &mut err).unwrap();
+    (code, String::from_utf8(err).unwrap())
+}
+
+/// awk's default number output (`OFMT` = `%.6g`, integral values as integers).
+fn awk_num(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let sci = format!("{v:.5e}");
+    let (mant, exp) = sci.split_once('e').unwrap();
+    let exp: i32 = exp.parse().unwrap();
+    let trim = |s: &str| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    if !(-4..6).contains(&exp) {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", trim(mant), exp.abs())
+    } else {
+        trim(&format!("{v:.*}", (5 - exp) as usize))
+    }
+}
+
+/// The script's average: `grep quality log | awk '{sum+=$4} END {if (NR == 12) sum /= 12; else
+/// sum = 0; print sum}'`.
+fn log_average(log: &str) -> f64 {
+    let vals: Vec<f64> = log
+        .lines()
+        .filter(|l| l.contains("quality"))
+        .map(|l| l.split_whitespace().nth(3).unwrap().parse::<f64>().unwrap())
+        .collect();
+    if vals.len() == 12 {
+        vals.iter().sum::<f64>() / 12.0
+    } else {
+        0.0
+    }
+}
+
+#[test]
+fn awk_number_format() {
+    assert_eq!(awk_num(0.0), "0");
+    assert_eq!(awk_num(100.0), "100");
+    assert_eq!(awk_num(99.575), "99.575");
+    assert_eq!(awk_num(98.7666666666), "98.7667");
+    assert_eq!(awk_num(1.0 / 3.0), "0.333333");
+    assert_eq!(awk_num(1234567.5), "1.23457e+06");
+}
+
+// ---------------------------------------------------------------------------------------------
+// tests/run_vectors.sh
+// ---------------------------------------------------------------------------------------------
+
+/// Maps `f` over `items` on all available cores; results in item order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap()
+        .min(items.len().max(1));
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= items.len() {
+                        break;
+                    }
+                    let r = f(&items[i]);
+                    results.lock().unwrap()[i] = Some(r);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect()
+}
+
+/// One vector of `tests/run_vectors.sh`: `opus_demo -d <rate> <channels> -ignore_extensions
+/// testvectorNN.bit tmp.out`, then `opus_compare [-s] -r <rate>` against `testvectorNN.dec`
+/// (log 1) and `testvectorNNm.dec` (log 2).
+#[derive(Debug)]
+struct VectorStep {
+    exists: bool,
+    decoded: bool,
+    log1: String,
+    log2: String,
+    ok1: bool,
+    ok2: bool,
+}
+
+fn vector_step(vectors: &Path, rate: u32, stereo: bool, n: u32) -> VectorStep {
+    let channels = if stereo { "2" } else { "1" };
+    let dir = tmp_dir(&format!("rfc8251_{rate}_{channels}"));
+    let tmp_out = dir.join(format!("tmp{n:02}.out"));
+    let rate_s = rate.to_string();
+    let bit = vectors.join(format!("testvector{n:02}.bit"));
+    let r = rust_demo(&strings(&[
+        "opus_demo",
+        "-d",
+        &rate_s,
+        channels,
+        "-ignore_extensions",
+        path_str(&bit),
+        path_str(&tmp_out),
+    ]));
+    let mut step = VectorStep {
+        exists: bit.exists(),
+        decoded: r.status == 0,
+        log1: r.stdout + &r.stderr,
+        log2: String::new(),
+        ok1: false,
+        ok2: false,
+    };
+    if !step.decoded {
+        return step;
+    }
+    let compare = |dec: &str, log: &mut String| -> bool {
+        let reference = vectors.join(dec);
+        let mut args = vec!["opus_compare"];
+        if stereo {
+            args.push("-s");
+        }
+        args.extend(["-r", &rate_s, path_str(&reference), path_str(&tmp_out)]);
+        let (code, text) = rust_compare(opus_compare_main, &args);
+        *log += &text;
+        code == 0
+    };
+    step.ok1 = compare(&format!("testvector{n:02}.dec"), &mut step.log1);
+    step.ok2 = compare(&format!("testvector{n:02}m.dec"), &mut step.log2);
+    std::fs::remove_file(&tmp_out).unwrap();
+    step
+}
+
+/// The output of `tests/run_vectors.sh <exec path> <vector path> <rate>` from the steps of one
+/// rate (mono vectors 1-12, then stereo), and whether it passed.
+fn run_vectors_report(rate: u32, steps: &[&VectorStep]) -> (String, bool) {
+    let mut report = format!("---------- rate {rate} ----------\n");
+    let mut averages = Vec::new();
+    for (label, steps) in [("mono", &steps[..12]), ("stereo", &steps[12..])] {
+        let mut log1 = String::new();
+        let mut log2 = String::new();
+        report += &format!("==============\nTesting {label}\n==============\n\n");
+        for (i, step) in steps.iter().enumerate() {
+            let n = i + 1;
+            if step.exists {
+                report += &format!("Testing testvector{n:02}\n");
+            } else {
+                report += &format!("Bitstream file not found: testvector{n:02}.bit\n");
+            }
+            log1 += &step.log1;
+            log2 += &step.log2;
+            if !step.decoded {
+                report += "ERROR: decoding failed\n";
+                return (report, false);
+            }
+            report += "successfully decoded\n";
+            if step.ok1 || step.ok2 {
+                report += "output matches reference\n\n";
+            } else {
+                report += "ERROR: output does not match reference\n";
+                return (report, false);
+            }
+        }
+        averages.push((label, log_average(&log1), log_average(&log2)));
+    }
+    report += "All tests have passed successfully\n";
+    for (label, a1, a2) in averages {
+        let avg = if a2 > a1 { a2 } else { a1 };
+        report += &format!("Average {label} quality is {} %\n", awk_num(avg));
+    }
+    (report, true)
+}
+
+#[test]
+fn rfc8251_vectors() {
+    let Some(vectors) = vectors_dir("rfc8251") else {
+        eprintln!("No test vectors found (run scripts/fetch_vectors.sh); skipping");
+        return;
+    };
+    println!("Test vectors found in {}", vectors.display());
+    println!("Decoding with opusorus opus_demo");
+    let rates = [48000u32, 24000, 16000, 12000, 8000];
+    let jobs: Vec<(u32, bool, u32)> = rates
+        .iter()
+        .flat_map(|&r| [false, true].map(|st| (1..=12).map(move |n| (r, st, n))))
+        .flatten()
+        .collect();
+    let steps = parallel_map(&jobs, |&(rate, stereo, n)| {
+        vector_step(&vectors, rate, stereo, n)
+    });
+    let mut all_ok = true;
+    for &rate in &rates {
+        let rate_steps: Vec<&VectorStep> = jobs
+            .iter()
+            .zip(&steps)
+            .filter(|((r, ..), _)| *r == rate)
+            .map(|(_, s)| s)
+            .collect();
+        let (report, ok) = run_vectors_report(rate, &rate_steps);
+        println!("{report}");
+        all_ok &= ok;
+    }
+    assert!(all_ok, "RFC 8251 conformance failed (see the log above)");
+}
+
+// ---------------------------------------------------------------------------------------------
+// tests/run_opushd_vectors.sh
+// ---------------------------------------------------------------------------------------------
+
+/// Decodes `bit` at 96 kHz stereo float with the Rust `opus_demo` (`extra` flags first) and
+/// checks it with `qext_compare -s -r 96000 -f32 -thresholds t...`. Returns the log text.
+#[cfg(feature = "qext")]
+fn opushd_case(
+    dir: &Path,
+    bit: &Path,
+    reference: &Path,
+    extra: &[&str],
+    thresholds: [&str; 3],
+) -> Result<String, String> {
+    let name = bit.file_stem().unwrap().to_str().unwrap();
+    let out = dir.join(format!("{name}.out"));
+    let mut args = vec!["opus_demo", "-d", "96000", "2"];
+    args.extend_from_slice(extra);
+    args.extend(["-f32", path_str(bit), path_str(&out)]);
+    let r = rust_demo(&strings(&args));
+    let mut log = format!("Testing {name}\n{}", r.stderr);
+    if r.status != 0 {
+        return Err(format!("{log}ERROR: decoding failed\n"));
+    }
+    log += "successfully decoded\n";
+    let [t1, t2, t3] = thresholds;
+    let (code, text) = rust_compare(
+        opusorus_tools::compare::qext_compare_main,
+        &[
+            "qext_compare",
+            "-s",
+            "-r",
+            "96000",
+            "-f32",
+            "-thresholds",
+            t1,
+            t2,
+            t3,
+            path_str(reference),
+            path_str(&out),
+        ],
+    );
+    log += &text;
+    std::fs::remove_file(&out).unwrap();
+    if code == 0 {
+        Ok(log + "output matches reference\n")
+    } else {
+        Err(log + "ERROR: output does not match reference\n")
+    }
+}
+
+/// `(section title, bitstream, reference, extra opus_demo flags, qext_compare thresholds)`.
+#[cfg(feature = "qext")]
+type HdCase = (
+    &'static str,
+    PathBuf,
+    PathBuf,
+    &'static [&'static str],
+    [&'static str; 3],
+);
+
+#[cfg(feature = "qext")]
+#[test]
+fn opushd_vectors() {
+    let Some(vectors) = vectors_dir("opushd") else {
+        eprintln!("No Opus HD test vectors found (run scripts/fetch_vectors.sh); skipping");
+        return;
+    };
+    let dir = tmp_dir("opushd");
+    println!("Test vectors found in {}", vectors.display());
+    // (bitstream, reference, extra opus_demo flags, thresholds) in the script's order.
+    let mut cases: Vec<HdCase> = Vec::new();
+    for n in 1..=12 {
+        cases.push((
+            "Testing original testvectors",
+            vectors.join(format!("testvector{n:02}.bit")),
+            vectors.join(format!("testvector{n:02}_96k.f32")),
+            &["-ignore_extensions"],
+            ["0.05", ".1", ".1"],
+        ));
+    }
+    for n in 1..=6 {
+        cases.push((
+            "Testing Opus HD testvectors",
+            vectors.join(format!("qext_vector{n:02}.bit")),
+            vectors.join(format!("qext_vector{n:02}dec.f32")),
+            &[],
+            ["0.05", ".1", ".1"],
+        ));
+    }
+    for n in 1..=6 {
+        cases.push((
+            "Testing Opus HD fuzzing testvectors",
+            vectors.join(format!("qext_vector{n:02}fuzz.bit")),
+            vectors.join(format!("qext_vector{n:02}fuzzdec.f32")),
+            &[],
+            ["0.1", ".5", "1"],
+        ));
+    }
+    let results = parallel_map(&cases, |(_, bit, reference, extra, th)| {
+        opushd_case(&dir, bit, reference, extra, *th)
+    });
+    let mut section = "";
+    let mut failed = Vec::new();
+    let mut known = Vec::new();
+    for ((title, bit, ..), res) in cases.iter().zip(&results) {
+        if *title != section {
+            section = title;
+            println!("============================\n{title}\n============================\n");
+        }
+        let name = bit.file_name().unwrap().to_string_lossy().into_owned();
+        match res {
+            Ok(log) => println!("{log}"),
+            Err(log) => {
+                println!("{log}");
+                // The published qext_vector files do not match the libopus 1.6.1 QEXT
+                // bitstream: the unmodified 1.6.1 opus_demo stops with a range coder mismatch
+                // on them too (asserted byte-for-byte in `opus_demo_matches_c`).
+                if name.starts_with("qext_vector")
+                    && log.contains("Range coder state mismatch between encoder and decoder")
+                {
+                    known.push(name);
+                } else {
+                    failed.push(name);
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "Opus HD vector(s) failed (see the log above): {failed:?}"
+    );
+    if known.is_empty() {
+        println!("All tests have passed successfully");
+    } else {
+        println!(
+            "All RFC vectors at 96 kHz passed; {} Opus HD vectors stop with the range coder \
+             mismatch that libopus 1.6.1's own opus_demo reports on them: {known:?}",
+            known.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rust opus_demo vs C opus_demo
+// ---------------------------------------------------------------------------------------------
+
+/// Archive member / symbol markers of the optional libopus configurations.
+#[cfg(unix)]
+fn lib_config_matches(lib: &[u8]) -> bool {
+    let has = |needle: &[u8]| lib.windows(needle.len()).any(|w| w == needle);
+    has(b"-mini_kfft.o") == cfg!(feature = "qext")
+        && has(b"opus_custom_encoder_create") == cfg!(feature = "custom-modes")
+        && has(b"-lpcnet_plc.o")
+            == cfg!(any(
+                feature = "deep-plc",
+                feature = "dred",
+                feature = "osce"
+            ))
+        && has(b"-dred_decoder.o") == cfg!(feature = "dred")
+        && has(b"-osce.o") == cfg!(feature = "osce")
+}
+
+/// The oracle's `libopus.a` built for this test binary: the newest
+/// `<profile>/build/opusorus-oracle-*/out/libopus.a` whose optional components match this
+/// crate's features.
+#[cfg(unix)]
+fn find_oracle_lib() -> Option<PathBuf> {
+    let exe = std::env::current_exe().unwrap();
+    // <target>/<profile>/deps/vectors-<hash>
+    let profile = exe.parent()?.parent()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(profile.join("build")).ok()? {
+        let entry = entry.unwrap();
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("opusorus-oracle-")
+        {
+            continue;
+        }
+        let lib = entry.path().join("out/libopus.a");
+        let Ok(meta) = std::fs::metadata(&lib) else {
+            continue;
+        };
+        let mtime = meta.modified().unwrap();
+        if best.as_ref().is_some_and(|(t, _)| *t >= mtime) {
+            continue;
+        }
+        if lib_config_matches(&std::fs::read(&lib).unwrap()) {
+            best = Some((mtime, lib));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Compiles the unmodified `src/opus_demo.c` against the oracle library. `None` (with a note)
+/// if no C compiler can be run.
+#[cfg(unix)]
+fn build_c_opus_demo() -> Option<PathBuf> {
+    let lib = find_oracle_lib().expect("oracle libopus.a for this configuration not found");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/libopus");
+    let cc = match std::env::var_os("CC") {
+        Some(cc) => cc.to_string_lossy().into_owned(),
+        None => "cc".to_owned(),
+    };
+    let tag = format!(
+        "{}{}",
+        if cfg!(feature = "qext") { "_qext" } else { "" },
+        if cfg!(feature = "custom-modes") {
+            "_custom"
+        } else {
+            ""
+        }
+    );
+    let exe = tmp_dir("c").join(format!("opus_demo{tag}"));
+    let mut cmd = std::process::Command::new(&cc);
+    cmd.args(["-O2", "-ffp-contract=off", "-fno-fast-math", "-w"])
+        .args([
+            "-DOPUS_BUILD",
+            "-DVAR_ARRAYS",
+            "-DHAVE_LRINT",
+            "-DHAVE_LRINTF",
+        ]);
+    if cfg!(feature = "qext") {
+        cmd.arg("-DENABLE_QEXT");
+    }
+    if cfg!(feature = "custom-modes") {
+        cmd.arg("-DCUSTOM_MODES");
+    }
+    for inc in ["include", "celt", "silk", "src"] {
+        cmd.arg(format!("-I{}", root.join(inc).display()));
+    }
+    cmd.arg(root.join("src/opus_demo.c"))
+        .arg(&lib)
+        .arg("-lm")
+        .arg("-o")
+        .arg(&exe);
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!(
+                "cannot run the C compiler `{cc}` ({e}); skipping the C opus_demo comparison"
+            );
+            return None;
+        }
+    };
+    assert!(
+        out.status.success(),
+        "compiling opus_demo.c failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(exe)
+}
+
+/// One invocation, run by both tools. `OUT` in `args` is replaced by the side's output path.
+#[cfg(unix)]
+struct Case {
+    name: String,
+    args: Vec<String>,
+}
+
+#[cfg(unix)]
+fn case(name: &str, args: &[&str]) -> Case {
+    Case {
+        name: name.to_owned(),
+        args: strings(args),
+    }
+}
+
+/// Replaces the version line (the oracle is built without `PACKAGE_VERSION`).
+#[cfg(unix)]
+fn normalize_version(stderr: &str) -> String {
+    let mut lines: Vec<&str> = stderr.split_inclusive('\n').collect();
+    if let Some(first) = lines.first_mut()
+        && (*first == "libopus unknown\n"
+            || *first == format!("{}\n", opusorus::celt::celt::opus_get_version_string()))
+    {
+        *first = "libopus <version>\n";
+    }
+    lines.concat()
+}
+
+/// Runs `c` with both tools and asserts identical results. Returns the (common) output bytes.
+#[cfg(unix)]
+fn check_case(c_demo: &Path, dir: &Path, c: &Case) -> Option<Vec<u8>> {
+    use std::os::unix::process::CommandExt;
+    let out_c = dir.join(format!("{}.c.out", c.name));
+    let out_rs = dir.join(format!("{}.rs.out", c.name));
+    for p in [&out_c, &out_rs] {
+        if p.exists() {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    let with_out = |p: &Path| -> Vec<String> {
+        c.args
+            .iter()
+            .map(|a| {
+                if a == "OUT" {
+                    path_str(p).to_owned()
+                } else {
+                    a.clone()
+                }
+            })
+            .collect()
+    };
+    let c_args = with_out(&out_c);
+    let mut rs_args = vec!["opus_demo".to_owned()];
+    rs_args.extend(with_out(&out_rs));
+    let (c_out, rs_run) = std::thread::scope(|s| {
+        let ct = s.spawn(|| {
+            std::process::Command::new(c_demo)
+                .arg0("opus_demo")
+                .args(&c_args)
+                .output()
+                .unwrap()
+        });
+        let rs_run = rust_demo(&rs_args);
+        (ct.join().unwrap(), rs_run)
+    });
+    let c_run = Run {
+        status: u8::try_from(c_out.status.code().expect("C opus_demo was killed")).unwrap(),
+        stdout: String::from_utf8(c_out.stdout).unwrap(),
+        stderr: normalize_version(&String::from_utf8(c_out.stderr).unwrap()),
+    };
+    let rs_run = Run {
+        stderr: normalize_version(&rs_run.stderr),
+        ..rs_run
+    };
+    assert_eq!(rs_run, c_run, "{}: output text/status differ", c.name);
+    let file_c = std::fs::read(&out_c).ok();
+    let file_rs = std::fs::read(&out_rs).ok();
+    assert_eq!(
+        file_rs.is_some(),
+        file_c.is_some(),
+        "{}: output file presence differs",
+        c.name
+    );
+    if let (Some(a), Some(b)) = (&file_rs, &file_c) {
+        assert!(
+            a == b,
+            "{}: output files differ ({} vs {} bytes, first difference at byte {:?})",
+            c.name,
+            a.len(),
+            b.len(),
+            a.iter().zip(b).position(|(x, y)| x != y)
+        );
+    }
+    file_c
+}
+
+/// Runs `cases` in parallel; returns each case's output file.
+#[cfg(unix)]
+fn check_cases(c_demo: &Path, dir: &Path, cases: &[Case]) -> Vec<Option<Vec<u8>>> {
+    parallel_map(cases, |c| check_case(c_demo, dir, c))
+}
+
+#[cfg(unix)]
+fn write_s16(path: &Path, x: &[f32]) {
+    let b: Vec<u8> = signals::to_i16(x)
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    std::fs::write(path, b).unwrap();
+}
+
+#[cfg(unix)]
+fn write_s24(path: &Path, x: &[f32]) {
+    let b: Vec<u8> = x
+        .iter()
+        .flat_map(|&v| {
+            let s = (f64::from(v) * 8_388_607.0).round() as i32;
+            let [b0, b1, b2, _] = s.to_le_bytes();
+            [b0, b1, b2]
+        })
+        .collect();
+    std::fs::write(path, b).unwrap();
+}
+
+#[cfg(unix)]
+fn write_f32(path: &Path, x: &[f32]) {
+    let b: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(path, b).unwrap();
+}
+
+/// A bitstream record (`opus_demo -e` format).
+#[cfg(unix)]
+fn record(len: u32, rng: u32, payload: &[u8]) -> Vec<u8> {
+    let mut v = len.to_be_bytes().to_vec();
+    v.extend(rng.to_be_bytes());
+    v.extend_from_slice(payload);
+    v
+}
+
+/// Splits a bitstream file into `(final range, packet)` records.
+#[cfg(unix)]
+fn records(b: &[u8]) -> Vec<(u32, &[u8])> {
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let len = u32::from_be_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+        let rng = u32::from_be_bytes(b[i + 4..i + 8].try_into().unwrap());
+        v.push((rng, &b[i + 8..i + 8 + len]));
+        i += 8 + len;
+    }
+    v
+}
+
+#[cfg(unix)]
+#[test]
+fn opus_demo_matches_c() {
+    if cfg!(any(
+        feature = "deep-plc",
+        feature = "dred",
+        feature = "osce"
+    )) {
+        eprintln!(
+            "DNN features on: the Rust opus_demo has no DRED decoding yet; skipping the C \
+             opus_demo comparison"
+        );
+        return;
+    }
+    let Some(c_demo) = build_c_opus_demo() else {
+        return;
+    };
+    let dir = tmp_dir("demo");
+    let p = |name: &str| path_str(&dir.join(name)).to_owned();
+
+    // Inputs: ~1.5 s signals at every rate and format.
+    let secs = |fs: u32| (fs as usize * 3) / 2;
+    write_s16(
+        &dir.join("m48s.sw"),
+        &signals::music_like(secs(48000), 2, 48000, 1),
+    );
+    write_s16(
+        &dir.join("s48m.sw"),
+        &signals::speech_like(secs(48000), 1, 48000, 2),
+    );
+    write_s16(
+        &dir.join("s24s.sw"),
+        &signals::speech_like(secs(24000), 2, 24000, 3),
+    );
+    write_s16(
+        &dir.join("s16m.sw"),
+        &signals::speech_like(secs(16000), 1, 16000, 4),
+    );
+    write_s16(
+        &dir.join("s12m.sw"),
+        &signals::speech_like(secs(12000), 1, 12000, 5),
+    );
+    write_s16(
+        &dir.join("s8m.sw"),
+        &signals::speech_like(secs(8000), 1, 8000, 6),
+    );
+    write_s16(
+        &dir.join("m16s.sw"),
+        &signals::music_like(secs(16000), 2, 16000, 7),
+    );
+    let mut noisy = signals::music_like(secs(48000), 2, 48000, 8);
+    for (v, n) in noisy.iter_mut().zip(signals::noise(secs(48000), 2, 0.3, 9)) {
+        *v = (*v + n).clamp(-1.0, 1.0);
+    }
+    write_s24(&dir.join("m48s.s24"), &noisy);
+    // Float input with overs (> 1.0) to exercise the conversion.
+    let loud: Vec<f32> = signals::music_like(secs(48000), 2, 48000, 10)
+        .iter()
+        .map(|v| v * 1.6)
+        .collect();
+    write_f32(&dir.join("m48s.f32"), &loud);
+    // A short file ending mid-frame (partial last frame, and a partial sample at the end).
+    let mut short = signals::to_i16(&signals::music_like(12_345, 2, 48000, 11))
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<u8>>();
+    short.push(0x55);
+    std::fs::write(dir.join("short.sw"), short).unwrap();
+    std::fs::write(
+        dir.join("loss.txt"),
+        "0 0 1 0 1 1 0 0 0 1 1 1 0 2 0 -1 0 0\n1 0 x 1",
+    )
+    .unwrap();
+    std::fs::write(dir.join("empty.sw"), []).unwrap();
+
+    let m48s = p("m48s.sw");
+    let s48m = p("s48m.sw");
+    let s24s = p("s24s.sw");
+    let s16m = p("s16m.sw");
+    let s12m = p("s12m.sw");
+    let s8m = p("s8m.sw");
+    let m16s = p("m16s.sw");
+    let m48s24 = p("m48s.s24");
+    let m48sf = p("m48s.f32");
+    let short = p("short.sw");
+    let loss = p("loss.txt");
+    let empty = p("empty.sw");
+
+    // Phase 1: encode-only (bitstreams reused below), encode+decode, and error cases.
+    #[rustfmt::skip]
+    let mut phase1 = vec![
+        // -e: bitstreams
+        case("e_audio48s", &["-e", "audio", "48000", "2", "64000", &m48s, "OUT"]),
+        case("e_voip16m_fec", &["-e", "voip", "16000", "1", "20000", "-inbandfec", "-loss", "20", &s16m, "OUT"]),
+        case("e_voip16m_encloss", &["-e", "voip", "16000", "1", "20000", "-inbandfec", "-loss", "20", "-enc_loss", &s16m, "OUT"]),
+        case("e_voip48m_dtx", &["-e", "voip", "48000", "1", "16000", "-dtx", &s48m, "OUT"]),
+        case("e_lowdelay_f32", &["-e", "restricted-lowdelay", "48000", "2", "96000", "-framesize", "2.5", "-f32", &m48sf, "OUT"]),
+        case("e_hybrid24s_60ms", &["-e", "voip", "24000", "2", "32000", "-framesize", "60", &s24s, "OUT"]),
+        case("e_s24_120ms", &["-e", "audio", "48000", "2", "80000", "-framesize", "120", "-24", &m48s24, "OUT"]),
+        case("e_lossfile", &["-e", "audio", "48000", "2", "64000", "-enc_loss", "-lossfile", &loss, &m48s, "OUT"]),
+        case("e_short", &["-e", "audio", "48000", "2", "64000", &short, "OUT"]),
+        case("e_empty", &["-e", "voip", "8000", "1", "8000", &empty, "OUT"]),
+        // encode + decode
+        case("ed_audio48s", &["audio", "48000", "2", "64000", &m48s, "OUT"]),
+        case("ed_voip16m_fec_loss", &["voip", "16000", "1", "16000", "-inbandfec", "-loss", "10", &s16m, "OUT"]),
+        case("ed_cbr_10ms", &["audio", "48000", "2", "32000", "-cbr", "-framesize", "10", "-complexity", "5", &m48s, "OUT"]),
+        case("ed_lowdelay_cvbr", &["restricted-lowdelay", "48000", "1", "48000", "-framesize", "2.5", "-cvbr", &s48m, "OUT"]),
+        case("ed_voip8m_dtx", &["voip", "8000", "1", "8000", "-dtx", &s8m, "OUT"]),
+        case("ed_forcemono_swb", &["audio", "24000", "2", "24000", "-forcemono", "-bandwidth", "SWB", &s24s, "OUT"]),
+        case("ed_60ms_maxpayload", &["audio", "48000", "2", "96000", "-framesize", "60", "-max_payload", "200", &m48s, "OUT"]),
+        case("ed_voip12m_40ms_loss", &["voip", "12000", "1", "12000", "-framesize", "40", "-loss", "25", "-inbandfec", "-dec_complexity", "10", &s12m, "OUT"]),
+        case("ed_delayed_decision", &["audio", "48000", "2", "50000", "-delayed-decision", &m48s, "OUT"]),
+        case("ed_delayed_decision_5ms", &["voip", "16000", "2", "40000", "-delayed-decision", "-framesize", "5", &m16s, "OUT"]),
+        case("ed_random", &["audio", "48000", "1", "20000", "-random_framesize", "-random_fec", "-sweep", "1000", "-sweep_max", "40000", &s48m, "OUT"]),
+        case("ed_sweep_down", &["voip", "16000", "1", "12000", "-sweep", "-500", &s16m, "OUT"]),
+        case("ed_silk16k_test", &["restricted-silk", "16000", "1", "20000", "-silk16k_test", &s16m, "OUT"]),
+        case("ed_silk8k_test", &["voip", "8000", "1", "12000", "-silk8k_test", &s8m, "OUT"]),
+        case("ed_silk12k_test", &["voip", "12000", "1", "12000", "-silk12k_test", &s12m, "OUT"]),
+        case("ed_silk_bw_switch", &["voip", "48000", "2", "24000", "-silk_bw_switch_test", &m48s, "OUT"]),
+        case("ed_hybrid24k_test", &["audio", "24000", "2", "32000", "-hybrid24k_test", &s24s, "OUT"]),
+        case("ed_hybrid48k_test", &["audio", "48000", "2", "40000", "-hybrid48k_test", &m48s, "OUT"]),
+        case("ed_celt_test", &["audio", "48000", "2", "64000", "-celt_test", &m48s, "OUT"]),
+        case("ed_celt_hq_test", &["audio", "48000", "2", "128000", "-celt_hq_test", "-24", &m48s24, "OUT"]),
+        case("ed_s24", &["audio", "48000", "2", "128000", "-24", &m48s24, "OUT"]),
+        case("ed_f32", &["audio", "48000", "2", "128000", "-f32", &m48sf, "OUT"]),
+        case("ed_restricted_celt", &["restricted-celt", "48000", "2", "64000", "-framesize", "5", &m48s, "OUT"]),
+        case("ed_lossfile", &["audio", "48000", "2", "64000", "-lossfile", &loss, &m48s, "OUT"]),
+        case("ed_short", &["voip", "48000", "2", "32000", "-loss", "5", &short, "OUT"]),
+        case("ed_bitrate0", &["audio", "48000", "1", "0", "-complexity", "11", &s48m, "OUT"]),
+        case("ed_max_payload3", &["audio", "48000", "2", "64000", "-max_payload", "3", &m48s, "OUT"]),
+        case("ed_max_payload0", &["audio", "48000", "2", "64000", "-max_payload", "0", &m48s, "OUT"]),
+        case("ed_empty", &["audio", "48000", "1", "64000", &empty, "OUT"]),
+        // argument and file errors
+        case("x_noargs", &[]),
+        case("x_argc3", &["-d", "48000"]),
+        case("x_argc6_encode", &["audio", "48000", "1", "64000", "OUT"]),
+        case("x_rate", &["-d", "44100", "1", &m48s, "OUT"]),
+        case("x_channels", &["-d", "48000", "3", &m48s, "OUT"]),
+        case("x_application", &["bogus", "48000", "1", "64000", &m48s, "OUT"]),
+        case("x_cbr_decode", &["-d", "48000", "1", "-cbr", &m48s, "OUT"]),
+        case("x_ignext_encode", &["-e", "audio", "48000", "1", "64000", "-ignore_extensions", &m48s, "OUT"]),
+        case("x_deccomplexity_encode", &["-e", "audio", "48000", "1", "64000", "-dec_complexity", "3", &m48s, "OUT"]),
+        case("x_unknown_option", &["-d", "48000", "1", "-foo", &m48s, "OUT"]),
+        case("x_missing_input", &["-d", "48000", "1", &p("missing.bit"), "OUT"]),
+        case("x_bad_output", &["-d", "48000", "1", &m48s, &p("no/such/dir/out")]),
+        case("x_max_payload", &["audio", "48000", "1", "64000", "-max_payload", "20000", &m48s, "OUT"]),
+        case("x_bandwidth", &["audio", "48000", "1", "64000", "-bandwidth", "XB", &m48s, "OUT"]),
+        case("x_framesize", &["audio", "48000", "1", "64000", "-framesize", "7", &m48s, "OUT"]),
+        case("x_lossfile", &["audio", "48000", "1", "64000", "-lossfile", &p("missing.txt"), &m48s, "OUT"]),
+        case("x_qext_decode", &["-d", "48000", "1", "-qext", &m48s, "OUT"]),
+        case("x_rate96k", &["-d", "96000", "2", &m48s, "OUT"]),
+        case("x_dred", &["voip", "16000", "1", "24000", "-dred", "10", "-loss", "20", &s16m, "OUT"]),
+    ];
+    if cfg!(feature = "qext") {
+        let hd = p("m96s.f32");
+        write_f32(
+            Path::new(&hd),
+            &signals::music_like(secs(96000), 2, 96000, 12),
+        );
+        #[rustfmt::skip]
+        phase1.extend([
+            case("e_qext96", &["-e", "audio", "96000", "2", "256000", "-qext", "-f32", &hd, "OUT"]),
+            case("ed_qext96", &["audio", "96000", "2", "192000", "-qext", "-framesize", "10", "-f32", &hd, "OUT"]),
+            case("ed_qext48", &["audio", "48000", "2", "160000", "-qext", &m48s, "OUT"]),
+            case("x_qext_rate", &["-d", "44100", "1", &m48s, "OUT"]),
+        ]);
+    }
+    let outs1 = check_cases(&c_demo, &dir, &phase1);
+    let bitstream = |name: &str| -> PathBuf {
+        let i = phase1.iter().position(|c| c.name == name).unwrap();
+        assert!(outs1[i].is_some(), "{name} wrote no bitstream");
+        dir.join(format!("{name}.c.out"))
+    };
+
+    // Crafted bitstreams: truncated, invalid length, corrupted packets, range mismatch.
+    let e48 = std::fs::read(bitstream("e_audio48s")).unwrap();
+    let recs = records(&e48);
+    assert!(recs.len() > 20);
+    std::fs::write(dir.join("truncated.bit"), &e48[..e48.len() - 7]).unwrap();
+    let mut bad_len = record(recs[0].1.len() as u32, recs[0].0, recs[0].1);
+    bad_len.extend(record(20_000, 0, &[]));
+    std::fs::write(dir.join("bad_len.bit"), bad_len).unwrap();
+    let mut rng = opusorus_conformance::Rng::new(0xDE_40);
+    let mut garbage = Vec::new();
+    for (i, (r, pkt)) in recs.iter().enumerate() {
+        if i % 4 == 1 {
+            let mut junk = vec![0u8; 1 + (rng.next_u32() % 300) as usize];
+            rng.fill_bytes(&mut junk);
+            garbage.extend(record(junk.len() as u32, 0, &junk));
+        } else {
+            garbage.extend(record(pkt.len() as u32, *r, pkt));
+        }
+    }
+    std::fs::write(dir.join("garbage.bit"), garbage).unwrap();
+    let mut mismatch = Vec::new();
+    for (i, (r, pkt)) in recs.iter().enumerate() {
+        let r = if i == 5 { 0x123 } else { *r };
+        mismatch.extend(record(pkt.len() as u32, r, pkt));
+    }
+    std::fs::write(dir.join("mismatch.bit"), mismatch).unwrap();
+    // Mismatch at packet 7, after packets 4 and 5 were lost (loss.txt): C returns the value of
+    // the DRED parse attempt made on packet 6 (OPUS_UNIMPLEMENTED) as the exit status.
+    let mut mismatch7 = Vec::new();
+    for (i, (r, pkt)) in recs.iter().enumerate() {
+        let r = if i == 7 { !*r } else { *r };
+        mismatch7.extend(record(pkt.len() as u32, r, pkt));
+    }
+    std::fs::write(dir.join("mismatch7.bit"), mismatch7).unwrap();
+
+    let b48 = path_str(&bitstream("e_audio48s")).to_owned();
+    let b16 = path_str(&bitstream("e_voip16m_fec")).to_owned();
+    let b16l = path_str(&bitstream("e_voip16m_encloss")).to_owned();
+    let b48dtx = path_str(&bitstream("e_voip48m_dtx")).to_owned();
+    let bld = path_str(&bitstream("e_lowdelay_f32")).to_owned();
+    let b24 = path_str(&bitstream("e_hybrid24s_60ms")).to_owned();
+    let b120 = path_str(&bitstream("e_s24_120ms")).to_owned();
+    let blf = path_str(&bitstream("e_lossfile")).to_owned();
+    let truncated = p("truncated.bit");
+    let bad_len = p("bad_len.bit");
+    let garbage = p("garbage.bit");
+    let mismatch = p("mismatch.bit");
+    let mismatch7 = p("mismatch7.bit");
+
+    // Phase 2: decoding.
+    #[rustfmt::skip]
+    let mut phase2 = vec![
+        case("d_48s", &["-d", "48000", "2", &b48, "OUT"]),
+        case("d_24m_s24", &["-d", "24000", "1", "-24", &b48, "OUT"]),
+        case("d_16s_f32", &["-d", "16000", "2", "-f32", &b48, "OUT"]),
+        case("d_8m_ignext", &["-d", "8000", "1", "-ignore_extensions", &b48, "OUT"]),
+        case("d_16m_fec_loss", &["-d", "16000", "1", "-inbandfec", "-loss", "30", &b16, "OUT"]),
+        case("d_16m_encloss", &["-d", "16000", "1", &b16l, "OUT"]),
+        case("d_48m_encloss_fec", &["-d", "48000", "1", "-inbandfec", &b16l, "OUT"]),
+        case("d_48m_dtx_lossfile", &["-d", "48000", "1", "-lossfile", &loss, &b48dtx, "OUT"]),
+        case("d_48s_f32_deccomp", &["-d", "48000", "2", "-dec_complexity", "10", "-f32", &bld, "OUT"]),
+        case("d_12s_60ms_loss", &["-d", "12000", "2", "-loss", "15", &b24, "OUT"]),
+        case("d_48s_120ms", &["-d", "48000", "2", "-24", &b120, "OUT"]),
+        case("d_lossfile_stream", &["-d", "48000", "2", &blf, "OUT"]),
+        case("d_truncated", &["-d", "48000", "2", &truncated, "OUT"]),
+        case("d_bad_len", &["-d", "48000", "2", &bad_len, "OUT"]),
+        case("d_garbage", &["-d", "48000", "2", &garbage, "OUT"]),
+        case("d_garbage_fec", &["-d", "16000", "1", "-inbandfec", "-loss", "20", &garbage, "OUT"]),
+        case("d_mismatch", &["-d", "48000", "2", &mismatch, "OUT"]),
+        case("d_mismatch_after_loss", &["-d", "48000", "2", "-lossfile", &loss, &mismatch7, "OUT"]),
+        case("d_empty", &["-d", "48000", "2", &empty, "OUT"]),
+        case("d_pcm_as_bitstream", &["-d", "48000", "2", &m48s, "OUT"]),
+    ];
+    if cfg!(feature = "qext") {
+        let b96 = path_str(&bitstream("e_qext96")).to_owned();
+        #[rustfmt::skip]
+        phase2.extend([
+            case("d_qext96", &["-d", "96000", "2", "-f32", &b96, "OUT"]),
+            case("d_qext96_ignext", &["-d", "96000", "1", "-ignore_extensions", "-24", &b96, "OUT"]),
+            case("d_qext48", &["-d", "48000", "2", &b96, "OUT"]),
+        ]);
+    }
+    // The conformance vectors themselves, through both front ends.
+    if let Some(v) = vectors_dir("rfc8251") {
+        for n in 1..=12 {
+            let bit = path_str(&v.join(format!("testvector{n:02}.bit"))).to_owned();
+            phase2.push(case(
+                &format!("d_tv{n:02}_48s"),
+                &["-d", "48000", "2", "-ignore_extensions", &bit, "OUT"],
+            ));
+            phase2.push(case(
+                &format!("d_tv{n:02}_8m_loss"),
+                &["-d", "8000", "1", "-inbandfec", "-loss", "7", &bit, "OUT"],
+            ));
+        }
+    }
+    if cfg!(feature = "qext")
+        && let Some(v) = vectors_dir("opushd")
+    {
+        for n in 1..=6 {
+            let bit = path_str(&v.join(format!("qext_vector{n:02}.bit"))).to_owned();
+            phase2.push(case(
+                &format!("d_hd{n:02}"),
+                &["-d", "96000", "2", "-f32", &bit, "OUT"],
+            ));
+            let fuzz = path_str(&v.join(format!("qext_vector{n:02}fuzz.bit"))).to_owned();
+            phase2.push(case(
+                &format!("d_hd{n:02}_fuzz"),
+                &["-d", "96000", "2", "-f32", &fuzz, "OUT"],
+            ));
+        }
+    }
+    let outs2 = check_cases(&c_demo, &dir, &phase2);
+
+    // Sanity: the matrix exercises what it claims to.
+    let text = |name: &str, phase: &[Case], outs: &[Option<Vec<u8>>]| {
+        let i = phase.iter().position(|c| c.name == name).unwrap();
+        outs[i].as_ref().map_or(0, Vec::len)
+    };
+    assert!(text("ed_audio48s", &phase1, &outs1) > 100_000);
+    assert!(text("d_48s", &phase2, &outs2) > 100_000);
+    println!(
+        "opus_demo: {} C/Rust invocations identical (outputs, text, exit status)",
+        phase1.len() + phase2.len()
+    );
+    for c in phase1.iter().chain(&phase2) {
+        for side in ["c", "rs"] {
+            let f = dir.join(format!("{}.{side}.out", c.name));
+            if f.exists() && !c.name.starts_with("e_") {
+                std::fs::remove_file(f).unwrap();
+            }
+        }
+    }
+}

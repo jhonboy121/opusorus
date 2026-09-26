@@ -1,6 +1,6 @@
 [package]
 name = "opusorus-tools"
-description = "Command-line tools ported from libopus v1.6.1 (opus_compare, qext_compare) and their library core."
+description = "Command-line tools ported from libopus v1.6.1 (opus_demo, opus_compare, qext_compare) and their library core."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,15 +10,22 @@ authors.workspace = true
 publish = false
 
 [features]
-# Opus HD quality comparison (`qext_compare`), which needs the QEXT-only `celt::mini_kfft` port.
+# Opus HD: `qext_compare`, which needs the QEXT-only `celt::mini_kfft` port, and 96 kHz / `-qext`
+# in `opus_demo` (libopus `ENABLE_QEXT`).
 # Not on by default: enabling `opusorus/qext` unconditionally would unify it into every workspace
 # build (`cargo test --workspace`) while the C oracle stays non-QEXT.
 qext = ["opusorus/qext"]
+# `opus_demo -enable_osce_bwe` (libopus `ENABLE_OSCE_BWE`).
+osce = ["opusorus/osce"]
 
 [dependencies]
 # `internals` exposes `opusorus::celt::mini_kfft` and `opusorus::math`; `std` selects the platform
 # libm, which the C tools also use (required for bit-exact output).
 opusorus = { workspace = true, features = ["internals", "std"] }
+
+[[bin]]
+name = "opus_demo"
+path = "src/bin/opus_demo.rs"
 
 [[bin]]
 name = "opus_compare"

@@ -58,12 +58,49 @@ fn band_energy(
         s[xj] = opus_sinf((2.0 * OPUS_PI / window_sz as f32) * xj as f32);
     }
     let window = &window[..window_sz];
-    let c = &c[..window_sz];
-    let s = &s[..window_sz];
+    // The C inner loop computes, for bin `xj`, `re += c[ti]*x[xk]; im -= s[ti]*x[xk]` over
+    // `xk = 0..window_sz` with `ti = xj*xk mod window_sz`. The same products and sums are
+    // evaluated here in the same per-bin order, but for all bins at once from twiddle tables
+    // transposed to `[xk][xj]`, so the bin loop is contiguous (vectorizable) — identical
+    // results, several times faster.
+    let nbins = bands[nbands] as usize;
+    let mut tc = vec![0f32; window_sz * nbins];
+    let mut ts = vec![0f32; window_sz * nbins];
+    for xk in 0..window_sz {
+        let mut ti = 0usize;
+        for xj in 0..nbins {
+            tc[xk * nbins + xj] = c[ti];
+            ts[xk * nbins + xj] = s[ti];
+            // ti = xj*xk mod window_sz, stepped by xk.
+            ti += xk;
+            if ti >= window_sz {
+                ti -= window_sz;
+            }
+        }
+    }
+    let mut re_all = vec![0f32; nchannels * nbins];
+    let mut im_all = vec![0f32; nchannels * nbins];
     for xi in 0..nframes {
         for ci in 0..nchannels {
             for xk in 0..window_sz {
                 x[ci * window_sz + xk] = window[xk] * input[(xi * step + xk) * nchannels + ci];
+            }
+        }
+        re_all.fill(0.0);
+        im_all.fill(0.0);
+        for xk in 0..window_sz {
+            let rc = &tc[xk * nbins..(xk + 1) * nbins];
+            let rs = &ts[xk * nbins..(xk + 1) * nbins];
+            for ci in 0..nchannels {
+                let xv = x[ci * window_sz + xk];
+                let re = &mut re_all[ci * nbins..(ci + 1) * nbins];
+                for (r, &cv) in re.iter_mut().zip(rc) {
+                    *r += cv * xv;
+                }
+                let im = &mut im_all[ci * nbins..(ci + 1) * nbins];
+                for (i, &sv) in im.iter_mut().zip(rs) {
+                    *i -= sv * xv;
+                }
             }
         }
         let mut xj = 0usize;
@@ -71,18 +108,8 @@ fn band_energy(
             let mut p = [0f32; 2];
             while (xj as i32) < bands[bi + 1] {
                 for ci in 0..nchannels {
-                    let xc = &x[ci * window_sz..(ci + 1) * window_sz];
-                    let mut re = 0f32;
-                    let mut im = 0f32;
-                    let mut ti = 0usize;
-                    for xk in 0..window_sz {
-                        re += c[ti] * xc[xk];
-                        im -= s[ti] * xc[xk];
-                        ti += xj;
-                        if ti >= window_sz {
-                            ti -= window_sz;
-                        }
-                    }
+                    let mut re = re_all[ci * nbins + xj];
+                    let mut im = im_all[ci * nbins + xj];
                     re *= downsample as f32;
                     im *= downsample as f32;
                     ps[(xi * ps_sz + xj) * nchannels + ci] = re * re + im * im + 100000.0;

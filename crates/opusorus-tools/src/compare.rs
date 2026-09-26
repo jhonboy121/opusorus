@@ -226,7 +226,7 @@ pub fn c_fmt_f(v: f64, prec: usize) -> String {
 }
 
 /// C `isspace` in the "C" locale.
-const fn c_isspace(b: u8) -> bool {
+pub(crate) const fn c_isspace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
@@ -339,7 +339,7 @@ fn arg(args: &[String], base: usize, i: usize) -> Option<&str> {
 }
 
 /// `argv[0]` as printed in the usage text (glibc prints `(null)` for a NULL `%s`).
-fn argv0(args: &[String]) -> &str {
+pub(crate) fn argv0(args: &[String]) -> &str {
     match args.first() {
         Some(a) => a,
         None => "(null)",
