@@ -23,7 +23,7 @@ opus_demo, DNN integration) in progress. Remaining after that: fixed-point build
 | DNN: deep PLC / DRED / OSCE+BWE | ✅ integrated, bit-exact vs C built with the same features (weights via runtime blob) |
 | Fixed-point build | ⬜ planned (phase F) |
 | Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |
-| Fuzzing | 🟨 targets written, runs in progress |
+| Fuzzing | ✅ 11 cargo-fuzz targets (differential vs C + invariants), ~7.5M execs default+QEXT, 0 crashes/divergences |
 | Benchmarks | ✅ see below (Rust ≈ scalar C; SILK decode 1.39×) |
 | Shared library size | ✅ measured (Rust 773–1029 KiB vs C 323–578 KiB) |
 | C ABI (`libopusorus` .so/.a, opus.h compatible) | ✅ upstream C test suite passes |
@@ -85,6 +85,16 @@ vs NEON-optimized C it is 7–37 % slower (SIMD kernels). Performance pass: see 
 
 Of the release-small build ≈389 KB is codec code, ≈166 KB is Rust std (panic/backtrace/fmt),
 ≈16 KB the C ABI layer. Size reduction is tracked in the performance pass.
+
+## Fuzzing
+
+`fuzz/` (cargo-fuzz, own workspace). Targets: differential_decode, differential_encode,
+differential_ms_encode (bit-exact vs C incl. full state dumps), decode, encode, roundtrip_invariants,
+repacketizer, packet_parse_extensions, multistream_decode, projection_decode. ASan + debug assertions +
+overflow checks. Campaign (2026-09-26): default build ≈6.9M execs (differential_decode 789k, decode
+355k, repacketizer 4.9M, ...), QEXT build ≈1.0M execs; 0 crashes, 0 OOM, 0 timeouts, 0 divergences.
+Mutation checks: injected one-character bugs were caught in 143 execs / ~1 min. Reproduce with
+`fuzz/run_all.sh` (`SECS=`, `FORK=`, `TARGETS=`, `FEATURES=qext`).
 
 ## Conformance
 - RFC 8251 vectors: bit-exact vs C at 8/12/16/24/48 kHz mono+stereo; average opus_compare quality

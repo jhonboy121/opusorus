@@ -48,7 +48,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | T2 | RFC 6716/8251 test vectors + `opus_compare` port | ✅ |
 | T3 | Ported libopus test suite (test_opus_api/decode/encode/padding/extensions/projection) | ✅ |
 | T4 | C ABI (`libopusorus.so`, `opus.h` compatible) + C test programs run against it | ✅ |
-| T5 | Fuzzing (cargo-fuzz): decoder, encoder, repacketizer, multistream, extensions, differential | 🟨 |
+| T5 | Fuzzing (cargo-fuzz): decoder, encoder, repacketizer, multistream, extensions, differential | ✅ |
 | T6 | Benchmarks (criterion) Rust vs C, reported in STATUS | ✅ |
 | T7 | Shared library size comparison, reported in STATUS | ✅ |
 | T8 | Cross-platform builds: wasm32, Android (arm64/armv7/x86_64), iOS (+sim), host, no_std | ✅ (foundation) |

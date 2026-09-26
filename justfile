@@ -67,5 +67,13 @@ size:
 fuzz target secs="60":
     cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
 
+# Seed fuzz corpora from the C encoder (default + qext).
+fuzz-seed:
+    cd fuzz && ./seed_corpus.sh && ./seed_corpus.sh --features qext -- corpus-qext
+
+# Full fuzz campaign (SECS=, FORK=, TARGETS=, FEATURES=qext knobs).
+fuzz-all:
+    fuzz/run_all.sh
+
 # Everything CI runs.
 ci: fmt clippy test cross cross-capi test-wasm

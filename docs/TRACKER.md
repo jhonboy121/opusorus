@@ -56,7 +56,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | justfile (check/clippy/test/cross/test-wasm/vectors/bench/size/fuzz) | ✅ | |
 | RFC 8251 + Opus HD vectors (`tests/vectors.rs`, `scripts/run_vectors.sh`) | ✅ | bit-exact, same quality numbers as C |
 | C ABI crate `opusorus-capi` (libopusorus.so/.a) | ✅ | upstream C tests all pass; `just cross-capi` builds staticlib for Android/iOS |
-| Fuzz targets (`fuzz/`) | 🟨 | differential vs C + invariants; runs in progress |
+| Fuzz targets (`fuzz/`) | ✅ | 11 targets, ~7.5M execs, 0 findings; DNN/custom-mode fuzz targets are follow-ups |
 | Benchmarks `opusorus-bench` (criterion, Rust vs C scalar vs C NEON) | ✅ | see STATUS |
 | Size report (`scripts/size_report.sh`) | ✅ | see STATUS |
 | opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C |
