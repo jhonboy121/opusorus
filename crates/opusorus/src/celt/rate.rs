@@ -762,8 +762,17 @@ static LAST_CAP: [u8; 3] = [110, 60, 0];
 static LAST_OTHER: [u8; 4] = [120, 112, 70, 0];
 
 // `eMeans` lives in celt/quant_bands.rs (its C home).
-#[cfg(feature = "qext")]
+#[cfg(all(feature = "qext", not(feature = "fixed-point")))]
 use crate::celt::quant_bands::E_MEANS;
+
+/// `eMeans` of the fixed-point build (celt/quant_bands.c: Q4 `signed char`). Private copy until
+/// celt/quant_bands.rs is converted to fixed point (unit `fixed_bands`), which should then
+/// export it as `E_MEANS` so this copy can go.
+#[cfg(all(feature = "qext", feature = "fixed-point"))]
+static E_MEANS: [i8; 25] = [
+    103, 100, 92, 85, 81, 77, 72, 70, 78, 75, 73, 71, 78, 74, 69, 72, 70, 74, 76, 71, 60, 60, 60,
+    60, 60,
+];
 
 /// Port of celt/rate.c:ec_enc_depth.
 #[cfg(feature = "qext")]
@@ -884,6 +893,7 @@ pub fn clt_compute_extra_allocation(
     toneishness: OpusVal32,
 ) {
     use crate::celt::modes::NB_QEXT_BANDS;
+    #[cfg(not(feature = "fixed-point"))]
     use crate::math;
 
     let eb = |i: i32| i32::from(m.e_bands[i as usize]);
@@ -919,6 +929,7 @@ pub fn clt_compute_extra_allocation(
     let mut depth = [0i32; MAX_EXTRA_BANDS];
     let depth = &mut depth[..tot_bands as usize];
     match ec {
+        #[cfg(not(feature = "fixed-point"))]
         EcCoder::Enc(enc) => {
             let mut flat_e = [0.0 as OpusVal16; MAX_EXTRA_BANDS];
             let mut min = [0.0 as OpusVal16; MAX_EXTRA_BANDS];
@@ -1040,12 +1051,169 @@ pub fn clt_compute_extra_allocation(
             }
             for i in start..tot_bands {
                 let iu = i as usize;
-                // FIXED_POINT: not ported (float build)
                 depth[iu] = math::floor(
                     0.5 + f64::from(
                         4.0f32 * min32(cap[iu] as f32, max32(min[iu], flat_e[iu] - fill)),
                     ),
                 ) as i32;
+                if enc.tell_frac() + 80 < enc.storage * 8 << BITRES {
+                    ec_enc_depth(enc, depth[iu], 4 * cap[iu], &mut last);
+                } else {
+                    depth[iu] = 0;
+                }
+            }
+        }
+        #[cfg(feature = "fixed-point")]
+        EcCoder::Enc(enc) => {
+            use crate::celt::arch::{
+                DB_SHIFT, Q15ONE, gconst, mult16_16, mult16_16_q15, pshr32, qconst16, qconst32,
+                shl32,
+            };
+
+            let mut flat_e = [0 as OpusVal16; MAX_EXTRA_BANDS];
+            let mut min = [0 as OpusVal16; MAX_EXTRA_BANDS];
+            let mut ncoef = [0i32; MAX_EXTRA_BANDS];
+            let mut follower = [0 as OpusVal16; MAX_EXTRA_BANDS];
+            let flat_e = &mut flat_e[..tot_bands as usize];
+            let min = &mut min[..tot_bands as usize];
+            let ncoef = &mut ncoef[..tot_bands as usize];
+            let follower = &mut follower[..tot_bands as usize];
+            for i in start..end {
+                ncoef[i as usize] = (eb(i + 1) - eb(i)) * c << lm;
+            }
+            // Remove the effect of band width, eMeans and pre-emphasis to compute the real
+            // (flat) spectrum (Q`DB_SHIFT` → Q10; the `int` result is narrowed by the caller).
+            let flat = |log_e: CeltGlog, log_n: i16, mean: i8, b: i32| -> i32 {
+                pshr32(
+                    log_e - gconst(0.0625f32 as f64) * i32::from(log_n) + shl32(mean, DB_SHIFT - 4)
+                        - gconst(0.0062f32 as f64) * (b + 5) * (b + 5),
+                    DB_SHIFT - 10,
+                )
+            };
+            for i in start..end {
+                let iu = i as usize;
+                flat_e[iu] = flat(band_log_e[iu], m.log_n[iu], E_MEANS[iu], i) as i16;
+                min[iu] = 0;
+            }
+            if c == 2 {
+                for i in start..end {
+                    let iu = i as usize;
+                    flat_e[iu] = maxg(
+                        i32::from(flat_e[iu]),
+                        flat(
+                            band_log_e[m.nb_ebands as usize + iu],
+                            m.log_n[iu],
+                            E_MEANS[iu],
+                            i,
+                        ),
+                    ) as i16;
+                }
+            }
+            let e1 = (end - 1) as usize;
+            flat_e[e1] = (i32::from(flat_e[e1]) + i32::from(qconst16(2.0, 10))) as i16;
+            if let Some(q) = qext_mode {
+                let qeb = |i: i32| i32::from(q.e_bands[i as usize]);
+                let mut min_depth: OpusVal16 = 0;
+                // If we have enough bits, give at least 1 bit of depth to all higher bands.
+                // (`tone_freq > 1.33f` compares the Q-format integer with a float, as in C.)
+                if total >= 3 * c * (qeb(qext_end) - qeb(start)) << lm << BITRES
+                    && (toneishness < qconst32(0.98f32 as f64, 29)
+                        || f32::from(tone_freq) > 1.33f32)
+                {
+                    min_depth = qconst16(1.0, 10);
+                }
+                for i in 0..qext_end {
+                    ncoef[(end + i) as usize] = (qeb(i + 1) - qeb(i)) * c << lm;
+                    min[(end + i) as usize] = min_depth;
+                }
+                for i in 0..qext_end {
+                    let iu = i as usize;
+                    flat_e[(end + i) as usize] =
+                        flat(qext_band_log_e[iu], q.log_n[iu], E_MEANS[iu], end + i) as i16;
+                }
+                if c == 2 {
+                    for i in 0..qext_end {
+                        let iu = i as usize;
+                        flat_e[(end + i) as usize] = maxg(
+                            i32::from(flat_e[(end + i) as usize]),
+                            flat(
+                                qext_band_log_e[NB_QEXT_BANDS as usize + iu],
+                                q.log_n[iu],
+                                E_MEANS[iu],
+                                end + i,
+                            ),
+                        ) as i16;
+                    }
+                }
+            }
+            for i in start + 2..tot_bands - 2 {
+                let iu = i as usize;
+                follower[iu] = median_of_5_val16(&flat_e[iu - 2..]);
+            }
+            let s = start as usize;
+            follower[s] = follower[s + 2];
+            follower[s + 1] = follower[s + 2];
+            let t = tot_bands as usize;
+            follower[t - 1] = follower[t - 3];
+            follower[t - 2] = follower[t - 3];
+            let one_q10 = i32::from(qconst16(1.0, 10));
+            for i in start + 1..tot_bands {
+                let iu = i as usize;
+                follower[iu] = max16(
+                    i32::from(follower[iu]),
+                    i32::from(follower[iu - 1]) - one_q10,
+                ) as i16;
+            }
+            let mut i = tot_bands - 2;
+            while i >= start {
+                let iu = i as usize;
+                follower[iu] = max16(
+                    i32::from(follower[iu]),
+                    i32::from(follower[iu + 1]) - one_q10,
+                ) as i16;
+                i -= 1;
+            }
+            for i in start..tot_bands {
+                let iu = i as usize;
+                flat_e[iu] = (i32::from(flat_e[iu])
+                    - mult16_16_q15(i32::from(Q15ONE) - pshr32(toneishness, 14), follower[iu]))
+                    as i16;
+            }
+            if qext_mode.is_some() {
+                for i in 0..qext_end {
+                    let iu = (end + i) as usize;
+                    flat_e[iu] = (i32::from(flat_e[iu])
+                        + i32::from(qconst16(3.0, 10))
+                        + i32::from(qconst16(0.2f32 as f64, 10)) * i)
+                        as i16;
+                }
+            }
+            // Approximate fill level assuming all bands contribute fully.
+            let mut sum: OpusVal32 = 0;
+            for i in start..tot_bands {
+                let iu = i as usize;
+                sum += mult16_16(ncoef[iu], flat_e[iu]);
+            }
+            total >>= BITRES;
+            let mut fill: OpusVal32 = (shl32(total, 10) + sum) / tot_samples;
+            // Iteratively refine the fill level considering the depth min and cap.
+            let level = |iu: usize, fill: OpusVal32| -> OpusVal32 {
+                min32(
+                    shl32(cap[iu], 10),
+                    max32(i32::from(min[iu]), i32::from(flat_e[iu]) - fill),
+                )
+            };
+            for _ in 0..10 {
+                sum = 0;
+                for i in start..tot_bands {
+                    let iu = i as usize;
+                    sum += ncoef[iu] * level(iu, fill);
+                }
+                fill -= (shl32(total, 10) - sum) / tot_samples;
+            }
+            for i in start..tot_bands {
+                let iu = i as usize;
+                depth[iu] = pshr32(level(iu, fill), 10 - 2);
                 if enc.tell_frac() + 80 < enc.storage * 8 << BITRES {
                     ec_enc_depth(enc, depth[iu], 4 * cap[iu], &mut last);
                 } else {

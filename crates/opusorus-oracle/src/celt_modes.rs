@@ -1,24 +1,55 @@
 //! Oracle bindings for unit `celt_modes`: CELT modes (`modes.c`), Laplace coding
 //! (`laplace.c`), PVQ codeword coding (`cwrs.c`) and bit allocation (`rate.c`).
+//!
+//! The shim is built in both oracles (`// oracle-build: any`); the value types below follow the
+//! oracle build (`arch.h`).
 
 use core::ffi::{c_int, c_void};
+
+/// `opus_val16` of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type OpusVal16 = f32;
+/// `opus_val16` of the oracle build.
+#[cfg(feature = "fixed-point")]
+pub type OpusVal16 = i16;
+/// `opus_val32` of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type OpusVal32 = f32;
+/// `opus_val32` of the oracle build.
+#[cfg(feature = "fixed-point")]
+pub type OpusVal32 = i32;
+/// `celt_glog` of the oracle build (Q24 in fixed point).
+#[cfg(not(feature = "fixed-point"))]
+pub type CeltGlog = f32;
+/// `celt_glog` of the oracle build (Q24 in fixed point).
+#[cfg(feature = "fixed-point")]
+pub type CeltGlog = i32;
+/// `celt_coef` (= `kiss_twiddle_scalar`) of the oracle build.
+#[cfg(not(feature = "fixed-point"))]
+pub type CeltCoef = f32;
+/// `celt_coef` (= `kiss_twiddle_scalar`) of the oracle build (Q15).
+#[cfg(all(feature = "fixed-point", not(feature = "qext")))]
+pub type CeltCoef = i16;
+/// `celt_coef` (= `kiss_twiddle_scalar`) of the oracle build (Q31 with QEXT).
+#[cfg(all(feature = "fixed-point", feature = "qext"))]
+pub type CeltCoef = i32;
 
 unsafe extern "C" {
     fn oracle_mode_create(fs: c_int, frame_size: c_int, err: *mut c_int) -> *const c_void;
     fn oracle_mode_destroy(m: *const c_void);
     fn oracle_mode_ints(m: *const c_void, out: *mut c_int);
-    fn oracle_mode_preemph(m: *const c_void, out: *mut f32);
+    fn oracle_mode_preemph(m: *const c_void, out: *mut OpusVal16);
     fn oracle_mode_i16(m: *const c_void, which: c_int, out: *mut i16, n: c_int);
     fn oracle_mode_u8(m: *const c_void, which: c_int, out: *mut u8, n: c_int);
-    fn oracle_mode_f32(m: *const c_void, which: c_int, out: *mut f32, n: c_int);
+    fn oracle_mode_coef(m: *const c_void, which: c_int, out: *mut CeltCoef, n: c_int);
     fn oracle_mode_fft(
         m: *const c_void,
         idx: c_int,
         ints: *mut c_int,
-        scale: *mut f32,
+        scale: *mut CeltCoef,
         factors: *mut i16,
         bitrev: *mut i16,
-        twiddles: *mut f32,
+        twiddles: *mut CeltCoef,
         tw_n: c_int,
     );
     fn oracle_laplace_encode(
@@ -87,8 +118,8 @@ unsafe extern "C" {
         start: c_int,
         end: c_int,
         qext_end: c_int,
-        band_log_e: *const f32,
-        qext_band_log_e: *const f32,
+        band_log_e: *const CeltGlog,
+        qext_band_log_e: *const CeltGlog,
         total: c_int,
         extra_pulses: *mut c_int,
         extra_equant: *mut c_int,
@@ -97,8 +128,8 @@ unsafe extern "C" {
         buf: *mut u8,
         size: c_int,
         encode: c_int,
-        tone_freq: f32,
-        toneishness: f32,
+        tone_freq: OpusVal16,
+        toneishness: OpusVal32,
         io: *mut c_int,
     );
     fn oracle_log2_frac(val: u32, frac: c_int) -> c_int;
@@ -119,7 +150,7 @@ unsafe extern "C" {
         buf: *const u8,
         size: c_int,
         ys_out: *mut c_int,
-        yy_out: *mut f32,
+        yy_out: *mut OpusVal32,
         rng_out: *mut u32,
     ) -> c_int;
     fn oracle_pvq_u(n: c_int, k: c_int) -> u32;
@@ -146,12 +177,14 @@ impl Drop for Mode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FftState {
     pub nfft: i32,
-    pub scale: f32,
+    pub scale: CeltCoef,
+    /// `scale_shift` (fixed-point builds; 0 in the float build).
+    pub scale_shift: i32,
     pub shift: i32,
     pub factors: Vec<i16>,
     pub bitrev: Vec<i16>,
     /// `(r, i)` pairs; `kfft[0].nfft` entries (sub-states share the base twiddles).
-    pub twiddles: Vec<(f32, f32)>,
+    pub twiddles: Vec<(CeltCoef, CeltCoef)>,
 }
 
 /// `PulseCache` contents.
@@ -170,7 +203,7 @@ pub struct ModeData {
     pub overlap: i32,
     pub nb_ebands: i32,
     pub eff_ebands: i32,
-    pub preemph: [f32; 4],
+    pub preemph: [OpusVal16; 4],
     /// `nbEBands + 1` entries.
     pub e_bands: Vec<i16>,
     pub max_lm: i32,
@@ -179,11 +212,11 @@ pub struct ModeData {
     pub nb_alloc_vectors: i32,
     pub alloc_vectors: Vec<u8>,
     pub log_n: Vec<i16>,
-    pub window: Vec<f32>,
+    pub window: Vec<CeltCoef>,
     pub mdct_n: i32,
     pub mdct_maxshift: i32,
     pub kfft: Vec<FftState>,
-    pub trig: Vec<f32>,
+    pub trig: Vec<CeltCoef>,
     pub cache: PulseCache,
     /// `None` without QEXT or when the mode has no QEXT cache.
     pub qext_cache: Option<PulseCache>,
@@ -212,10 +245,10 @@ impl Mode {
         v
     }
 
-    fn f32s(&self, which: c_int, n: usize) -> Vec<f32> {
-        let mut v = vec![0f32; n];
+    fn coefs(&self, which: c_int, n: usize) -> Vec<CeltCoef> {
+        let mut v: Vec<CeltCoef> = vec![Default::default(); n];
         // SAFETY: as above.
-        unsafe { oracle_mode_f32(self.0, which, v.as_mut_ptr(), n as c_int) };
+        unsafe { oracle_mode_coef(self.0, which, v.as_mut_ptr(), n as c_int) };
         v
     }
 
@@ -225,7 +258,7 @@ impl Mode {
         let mut ints = [0 as c_int; 12];
         // SAFETY: ints has the 12 entries the shim writes.
         unsafe { oracle_mode_ints(self.0, ints.as_mut_ptr()) };
-        let mut preemph = [0f32; 4];
+        let mut preemph: [OpusVal16; 4] = Default::default();
         // SAFETY: 4 entries.
         unsafe { oracle_mode_preemph(self.0, preemph.as_mut_ptr()) };
         let nb = ints[2] as usize;
@@ -237,8 +270,8 @@ impl Mode {
         if with_mdct {
             let mut tw_n = 0usize;
             for idx in 0..=maxshift {
-                let mut fi = [0 as c_int; 2];
-                let mut scale = 0f32;
+                let mut fi = [0 as c_int; 3];
+                let mut scale: CeltCoef = Default::default();
                 let mut factors = vec![0i16; 16];
                 // SAFETY: first call only reads the header (null bitrev/twiddles).
                 unsafe {
@@ -258,8 +291,8 @@ impl Mode {
                     tw_n = nfft;
                 }
                 let mut bitrev = vec![0i16; nfft];
-                let mut tw = vec![0f32; 2 * tw_n];
-                // SAFETY: bitrev has nfft entries, tw has 2*tw_n floats.
+                let mut tw: Vec<CeltCoef> = vec![Default::default(); 2 * tw_n];
+                // SAFETY: bitrev has nfft entries, tw has 2*tw_n values.
                 unsafe {
                     oracle_mode_fft(
                         self.0,
@@ -275,6 +308,7 @@ impl Mode {
                 kfft.push(FftState {
                     nfft: fi[0],
                     scale,
+                    scale_shift: fi[2],
                     shift: fi[1],
                     factors: factors.clone(),
                     bitrev,
@@ -283,7 +317,7 @@ impl Mode {
             }
             let n = mdct_n as usize;
             let trig_len = n - ((n >> 1) >> maxshift);
-            trig = self.f32s(1, trig_len);
+            trig = self.coefs(1, trig_len);
         }
         let cache = PulseCache {
             size: ints[10],
@@ -313,7 +347,7 @@ impl Mode {
             nb_alloc_vectors: ints[7],
             alloc_vectors: self.u8s(0, ints[7] as usize * nb),
             log_n: self.i16s(1, nb),
-            window: self.f32s(0, ints[1] as usize),
+            window: self.coefs(0, ints[1] as usize),
             mdct_n,
             mdct_maxshift: maxshift,
             kfft,
@@ -488,14 +522,14 @@ pub struct ExtraAllocIn {
     pub end: i32,
     pub qext_end: i32,
     /// `C * nbEBands` entries.
-    pub band_log_e: Vec<f32>,
+    pub band_log_e: Vec<CeltGlog>,
     /// `C * NB_QEXT_BANDS` entries.
-    pub qext_band_log_e: Vec<f32>,
+    pub qext_band_log_e: Vec<CeltGlog>,
     pub total: i32,
     pub c: i32,
     pub lm: i32,
-    pub tone_freq: f32,
-    pub toneishness: f32,
+    pub tone_freq: OpusVal16,
+    pub toneishness: OpusVal32,
     /// Length of the output arrays (`nbEBands + NB_QEXT_BANDS`).
     pub n_out: usize,
 }
@@ -655,11 +689,11 @@ pub fn cwrs_encode(ys: &[i32], ns: &[i32], ks: &[i32], size: usize) -> (Vec<u8>,
 
 /// Decodes consecutive pulse vectors. Returns `(ys, yy per vector, rng, error)`.
 #[must_use]
-pub fn cwrs_decode(ns: &[i32], ks: &[i32], buf: &[u8]) -> (Vec<i32>, Vec<f32>, u32, i32) {
+pub fn cwrs_decode(ns: &[i32], ks: &[i32], buf: &[u8]) -> (Vec<i32>, Vec<OpusVal32>, u32, i32) {
     assert_eq!(ns.len(), ks.len());
     let total: usize = ns.iter().map(|&n| n as usize).sum();
     let mut ys = vec![0 as c_int; total];
-    let mut yy = vec![0f32; ns.len()];
+    let mut yy: Vec<OpusVal32> = vec![Default::default(); ns.len()];
     let mut rng = 0u32;
     // SAFETY: output arrays sized for all vectors; decoder only reads buf.
     let err = unsafe {

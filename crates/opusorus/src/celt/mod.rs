@@ -26,13 +26,11 @@ pub mod mathops;
 pub mod mdct;
 #[cfg(feature = "qext")]
 pub mod mini_kfft;
-#[cfg(not(feature = "fixed-point"))]
 pub mod modes;
 #[cfg(not(feature = "fixed-point"))]
 pub mod pitch;
 #[cfg(not(feature = "fixed-point"))]
 pub mod quant_bands;
-#[cfg(not(feature = "fixed-point"))]
 pub mod rate;
 pub mod static_modes;
 #[cfg(feature = "fixed-point")]

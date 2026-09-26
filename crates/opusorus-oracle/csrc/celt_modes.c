@@ -1,4 +1,7 @@
-/* Oracle C shims for unit celt_modes: modes.c, laplace.c, cwrs.c, rate.c. */
+/* Oracle C shims for unit celt_modes: modes.c, laplace.c, cwrs.c, rate.c. Built in both the
+   float and the fixed-point oracle: values use the build's own types (opus_val16, opus_val32,
+   celt_coef, celt_glog), mirrored by the Rust bindings. */
+// oracle-build: any
 #include <string.h>
 #include "opus_types.h"
 #include "opus_defines.h"
@@ -46,7 +49,7 @@ void oracle_mode_ints(const void *mv, int *out) {
 #endif
 }
 
-void oracle_mode_preemph(const void *mv, float *out) {
+void oracle_mode_preemph(const void *mv, opus_val16 *out) {
   const CELTMode *m = (const CELTMode *)mv;
   int i;
   for (i = 0; i < 4; i++) out[i] = m->preemph[i];
@@ -83,22 +86,28 @@ void oracle_mode_u8(const void *mv, int which, unsigned char *out, int n) {
   if (src) memcpy(out, src, n);
 }
 
-/* which: 0 window, 1 mdct.trig */
-void oracle_mode_f32(const void *mv, int which, float *out, int n) {
+/* which: 0 window, 1 mdct.trig (both celt_coef, kiss_twiddle_scalar being celt_coef in every
+   build). */
+void oracle_mode_coef(const void *mv, int which, celt_coef *out, int n) {
   const CELTMode *m = (const CELTMode *)mv;
-  const float *src = which == 0 ? m->window : m->mdct.trig;
+  const celt_coef *src = which == 0 ? m->window : m->mdct.trig;
   memcpy(out, src, n * sizeof(*out));
 }
 
-/* FFT state idx of the MDCT. ints: nfft shift; factors[16]; bitrev[nfft]; twiddles as
-   (r,i) pairs, tw_n entries. */
-void oracle_mode_fft(const void *mv, int idx, int *ints, float *scale, short *factors,
-                     short *bitrev, float *twiddles, int tw_n) {
+/* FFT state idx of the MDCT. ints: nfft shift scale_shift (0 in the float build); factors[16];
+   bitrev[nfft]; twiddles as (r,i) pairs, tw_n entries. */
+void oracle_mode_fft(const void *mv, int idx, int *ints, celt_coef *scale, short *factors,
+                     short *bitrev, celt_coef *twiddles, int tw_n) {
   const CELTMode *m = (const CELTMode *)mv;
   const kiss_fft_state *st = m->mdct.kfft[idx];
   int i;
   ints[0] = st->nfft;
   ints[1] = st->shift;
+#ifdef FIXED_POINT
+  ints[2] = st->scale_shift;
+#else
+  ints[2] = 0;
+#endif
   *scale = st->scale;
   for (i = 0; i < 2 * MAXFACTORS; i++) factors[i] = st->factors[i];
   if (bitrev) memcpy(bitrev, st->bitrev, st->nfft * sizeof(*bitrev));
@@ -249,11 +258,11 @@ void oracle_clt_compute_allocation(const void *mv, int use_qext, int start, int 
 
 /* io[0] final tell_frac, io[1] rng, io[2] error (all out). */
 void oracle_clt_compute_extra_allocation(const void *mv, int with_qext, int start, int end,
-                                         int qext_end, const float *bandLogE,
-                                         const float *qext_bandLogE, int total,
+                                         int qext_end, const celt_glog *bandLogE,
+                                         const celt_glog *qext_bandLogE, int total,
                                          int *extra_pulses, int *extra_equant, int C, int LM,
                                          unsigned char *buf, int size, int encode,
-                                         float tone_freq, float toneishness, int *io) {
+                                         opus_val16 tone_freq, opus_val32 toneishness, int *io) {
 #ifdef ENABLE_QEXT
   const CELTMode *m = (const CELTMode *)mv;
   CELTMode q;
@@ -322,7 +331,7 @@ int oracle_cwrs_encode(const int *ys, const int *ns, const int *ks, int count,
 }
 
 int oracle_cwrs_decode(const int *ns, const int *ks, int count, unsigned char *buf, int size,
-                       int *ys_out, float *yy_out, unsigned *rng_out) {
+                       int *ys_out, opus_val32 *yy_out, unsigned *rng_out) {
   ec_dec dec;
   int v, off = 0;
   ec_dec_init(&dec, buf, size);

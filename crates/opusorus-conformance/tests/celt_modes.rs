@@ -1,22 +1,41 @@
 //! Differential tests for unit `celt_modes`: static CELT modes, mode lookup/creation
 //! (`modes.c`), Laplace coding (`laplace.c`), PVQ codeword coding (`cwrs.c`) and the bit
 //! allocation (`rate.c`) vs the C oracle.
-
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
+//!
+//! Runs in the float and in the fixed-point builds (`fixed-point`, `fixed-res24`, with or
+//! without `qext` / `custom-modes`) against the matching oracle: values of the build-dependent
+//! types (`opus_val16`, `celt_coef`, `celt_glog`, ...) are compared bit for bit through
+//! [`assert_val_eq`].
 
 use opusorus::celt::entcode::EcCoder;
 use opusorus::celt::entdec::EcDec;
 use opusorus::celt::entenc::EcEnc;
 use opusorus::celt::static_modes::{CeltMode, MODE48000_960_120, PulseCache};
 use opusorus::celt::{cwrs, laplace, modes, rate};
-use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq};
+#[cfg(not(feature = "fixed-point"))]
+use opusorus_conformance::assert_bits_eq_f32;
+use opusorus_conformance::{Rng, assert_slice_eq};
 use opusorus_oracle::celt_modes as c;
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
+
+/// Compares values of a build-dependent type: bit patterns of floats in the float build, the
+/// integers themselves in fixed-point builds.
+#[cfg(not(feature = "fixed-point"))]
+#[track_caller]
+fn assert_val_eq(what: &str, rust: &[f32], c: &[f32]) {
+    assert_bits_eq_f32(what, rust, c);
+}
+
+/// Compares values of a build-dependent type: bit patterns of floats in the float build, the
+/// integers themselves in fixed-point builds.
+#[cfg(feature = "fixed-point")]
+#[track_caller]
+fn assert_val_eq<T: PartialEq + core::fmt::Debug>(what: &str, rust: &[T], c: &[T]) {
+    assert_slice_eq(what, rust, c);
+}
 
 fn cache_data(p: &PulseCache) -> c::PulseCache {
     c::PulseCache {
@@ -42,7 +61,7 @@ fn assert_mode_eq(what: &str, m: &CeltMode, o: &c::ModeData, with_mdct: bool) {
     assert_eq!(m.overlap, o.overlap, "{what}: overlap");
     assert_eq!(m.nb_ebands, o.nb_ebands, "{what}: nbEBands");
     assert_eq!(m.eff_ebands, o.eff_ebands, "{what}: effEBands");
-    assert_bits_eq_f32(&format!("{what}: preemph"), &m.preemph, &o.preemph);
+    assert_val_eq(&format!("{what}: preemph"), &m.preemph, &o.preemph);
     let nb = m.nb_ebands as usize;
     assert_slice_eq(&format!("{what}: eBands"), &m.e_bands[..=nb], &o.e_bands);
     assert_eq!(m.max_lm, o.max_lm, "{what}: maxLM");
@@ -61,26 +80,28 @@ fn assert_mode_eq(what: &str, m: &CeltMode, o: &c::ModeData, with_mdct: bool) {
         &o.alloc_vectors,
     );
     assert_slice_eq(&format!("{what}: logN"), &m.log_n[..nb], &o.log_n);
-    assert_bits_eq_f32(&format!("{what}: window"), &m.window, &o.window);
+    assert_val_eq(&format!("{what}: window"), &m.window, &o.window);
     if with_mdct {
         assert_eq!(m.mdct.n, o.mdct_n, "{what}: mdct.n");
         assert_eq!(m.mdct.maxshift, o.mdct_maxshift, "{what}: mdct.maxshift");
-        assert_bits_eq_f32(&format!("{what}: mdct.trig"), &m.mdct.trig, &o.trig);
+        assert_val_eq(&format!("{what}: mdct.trig"), &m.mdct.trig, &o.trig);
         assert_eq!(o.kfft.len(), m.mdct.maxshift as usize + 1);
         for (i, of) in o.kfft.iter().enumerate() {
             let rf = &m.mdct.kfft[i];
             let w = format!("{what}: kfft[{i}]");
             assert_eq!(rf.nfft, of.nfft, "{w}.nfft");
-            assert_eq!(rf.scale.to_bits(), of.scale.to_bits(), "{w}.scale");
+            assert_val_eq(&format!("{w}.scale"), &[rf.scale], &[of.scale]);
+            #[cfg(feature = "fixed-point")]
+            assert_eq!(rf.scale_shift, of.scale_shift, "{w}.scale_shift");
             assert_eq!(rf.shift, of.shift, "{w}.shift");
             assert_slice_eq(&format!("{w}.factors"), &rf.factors, &of.factors);
             assert_slice_eq(&format!("{w}.bitrev"), &rf.bitrev, &of.bitrev);
-            let rr: Vec<f32> = rf.twiddles.iter().map(|t| t.r).collect();
-            let ri: Vec<f32> = rf.twiddles.iter().map(|t| t.i).collect();
-            let or: Vec<f32> = of.twiddles.iter().map(|t| t.0).collect();
-            let oi: Vec<f32> = of.twiddles.iter().map(|t| t.1).collect();
-            assert_bits_eq_f32(&format!("{w}.twiddles.r"), &rr, &or);
-            assert_bits_eq_f32(&format!("{w}.twiddles.i"), &ri, &oi);
+            let rr: Vec<c::CeltCoef> = rf.twiddles.iter().map(|t| t.r).collect();
+            let ri: Vec<c::CeltCoef> = rf.twiddles.iter().map(|t| t.i).collect();
+            let or: Vec<c::CeltCoef> = of.twiddles.iter().map(|t| t.0).collect();
+            let oi: Vec<c::CeltCoef> = of.twiddles.iter().map(|t| t.1).collect();
+            assert_val_eq(&format!("{w}.twiddles.r"), &rr, &or);
+            assert_val_eq(&format!("{w}.twiddles.i"), &ri, &oi);
         }
     }
     assert_cache_eq(&format!("{what}: cache"), &cache_data(&m.cache), &o.cache);
@@ -263,11 +284,13 @@ fn custom_mode_create_matches_oracle() {
         "only {created} modes created ({skipped} skipped)"
     );
     // Without an MDCT the public constructor fails for non-static modes, like an allocation
-    // failure in C.
+    // failure in C. (Not available in fixed-point builds until the fixed MDCT is ported.)
+    #[cfg(not(feature = "fixed-point"))]
     assert_eq!(
         modes::opus_custom_mode_create_custom(44100, 896).err(),
         Some(opusorus::Error::AllocFail)
     );
+    #[cfg(not(feature = "fixed-point"))]
     assert!(modes::opus_custom_mode_create_custom(48000, 480).is_ok());
 }
 
@@ -528,7 +551,7 @@ fn rust_cwrs_encode(ys: &[i32], ns: &[i32], ks: &[i32], size: usize) -> (Vec<u8>
     (buf, rng, err)
 }
 
-fn rust_cwrs_decode(ns: &[i32], ks: &[i32], buf: &[u8]) -> (Vec<i32>, Vec<f32>, u32, i32) {
+fn rust_cwrs_decode(ns: &[i32], ks: &[i32], buf: &[u8]) -> (Vec<i32>, Vec<c::OpusVal32>, u32, i32) {
     let mut d = EcDec::new(buf);
     let mut ys = vec![0i32; ns.iter().map(|&n| n as usize).sum()];
     let mut yy = Vec::with_capacity(ns.len());
@@ -560,7 +583,7 @@ fn check_cwrs_batch(rng: &mut Rng, pairs: &[(i32, i32)], what: &str) {
     let cd = c::cwrs_decode(&ns, &ks, &co.0);
     let rd = rust_cwrs_decode(&ns, &ks, &co.0);
     assert_eq!(rd.0, cd.0, "{what}: decoded pulses");
-    assert_bits_eq_f32(&format!("{what}: yy"), &rd.1, &cd.1);
+    assert_val_eq(&format!("{what}: yy"), &rd.1, &cd.1);
     assert_eq!((rd.2, rd.3), (cd.2, cd.3), "{what}: decoder state");
     assert_eq!(rd.0, ys, "{what}: round trip");
     // Random bytes decode to arbitrary codewords.
@@ -569,7 +592,7 @@ fn check_cwrs_batch(rng: &mut Rng, pairs: &[(i32, i32)], what: &str) {
     let cd = c::cwrs_decode(&ns, &ks, &junk);
     let rd = rust_cwrs_decode(&ns, &ks, &junk);
     assert_eq!(rd.0, cd.0, "{what}: junk decoded pulses");
-    assert_bits_eq_f32(&format!("{what}: junk yy"), &rd.1, &cd.1);
+    assert_val_eq(&format!("{what}: junk yy"), &rd.1, &cd.1);
     assert_eq!((rd.2, rd.3), (cd.2, cd.3), "{what}: junk decoder state");
 }
 
@@ -989,6 +1012,42 @@ fn rust_extra_alloc(
     }
 }
 
+/// A `celt_glog` input from a float value (Q24 in fixed-point builds).
+#[cfg(feature = "qext")]
+const fn glog(x: f32) -> c::CeltGlog {
+    #[cfg(feature = "fixed-point")]
+    return (x * 16_777_216.0) as i32;
+    #[cfg(not(feature = "fixed-point"))]
+    return x;
+}
+
+/// A `toneishness` input (`opus_val32`, Q29 in fixed-point builds).
+#[cfg(feature = "qext")]
+const fn q29(x: f32) -> c::OpusVal32 {
+    #[cfg(feature = "fixed-point")]
+    return (x as f64 * 536_870_912.0) as i32;
+    #[cfg(not(feature = "fixed-point"))]
+    return x;
+}
+
+/// A `tone_freq` input in radians (`opus_val16`, Q13 in fixed-point builds).
+#[cfg(feature = "qext")]
+const fn tone(x: f32) -> c::OpusVal16 {
+    #[cfg(feature = "fixed-point")]
+    return (x * 8192.0) as i16;
+    #[cfg(not(feature = "fixed-point"))]
+    return x;
+}
+
+/// A raw `tone_freq` value (the integer itself in fixed-point builds).
+#[cfg(feature = "qext")]
+const fn tone_raw(x: i32) -> c::OpusVal16 {
+    #[cfg(feature = "fixed-point")]
+    return x as i16;
+    #[cfg(not(feature = "fixed-point"))]
+    return x as f32;
+}
+
 #[cfg(feature = "qext")]
 #[test]
 fn clt_compute_extra_allocation_matches_oracle() {
@@ -1027,26 +1086,28 @@ fn clt_compute_extra_allocation_matches_oracle() {
             } else {
                 0
             };
-            let mut band_log_e = vec![0f32; (cc * nb) as usize];
-            let mut qext_band_log_e = vec![0f32; 2 * nbq];
             let scale = [1.0f32, 5.0, 20.0][rng.range_i32(0, 2) as usize];
-            for v in band_log_e.iter_mut().chain(qext_band_log_e.iter_mut()) {
-                *v = scale * rng.f32_sym() + rng.range_i32(-5, 10) as f32;
-            }
+            let mut log_e = || glog(scale * rng.f32_sym() + rng.range_i32(-5, 10) as f32);
+            let band_log_e: Vec<c::CeltGlog> = (0..cc * nb).map(|_| log_e()).collect();
+            let qext_band_log_e: Vec<c::CeltGlog> = (0..2 * nbq).map(|_| log_e()).collect();
             let total = match rng.range_i32(0, 4) {
                 0 => rng.range_i32(-100, 100),
                 1 => rng.range_i32(0, 5000),
                 2 => rng.range_i32(0, 60000),
                 _ => rng.range_i32(0, 3825 * 64),
             };
-            let toneishness = match rng.range_i32(0, 3) {
+            let toneishness = q29(match rng.range_i32(0, 4) {
                 0 => 0.0,
                 1 => 0.99,
+                2 => 0.98,
                 _ => 0.5 * (rng.f32_sym() + 1.0),
-            };
-            let tone_freq = match rng.range_i32(0, 2) {
-                0 => -1.0,
-                _ => 1.6 * (rng.f32_sym() + 1.0),
+            });
+            let tone_freq = match rng.range_i32(0, 3) {
+                0 => tone(-1.0),
+                // Around the `tone_freq > 1.33f` threshold (compared as a raw Q13 integer in
+                // fixed-point builds, as in C).
+                1 => tone_raw(rng.range_i32(-1, 3)),
+                _ => tone(1.6 * (rng.f32_sym() + 1.0)),
             };
             let a = c::ExtraAllocIn {
                 with_qext,

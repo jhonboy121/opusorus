@@ -1,9 +1,11 @@
 //! Port of celt/modes.c, celt/modes.h: CELT mode lookup/creation.
 //!
 //! The mode/pulse-cache types and all static mode data live in
-//! [`static_modes`](crate::celt::static_modes) (port of `static_modes_float.h`). This module
-//! holds the mode constructor (`opus_custom_mode_create`), the QEXT helper mode
-//! (`compute_qext_mode`) and, with `custom-modes`, the dynamic mode creation helpers.
+//! [`static_modes`](crate::celt::static_modes) (port of `static_modes_float.h`, or
+//! `static_modes_fixed.h` in fixed-point builds). This module holds the mode constructor
+//! (`opus_custom_mode_create`), the QEXT helper mode (`compute_qext_mode`) and, with
+//! `custom-modes`, the dynamic mode creation helpers (fixed-point builds compute the
+//! pre-emphasis and the `celt_coef` window in Q format, like `modes.c`).
 //!
 //! `opus_custom_mode_destroy` has no port: modes are either `'static` or owned values dropped by
 //! Rust.
@@ -11,6 +13,10 @@
 #[cfg(feature = "custom-modes")]
 use alloc::{borrow::Cow, vec, vec::Vec};
 
+#[cfg(feature = "custom-modes")]
+use crate::celt::arch::{CeltCoef, OpusVal16};
+#[cfg(all(feature = "custom-modes", feature = "fixed-point"))]
+use crate::celt::arch::{SIG_SHIFT, min32, qconst16};
 #[cfg(feature = "custom-modes")]
 use crate::celt::static_modes::{BAND_ALLOCATION, EBAND5MS, MdctLookup, PulseCache};
 use crate::celt::static_modes::{CeltMode, STATIC_MODE_LIST};
@@ -27,6 +33,22 @@ pub const QEXT_PACKET_SIZE_CAP: i32 = 3825;
 /// `NB_QEXT_BANDS`.
 #[cfg(feature = "qext")]
 pub const NB_QEXT_BANDS: i32 = 14;
+
+/// `SIG_SHIFT` (`arch.h`): only a `QCONST16` argument in the float build, where it is ignored.
+#[cfg(all(feature = "custom-modes", not(feature = "fixed-point")))]
+const SIG_SHIFT: i32 = 12;
+
+/// `QCONST16(x, bits)` of an `f`-suffixed pre-emphasis literal: `x` itself in the float build.
+#[cfg(all(feature = "custom-modes", not(feature = "fixed-point")))]
+const fn preemph_const(x: f32, _bits: i32) -> OpusVal16 {
+    x
+}
+
+/// `QCONST16(x, bits)` of an `f`-suffixed pre-emphasis literal (fixed-point: Q`bits`).
+#[cfg(all(feature = "custom-modes", feature = "fixed-point"))]
+const fn preemph_const(x: f32, bits: i32) -> OpusVal16 {
+    qconst16(x as f64, bits)
+}
 
 /// `BITALLOC_SIZE`: number of rows of `band_allocation`.
 #[cfg(feature = "custom-modes")]
@@ -262,7 +284,9 @@ pub fn compute_allocation_table(
 /// a custom mode. Errors are `BadArg` for unsupported parameters and `AllocFail` where C would
 /// jump to `failure`.
 ///
-#[cfg(feature = "custom-modes")]
+/// Not available in fixed-point builds yet: the fixed-point MDCT (`celt/mdct.rs`, unit
+/// `fixed_fft`) is still gated there; use [`opus_custom_mode_create_with`] meanwhile.
+#[cfg(all(feature = "custom-modes", not(feature = "fixed-point")))]
 pub fn opus_custom_mode_create_custom(fs: i32, frame_size: i32) -> Result<Cow<'static, CeltMode>> {
     opus_custom_mode_create_with(fs, frame_size, crate::celt::mdct::clt_mdct_init)
 }
@@ -319,21 +343,46 @@ pub fn opus_custom_mode_create_with(
 
     // Pre/de-emphasis depends on sampling rate. The "standard" pre-emphasis is defined as
     // A(z) = 1 - 0.85*z^-1 at 48 kHz. Other rates should approximate that.
-    let preemph: [f32; 4] = if cfg!(feature = "qext") && fs == 96000 {
+    let preemph: [OpusVal16; 4] = if cfg!(feature = "qext") && fs == 96000 {
         // 96 kHz
-        [0.9230041504, 0.2200012207, 1.5128347184, 0.6610107422]
+        [
+            preemph_const(0.9230041504, 15),
+            preemph_const(0.2200012207, 15),
+            preemph_const(1.5128347184, SIG_SHIFT), // exact 1/preemph[3]
+            preemph_const(0.6610107422, 13),
+        ]
     } else if fs < 12000 {
         // 8 kHz
-        [0.3500061035, -0.1799926758, 0.2719968125, 3.6765136719]
+        [
+            preemph_const(0.3500061035, 15),
+            -preemph_const(0.1799926758, 15),
+            preemph_const(0.2719968125, SIG_SHIFT), // exact 1/preemph[3]
+            preemph_const(3.6765136719, 13),
+        ]
     } else if fs < 24000 {
         // 16 kHz
-        [0.6000061035, -0.1799926758, 0.4424998650, 2.2598876953]
+        [
+            preemph_const(0.6000061035, 15),
+            -preemph_const(0.1799926758, 15),
+            preemph_const(0.4424998650, SIG_SHIFT), // exact 1/preemph[3]
+            preemph_const(2.2598876953, 13),
+        ]
     } else if fs < 40000 {
         // 32 kHz
-        [0.7799987793, -0.1000061035, 0.7499771125, 1.3333740234]
+        [
+            preemph_const(0.7799987793, 15),
+            -preemph_const(0.1000061035, 15),
+            preemph_const(0.7499771125, SIG_SHIFT), // exact 1/preemph[3]
+            preemph_const(1.3333740234, 13),
+        ]
     } else {
         // 48 kHz
-        [0.8500061035, 0.0, 1.0, 1.0]
+        [
+            preemph_const(0.8500061035, 15),
+            preemph_const(0.0, 15),
+            preemph_const(1.0, SIG_SHIFT),
+            preemph_const(1.0, 13),
+        ]
     };
 
     let max_lm = lm;
@@ -360,12 +409,21 @@ pub fn opus_custom_mode_create_with(
 
     let alloc_vectors = compute_allocation_table(fs, short_mdct_size, &e_bands, nb_ebands);
 
-    // FIXED_POINT: not ported (float build)
-    let mut window: Vec<f32> = Vec::with_capacity(overlap as usize);
+    let mut window: Vec<CeltCoef> = Vec::with_capacity(overlap as usize);
     for i in 0..overlap {
         let pi = core::f64::consts::PI; // M_PI
         let a = math::sin(0.5 * pi * (f64::from(i) + 0.5) / f64::from(overlap));
-        window.push((1.0f64 * math::sin(0.5 * pi * a * a)) as f32);
+        let w = math::sin(0.5 * pi * a * a);
+        // Float: `Q15ONE*sin(...)`.
+        #[cfg(not(feature = "fixed-point"))]
+        window.push((1.0f64 * w) as f32);
+        // Fixed QEXT (Q31 `celt_coef`): `MIN32(2147483647, 2147483648*sin(...))`, a double
+        // truncated by the conversion.
+        #[cfg(all(feature = "fixed-point", feature = "qext"))]
+        window.push(min32(2147483647.0f64, 2147483648.0 * w) as i32);
+        // Fixed (Q15 `celt_coef`): `MIN32(32767, floor(.5+32768.*sin(...)))`.
+        #[cfg(all(feature = "fixed-point", not(feature = "qext")))]
+        window.push(min32(32767.0f64, math::floor(0.5 + 32768.0 * w)) as i16);
     }
 
     let mut log_n: Vec<i16> = Vec::with_capacity(nb_ebands as usize);
