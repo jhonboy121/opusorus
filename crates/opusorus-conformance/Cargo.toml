@@ -10,8 +10,8 @@ publish = false
 [features]
 qext = ["opusorus/qext", "opusorus-oracle/qext", "opusorus-tools/qext"]
 custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
-deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc"]
-dred = ["opusorus/dred", "opusorus-oracle/dred", "deep-plc"]
+deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc", "opusorus-tools/deep-plc"]
+dred = ["opusorus/dred", "opusorus-oracle/dred", "deep-plc", "opusorus-tools/dred"]
 osce = ["opusorus/osce", "opusorus-oracle/osce", "deep-plc", "opusorus-tools/osce"]
 # Fixed-point port vs a fixed-point oracle (docs/FIXED_POINT.md). Float-only test files are
 # compiled out; run e.g. `cargo test -p opusorus-conformance --features fixed-point`.

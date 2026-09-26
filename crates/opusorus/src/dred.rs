@@ -24,9 +24,10 @@
 //! | `opus_decoder_dred_decode{,24,_float}` | [`crate::Decoder::dred_decode`] / [`crate::Decoder::dred_decode24`] / [`crate::Decoder::dred_decode_float`] |
 //!
 //! Weights: the RDOVAE decoder model is not compiled in (upstream `USE_WEIGHTS_FILE`, PLAN
-//! D-015). A new [`DredDecoder`] is therefore not loaded (`parse` / `process` return
-//! [`Error::Unimplemented`], like upstream) until [`DredDecoder::set_dnn_blob`] binds a libopus
-//! weight blob holding the `rdovaedec` arrays.
+//! D-015) unless the `dnn-weights-embedded` feature embeds a blob. Without it a new
+//! [`DredDecoder`] is not loaded (`parse` / `process` return [`Error::Unimplemented`], like
+//! upstream) until [`DredDecoder::set_dnn_blob`] binds a libopus weight blob holding the
+//! `rdovaedec` arrays.
 //!
 //! Deviations from C (Rust-only guards where C has undefined behaviour): a non-positive
 //! `sampling_rate` in [`DredDecoder::parse`] is [`Error::BadArg`]; a [`Dred`] is zeroed at
@@ -37,11 +38,15 @@
 //!
 //! let dred_dec = DredDecoder::new();
 //! let mut dred = Dred::new();
-//! // Without a loaded RDOVAE model (see `DredDecoder::set_dnn_blob`) parsing is unavailable.
-//! assert_eq!(
-//!     dred_dec.parse(&mut dred, &[0xF8, 0xFF, 0xFE], 48000, 48000, false),
-//!     Err(opusorus::Error::Unimplemented)
-//! );
+//! let r = dred_dec.parse(&mut dred, &[0xF8, 0xFF, 0xFE], 48000, 48000, false);
+//! if dred_dec.loaded() {
+//!     // A packet without DRED (compiled-in weights: `dnn-weights-embedded`).
+//!     assert_eq!(r, Ok((0, 0)));
+//! } else {
+//!     // Without a loaded RDOVAE model (see `DredDecoder::set_dnn_blob`) parsing is
+//!     // unavailable.
+//!     assert_eq!(r, Err(opusorus::Error::Unimplemented));
+//! }
 //! ```
 
 use alloc::boxed::Box;
@@ -80,18 +85,37 @@ impl DredDecoder {
     /// Port of `opus_dred_decoder_create` / `opus_dred_decoder_init`: a DRED decoder without a
     /// model (upstream `USE_WEIGHTS_FILE`: `init` succeeds and leaves `loaded` at 0). Load one
     /// with [`DredDecoder::set_dnn_blob`].
+    ///
+    /// With the `dnn-weights-embedded` feature the RDOVAE decoder is bound from the embedded
+    /// blob, like upstream's compiled-in `rdovaedec_arrays`; if the blob lacks it, the decoder
+    /// stays unloaded ([`DredDecoder::loaded`]; C `opus_dred_decoder_init` returns
+    /// `OPUS_UNIMPLEMENTED` in that case).
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        #[allow(unused_mut, reason = "only mutated with compiled-in weights")]
+        let mut dec = Self {
             model: Box::default(),
             loaded: false,
-        }
+        };
+        #[cfg(feature = "dnn-weights-embedded")]
+        dec.init();
+        dec
     }
 
     /// Port of `opus_dred_decoder_init`: re-initializes the decoder. With upstream
     /// `USE_WEIGHTS_FILE` semantics this clears `loaded` (the model must be loaded again).
+    #[cfg(not(feature = "dnn-weights-embedded"))]
     pub const fn init(&mut self) {
         self.loaded = false;
+    }
+
+    /// Port of `opus_dred_decoder_init` with compiled-in weights (feature
+    /// `dnn-weights-embedded`): binds the RDOVAE decoder of the embedded blob again (C:
+    /// `init_rdovaedec(&dec->model, rdovaedec_arrays)`). `loaded` records the outcome, as in C
+    /// (where a failure also makes `opus_dred_decoder_init` return `OPUS_UNIMPLEMENTED`).
+    #[cfg(feature = "dnn-weights-embedded")]
+    pub fn init(&mut self) {
+        self.loaded = self.set_dnn_blob(crate::dnn::embedded::DNN_BLOB).is_ok();
     }
 
     /// Port of `opus_dred_decoder_get_size` (the Rust footprint of the struct and its model

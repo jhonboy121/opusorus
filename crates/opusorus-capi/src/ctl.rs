@@ -71,6 +71,11 @@ pub unsafe extern "C" fn opusorus_ctl_set(
                 // SAFETY: caller contract; the reference is used for this call only.
                 unsafe { crate::custom::custom_decoder(st.cast(), a) }?.ctl_set(request, value)
             }
+            #[cfg(feature = "dred")]
+            Kind::DredDecoder => {
+                // SAFETY: caller contract; the reference is used for this call only.
+                unsafe { crate::dred::dred_decoder(st.cast(), a) }?.ctl_set(request, value)
+            }
             _ => return Err(OPUS_UNIMPLEMENTED),
         };
         r.map(|()| OPUS_OK).map_err(code)
@@ -234,7 +239,14 @@ pub unsafe extern "C" fn opusorus_ctl_ptr(
                     .map(|()| OPUS_OK)
                     .map_err(code)
             }
-            // TODO(dnn_integration): `OPUS_SET_DNN_BLOB` on an `OpusDREDDecoder` (see dred.rs).
+            #[cfg(feature = "dred")]
+            (Kind::DredDecoder, OPUS_SET_DNN_BLOB_REQUEST) => {
+                // SAFETY: caller contract.
+                let dec = unsafe { crate::dred::dred_decoder(st.cast(), Access::Write) }?;
+                // SAFETY: caller contract.
+                let data = unsafe { blob(ptr, len) }?;
+                dec.set_dnn_blob(data).map(|()| OPUS_OK).map_err(code)
+            }
             _ => Err(OPUS_UNIMPLEMENTED),
         }
     })

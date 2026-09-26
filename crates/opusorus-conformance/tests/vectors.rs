@@ -17,11 +17,23 @@
 //!   expected difference is the version line: the oracle is built without `PACKAGE_VERSION`
 //!   (`libopus unknown`).
 //!
+//!   With the DNN features (`deep-plc`, `dred`, `osce`) both tools are DNN builds (the oracle
+//!   with compiled-in weights; the Rust tool with the oracle's weights as a blob, or compiled in
+//!   when `opusorus-tools/dnn-weights-embedded` is on), and the matrix adds DRED encoding and
+//!   decoding after losses (`opus_dred_parse` + `opus_decoder_dred_decode24`), deep PLC and
+//!   OSCE cases. The Rust `opus_demo` must be built with the same DNN features, which
+//!   `opusorus-conformance` does not forward: run e.g.
+//!   `cargo test -p opusorus-conformance --features dred,osce,opusorus-tools/dred --test vectors`
+//!   (otherwise the comparison is skipped with a note).
+//! * `dnn_blob_matches_oracle` (features `dred` + `osce`): the blob written by
+//!   `scripts/gen_dnn_blob.sh` (`$OPUSORUS_DNN_BLOB` or `target/dnn/weights_blob.bin`; skipped
+//!   if absent) is byte-identical to the oracle's compiled-in tables serialized in the same
+//!   order, so embedding it (`dnn-weights-embedded`) gives exactly the oracle's models.
+//!
 //! The vectors are read from `testdata/vectors` (see `scripts/fetch_vectors.sh`), searched
 //! upwards from this crate (so git worktrees find the main checkout's copy) or at
 //! `$OPUSORUS_VECTORS`; the vector tests print a note and pass if they are absent. The C
-//! comparison is skipped (with a note) without a C compiler, and with the DNN features, whose
-//! decoder integration (DRED decoding in particular) is not in the Rust `opus_demo` yet.
+//! comparison is skipped (with a note) without a C compiler.
 
 // Float-only: not compiled in fixed-point builds until this unit is converted
 // (docs/FIXED_POINT.md).
@@ -36,7 +48,7 @@
 
 use opusorus_conformance::signals;
 use opusorus_tools::compare::opus_compare_main;
-use opusorus_tools::demo::opus_demo_main;
+use opusorus_tools::demo::opus_demo_main_with_weights;
 use std::path::{Path, PathBuf};
 
 /// Per-test scratch directory.
@@ -77,11 +89,54 @@ struct Run {
     stderr: String,
 }
 
+/// Whether a DNN feature is on (the oracle then has compiled-in weights).
+const DNN: bool = cfg!(any(
+    feature = "deep-plc",
+    feature = "dred",
+    feature = "osce"
+));
+
+/// The oracle's compiled-in weights as a blob, in `scripts/gen_dnn_blob.sh` order: the models
+/// of the enabled DNN features.
+#[cfg(any(feature = "deep-plc", feature = "dred", feature = "osce"))]
+fn oracle_blob() -> Vec<u8> {
+    use opusorus_oracle::dnn_core::{
+        MODEL_BBWENET, MODEL_FARGAN, MODEL_LACE, MODEL_NOLACE, MODEL_PITCHDNN, MODEL_PLC,
+        MODEL_RDOVAE_DEC, MODEL_RDOVAE_ENC, write_blob,
+    };
+    let mut models = vec![MODEL_PITCHDNN, MODEL_FARGAN, MODEL_PLC];
+    if cfg!(feature = "dred") {
+        models.extend([MODEL_RDOVAE_ENC, MODEL_RDOVAE_DEC]);
+    }
+    if cfg!(feature = "osce") {
+        models.extend([MODEL_LACE, MODEL_NOLACE, MODEL_BBWENET]);
+    }
+    models.iter().flat_map(|&m| write_blob(m)).collect()
+}
+
+/// The weights the Rust `opus_demo` gets: the oracle's (so both tools run the same models),
+/// unless they are compiled into the tool (`opusorus-tools/dnn-weights-embedded`).
+#[cfg(any(feature = "deep-plc", feature = "dred", feature = "osce"))]
+fn demo_weights() -> Option<&'static [u8]> {
+    static W: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    if opusorus_tools::demo::WEIGHTS_EMBEDDED {
+        None
+    } else {
+        Some(W.get_or_init(oracle_blob))
+    }
+}
+
+/// Without DNN features there are no weights.
+#[cfg(not(any(feature = "deep-plc", feature = "dred", feature = "osce")))]
+const fn demo_weights() -> Option<&'static [u8]> {
+    None
+}
+
 /// Runs the Rust `opus_demo` in-process.
 fn rust_demo(args: &[String]) -> Run {
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = opus_demo_main(args, &mut out, &mut err).unwrap();
+    let code = opus_demo_main_with_weights(args, &mut out, &mut err, demo_weights()).unwrap();
     Run {
         status: code as u8,
         stdout: String::from_utf8(out).unwrap(),
@@ -517,15 +572,18 @@ fn build_c_opus_demo() -> Option<PathBuf> {
         Some(cc) => cc.to_string_lossy().into_owned(),
         None => "cc".to_owned(),
     };
-    let tag = format!(
-        "{}{}",
-        if cfg!(feature = "qext") { "_qext" } else { "" },
-        if cfg!(feature = "custom-modes") {
-            "_custom"
-        } else {
-            ""
+    let mut tag = String::new();
+    for (on, t) in [
+        (cfg!(feature = "qext"), "_qext"),
+        (cfg!(feature = "custom-modes"), "_custom"),
+        (DNN, "_deepplc"),
+        (cfg!(feature = "dred"), "_dred"),
+        (cfg!(feature = "osce"), "_osce"),
+    ] {
+        if on {
+            tag.push_str(t);
         }
-    );
+    }
     let exe = tmp_dir("c").join(format!("opus_demo{tag}"));
     let mut cmd = std::process::Command::new(&cc);
     cmd.args(["-O2", "-ffp-contract=off", "-fno-fast-math", "-w"])
@@ -541,7 +599,17 @@ fn build_c_opus_demo() -> Option<PathBuf> {
     if cfg!(feature = "custom-modes") {
         cmd.arg("-DCUSTOM_MODES");
     }
-    for inc in ["include", "celt", "silk", "src"] {
+    // As upstream's config.h for the DNN builds (opus_demo.c only tests ENABLE_OSCE_BWE).
+    if DNN {
+        cmd.arg("-DENABLE_DEEP_PLC");
+    }
+    if cfg!(feature = "dred") {
+        cmd.arg("-DENABLE_DRED");
+    }
+    if cfg!(feature = "osce") {
+        cmd.args(["-DENABLE_OSCE", "-DENABLE_OSCE_BWE"]);
+    }
+    for inc in ["include", "celt", "silk", "src", "dnn"] {
         cmd.arg(format!("-I{}", root.join(inc).display()));
     }
     cmd.arg(root.join("src/opus_demo.c"))
@@ -696,6 +764,36 @@ fn write_f32(path: &Path, x: &[f32]) {
     std::fs::write(path, b).unwrap();
 }
 
+/// Asserts that most packets of an `opus_demo -e` bitstream carry DRED (so the DRED cases
+/// exercise the redundancy decoding, not just the PLC).
+#[cfg(all(unix, feature = "dred"))]
+fn assert_dred_present(bit: &Path) {
+    let b = std::fs::read(bit).unwrap();
+    let recs = records(&b);
+    let mut dd = opusorus::dred::DredDecoder::new();
+    if let Some(w) = demo_weights() {
+        dd.set_dnn_blob(w).unwrap();
+    }
+    let mut dred = opusorus::dred::Dred::new();
+    let with_dred = recs
+        .iter()
+        .filter(|(_, pkt)| {
+            !pkt.is_empty() && dd.parse(&mut dred, pkt, 48000, 48000, false).unwrap().0 > 0
+        })
+        .count();
+    assert!(
+        with_dred * 2 > recs.len(),
+        "{}: only {with_dred} of {} packets carry DRED",
+        bit.display(),
+        recs.len()
+    );
+}
+
+#[cfg(all(unix, not(feature = "dred")))]
+fn assert_dred_present(_bit: &Path) {
+    unreachable!("DRED cases need the dred feature")
+}
+
 /// A bitstream record (`opus_demo -e` format).
 #[cfg(unix)]
 fn record(len: u32, rng: u32, payload: &[u8]) -> Vec<u8> {
@@ -722,14 +820,14 @@ fn records(b: &[u8]) -> Vec<(u32, &[u8])> {
 #[cfg(unix)]
 #[test]
 fn opus_demo_matches_c() {
-    if cfg!(any(
-        feature = "deep-plc",
-        feature = "dred",
-        feature = "osce"
-    )) {
+    use opusorus_tools::demo as rd;
+    if (rd::DEEP_PLC, rd::DRED, rd::OSCE) != (DNN, cfg!(feature = "dred"), cfg!(feature = "osce")) {
         eprintln!(
-            "DNN features on: the Rust opus_demo has no DRED decoding yet; skipping the C \
-             opus_demo comparison"
+            "NOTE: the Rust opus_demo is built with DNN features (deep-plc, dred, osce) = {:?}, \
+             the oracle with {:?}; skipping the C opus_demo comparison. Enable the same \
+             features on opusorus-tools (e.g. --features dred,opusorus-tools/dred).",
+            (rd::DEEP_PLC, rd::DRED, rd::OSCE),
+            (DNN, cfg!(feature = "dred"), cfg!(feature = "osce"))
         );
         return;
     }
@@ -886,6 +984,34 @@ fn opus_demo_matches_c() {
             case("x_qext_rate", &["-d", "44100", "1", &m48s, "OUT"]),
         ]);
     }
+    if DNN {
+        // Deep PLC (dec_complexity >= 5), DRED (encoder side, and decoder side after losses),
+        // OSCE (LACE at complexity 6, NoLACE at 7+).
+        #[rustfmt::skip]
+        phase1.extend([
+            case("ed_deepplc16m", &["voip", "16000", "1", "16000", "-loss", "20", "-dec_complexity", "5", &s16m, "OUT"]),
+            case("ed_deepplc48s_fec", &["audio", "48000", "2", "32000", "-inbandfec", "-loss", "15", "-dec_complexity", "10", &m48s, "OUT"]),
+            case("ed_lace16m", &["voip", "16000", "1", "12000", "-dec_complexity", "6", &s16m, "OUT"]),
+            case("ed_nolace8m_loss", &["voip", "8000", "1", "8000", "-loss", "10", "-dec_complexity", "7", &s8m, "OUT"]),
+        ]);
+    }
+    if cfg!(feature = "dred") {
+        #[rustfmt::skip]
+        phase1.extend([
+            case("e_dred16m", &["-e", "voip", "16000", "1", "24000", "-dred", "60", "-loss", "10", &s16m, "OUT"]),
+            case("e_dred48m_60ms", &["-e", "voip", "48000", "1", "32000", "-dred", "30", "-loss", "15", "-framesize", "60", &s48m, "OUT"]),
+            case("ed_dred48m", &["voip", "48000", "1", "32000", "-dred", "50", "-loss", "25", "-dec_complexity", "7", &s48m, "OUT"]),
+            case("ed_dred24s_40ms", &["voip", "24000", "2", "48000", "-dred", "100", "-loss", "15", "-framesize", "40", &s24s, "OUT"]),
+            case("ed_dred12m_fec", &["voip", "12000", "1", "20000", "-dred", "20", "-inbandfec", "-loss", "30", &s12m, "OUT"]),
+        ]);
+    }
+    if cfg!(feature = "osce") {
+        #[rustfmt::skip]
+        phase1.extend([
+            case("ed_osce_bwe", &["voip", "48000", "1", "16000", "-bandwidth", "WB", "-enable_osce_bwe", &s48m, "OUT"]),
+            case("ed_osce_bwe_loss", &["voip", "48000", "2", "24000", "-bandwidth", "WB", "-enable_osce_bwe", "-loss", "10", "-dec_complexity", "7", &m48s, "OUT"]),
+        ]);
+    }
     let outs1 = check_cases(&c_demo, &dir, &phase1);
     let bitstream = |name: &str| -> PathBuf {
         let i = phase1.iter().position(|c| c.name == name).unwrap();
@@ -975,6 +1101,21 @@ fn opus_demo_matches_c() {
             case("d_qext48", &["-d", "48000", "2", &b96, "OUT"]),
         ]);
     }
+    if cfg!(feature = "dred") {
+        let d16 = path_str(&bitstream("e_dred16m")).to_owned();
+        let d48 = path_str(&bitstream("e_dred48m_60ms")).to_owned();
+        assert_dred_present(&bitstream("e_dred16m"));
+        assert_dred_present(&bitstream("e_dred48m_60ms"));
+        #[rustfmt::skip]
+        phase2.extend([
+            case("d_dred16m_loss", &["-d", "16000", "1", "-loss", "30", &d16, "OUT"]),
+            case("d_dred16m_48k_lossfile", &["-d", "48000", "1", "-lossfile", &loss, &d16, "OUT"]),
+            case("d_dred16m_8k_deep", &["-d", "8000", "1", "-loss", "40", "-dec_complexity", "10", "-f32", &d16, "OUT"]),
+            case("d_dred16m_fec", &["-d", "16000", "2", "-inbandfec", "-loss", "25", "-24", &d16, "OUT"]),
+            case("d_dred48s_loss", &["-d", "48000", "2", "-loss", "20", &d48, "OUT"]),
+            case("d_dred48s_24k_deep", &["-d", "24000", "1", "-loss", "35", "-dec_complexity", "6", &d48, "OUT"]),
+        ]);
+    }
     // The conformance vectors themselves, through both front ends.
     if let Some(v) = vectors_dir("rfc8251") {
         for n in 1..=12 {
@@ -1026,4 +1167,34 @@ fn opus_demo_matches_c() {
             }
         }
     }
+}
+
+/// `scripts/gen_dnn_blob.sh` output == the oracle's compiled-in tables serialized in the same
+/// order (pitchdnn, fargan, plcmodel, rdovaeenc, rdovaedec, lace, nolace, bbwenet).
+#[cfg(all(feature = "dred", feature = "osce"))]
+#[test]
+fn dnn_blob_matches_oracle() {
+    let path = match std::env::var_os("OPUSORUS_DNN_BLOB") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/dnn/weights_blob.bin"),
+    };
+    let Ok(blob) = std::fs::read(&path) else {
+        eprintln!(
+            "NOTE: {} not found (run scripts/gen_dnn_blob.sh); skipping",
+            path.display()
+        );
+        return;
+    };
+    let oracle = oracle_blob();
+    assert_eq!(blob.len(), oracle.len(), "blob size");
+    assert!(
+        blob == oracle,
+        "{} differs from the oracle's tables",
+        path.display()
+    );
+    println!(
+        "{}: {} bytes, identical to the oracle's compiled-in weights",
+        path.display(),
+        blob.len()
+    );
 }

@@ -29,7 +29,8 @@
 //! DRED (feature `dred`, C `ENABLE_DRED`): with [`Encoder::set_dred_duration`] > 0 the encoder
 //! reserves part of the bitrate for Deep REDundancy and appends a DRED extension (RDOVAE latents
 //! of up to `duration * 10 ms` of past audio) to the first non-DTX frame of each packet. The
-//! RDOVAE encoder model is not compiled in (upstream `USE_WEIGHTS_FILE`, PLAN D-015): load it
+//! RDOVAE encoder model is not compiled in (upstream `USE_WEIGHTS_FILE`, PLAN D-015) unless the
+//! `dnn-weights-embedded` feature embeds a blob (bound by [`Encoder::new`]): load it
 //! with [`Encoder::set_dnn_blob`]. As in upstream builds without loaded weights, the DRED
 //! bitrate is still reserved when no model is loaded, but no DRED data is produced. The loaded
 //! model survives [`Encoder::reset`] and [`Encoder::init`].
@@ -1253,7 +1254,8 @@ impl Encoder {
         tonality_analysis_init(&mut analysis, fs);
         analysis.application = application;
 
-        Ok(Self {
+        #[allow(unused_mut, reason = "only mutated with compiled-in DNN weights")]
+        let mut enc = Self {
             silk_mode,
             #[cfg(feature = "dred")]
             dred_encoder,
@@ -1328,7 +1330,12 @@ impl Encoder {
                 tmp_data: Vec::new(),
                 pad: Vec::new(),
             },
-        })
+        };
+        // Compiled-in weights (C: `dred_encoder_init` binds `rdovaeenc_arrays`).
+        #[cfg(all(feature = "dnn-weights-embedded", feature = "dred"))]
+        enc.set_dnn_blob(crate::dnn::embedded::DNN_BLOB)
+            .map_err(|_| Error::InternalError)?;
+        Ok(enc)
     }
 
     /// Port of src/opus_encoder.c:opus_encoder_init: re-initialises this encoder in place

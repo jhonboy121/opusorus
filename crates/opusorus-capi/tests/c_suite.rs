@@ -13,6 +13,14 @@
 //! `tests/run_vectors.sh` on `testdata/vectors/rfc8251` (skipped if absent; fetch it with
 //! `scripts/fetch_vectors.sh`).
 //!
+//! With the DNN features (`deep-plc`, `dred`, `osce`) the library is built with them plus
+//! `dnn-weights-embedded` (compiled-in weights, as upstream's tests expect: they never call
+//! `OPUS_SET_DNN_BLOB`), and the C programs get the matching `ENABLE_*` defines (DRED parsing
+//! and decoding in `test_opus_encode`, the DRED regression test, deep PLC complexities in
+//! `test_opus_decode`). The blob is `$OPUSORUS_DNN_BLOB` if set, otherwise it is generated
+//! with `scripts/gen_dnn_blob.sh` (which needs `scripts/fetch_dnn_models.sh` first).
+//! `test_opus_dred` (upstream's DRED parser fuzz test) runs with the `dred` feature.
+//!
 //! The seed of the randomized C tests is fixed (`SEED=42`) unless `OPUSORUS_C_SUITE_SEED` is
 //! set.
 
@@ -54,7 +62,61 @@ fn config() -> (Vec<&'static str>, String) {
         features.push("custom-modes");
         name.push_str("-custom");
     }
+    for (on, feature) in [
+        (cfg!(feature = "deep-plc"), "deep-plc"),
+        (cfg!(feature = "dred"), "dred"),
+        (cfg!(feature = "osce"), "osce"),
+    ] {
+        if on {
+            features.push(feature);
+            name.push('-');
+            name.push_str(feature);
+        }
+    }
+    if dnn() {
+        features.push("dnn-weights-embedded");
+    }
     (features, name)
+}
+
+/// Whether a DNN feature is on (the library then has compiled-in weights).
+const fn dnn() -> bool {
+    cfg!(any(
+        feature = "deep-plc",
+        feature = "dred",
+        feature = "osce"
+    ))
+}
+
+/// The weight blob to embed: `$OPUSORUS_DNN_BLOB`, or one generated into the work directory.
+fn dnn_blob() -> PathBuf {
+    if let Some(p) = std::env::var_os("OPUSORUS_DNN_BLOB") {
+        let p = PathBuf::from(p);
+        assert!(
+            p.is_absolute(),
+            "OPUSORUS_DNN_BLOB must be an absolute path"
+        );
+        return p;
+    }
+    // Regenerated on every run (a few seconds), but only replaced when its content changed so
+    // the nested build is not redone for nothing.
+    std::fs::create_dir_all(work_dir()).unwrap();
+    let blob = work_dir().join("weights_blob.bin");
+    let fresh = work_dir().join("weights_blob.bin.new");
+    let status = Command::new(root().join("scripts/gen_dnn_blob.sh"))
+        .arg(&fresh)
+        .status()
+        .expect("run scripts/gen_dnn_blob.sh");
+    assert!(
+        status.success(),
+        "scripts/gen_dnn_blob.sh failed (fetch the model data with scripts/fetch_dnn_models.sh)"
+    );
+    if blob.exists() && std::fs::read(&blob).unwrap() == std::fs::read(&fresh).unwrap() {
+        std::fs::remove_file(&fresh).unwrap();
+    } else {
+        std::fs::rename(&fresh, &blob).unwrap();
+    }
+    blob
 }
 
 /// Working directory of this configuration (`<target dir>/capi-c-suite/<config>`).
@@ -72,7 +134,11 @@ fn lib_dir() -> &'static Path {
     DIR.get_or_init(|| {
         let (features, _) = config();
         let target = work_dir().join("cargo");
-        let status = Command::new(env!("CARGO"))
+        let mut cmd = Command::new(env!("CARGO"));
+        if dnn() {
+            cmd.env("OPUSORUS_DNN_BLOB", dnn_blob());
+        }
+        let status = cmd
             .current_dir(root())
             .args(["build", "-p", "opusorus-capi", "--profile", "test"])
             .arg("--features")
@@ -117,6 +183,16 @@ fn config_defines() -> Vec<&'static str> {
     if cfg!(feature = "custom-modes") {
         d.push("-DCUSTOM_MODES");
     }
+    // As upstream's config.h: dred and osce also enable the deep PLC.
+    if dnn() {
+        d.push("-DENABLE_DEEP_PLC");
+    }
+    if cfg!(feature = "dred") {
+        d.push("-DENABLE_DRED");
+    }
+    if cfg!(feature = "osce") {
+        d.extend(["-DENABLE_OSCE", "-DENABLE_OSCE_BWE"]);
+    }
     d
 }
 
@@ -146,6 +222,7 @@ fn compile(name: &str, sources: &[PathBuf], link: Link) -> PathBuf {
         .arg(format!("-I{}", v.join("celt").display()))
         .arg(format!("-I{}", v.join("silk").display()))
         .arg(format!("-I{}", v.join("src").display()))
+        .arg(format!("-I{}", v.join("dnn").display()))
         .args(sources)
         .arg("-o")
         .arg(&exe);
@@ -252,6 +329,14 @@ fn test_opus_extensions() {
     // Uses internal functions (`opus_packet_extensions_*`, `opus_packet_parse_impl`,
     // `opus_repacketizer_out_range_impl`), exported by the `internal-api` feature.
     upstream_test("test_opus_extensions", &[]);
+}
+
+/// Upstream's DRED test: 10 million random extension payloads through `opus_dred_parse` /
+/// `opus_dred_process` with the compiled-in (embedded) RDOVAE decoder.
+#[cfg(feature = "dred")]
+#[test]
+fn test_opus_dred() {
+    upstream_test("test_opus_dred", &[]);
 }
 
 #[cfg(feature = "custom-modes")]

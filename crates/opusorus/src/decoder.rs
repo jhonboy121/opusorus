@@ -61,8 +61,10 @@
 //!   [`Decoder::dred_decode_float`] conceal with the features of a [`crate::dred::Dred`]
 //!   (`opus_decoder_dred_decode*`).
 //!
-//! The model weights are not compiled in (upstream `USE_WEIGHTS_FILE` semantics, PLAN D-015):
-//! load a libopus weight blob with [`Decoder::set_dnn_blob`] (`OPUS_SET_DNN_BLOB`). Until then
+//! The model weights are not compiled in (upstream `USE_WEIGHTS_FILE` semantics, PLAN D-015)
+//! unless the `dnn-weights-embedded` feature embeds a blob, which [`Decoder::new`] then binds
+//! like upstream's compiled-in tables. Otherwise load a libopus weight blob with
+//! [`Decoder::set_dnn_blob`] (`OPUS_SET_DNN_BLOB`). Until then
 //! the DNN paths stay off exactly as in an upstream build without loaded weights, except that
 //! the OSCE bandwidth extension is only selected with a loaded model (a `USE_WEIGHTS_FILE`
 //! build would run BBWENet without weights). Upstream's default build has the weights compiled
@@ -345,7 +347,8 @@ impl Decoder {
         let f10 = (fs / 100) as usize;
         let f5 = (fs / 200) as usize;
         let max_frame = (fs / 25 * 3) as usize;
-        Ok(Self {
+        #[allow(unused_mut, reason = "only mutated with compiled-in DNN weights")]
+        let mut dec = Self {
             celt_dec,
             silk_dec,
             channels,
@@ -356,7 +359,7 @@ impl Decoder {
             decode_gain: 0,
             complexity: 0,
             ignore_extensions: 0,
-            // lpcnet_plc_init (no model is compiled in: loaded by `set_dnn_blob`).
+            // lpcnet_plc_init (models: `set_dnn_blob`, or the embedded blob below).
             #[cfg(feature = "deep-plc")]
             lpcnet: LpcnetPlcState::new(),
             stream_channels: channels,
@@ -373,7 +376,16 @@ impl Decoder {
                 redundant_audio: vec![0.0; f5 * ch],
                 out: vec![0.0; max_frame * ch],
             },
-        })
+        };
+        // Compiled-in weights (C: `lpcnet_plc_init` / `silk_LoadOSCEModels(NULL)` bind the
+        // model tables; a failure is a `celt_assert`).
+        #[cfg(all(
+            feature = "dnn-weights-embedded",
+            any(feature = "deep-plc", feature = "osce")
+        ))]
+        dec.set_dnn_blob(crate::dnn::embedded::DNN_BLOB)
+            .map_err(|_| Error::InternalError)?;
+        Ok(dec)
     }
 
     /// Port of `src/opus_decoder.c:opus_decoder_init`: re-initializes this decoder in place for

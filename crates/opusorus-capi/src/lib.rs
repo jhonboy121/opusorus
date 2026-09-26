@@ -30,7 +30,11 @@
 //! * `OPUS_GET_*_STATE` hands out small per-stream handles (valid while the parent lives), not
 //!   interior pointers of the parent block.
 //! * The private `CELT_GET_MODE` request is not supported (`OPUS_UNIMPLEMENTED`).
-//! * DRED (`opus_dred_*`) behaves like a libopus build without `ENABLE_DRED` (see [`dred`]).
+//! * DRED (`opus_dred_*`): without the `dred` feature it behaves like a libopus build without
+//!   `ENABLE_DRED`; with it, like an `ENABLE_DRED` build whose weights are loaded with
+//!   `OPUS_SET_DNN_BLOB` (`USE_WEIGHTS_FILE`), or compiled in with `dnn-weights-embedded`
+//!   (see [`dred`]). `OPUS_SET_DNN_BLOB` is accepted in both cases (libopus with compiled-in
+//!   weights answers `OPUS_UNIMPLEMENTED`).
 //! * `opus_get_version_string` reports `"libopus 1.6.1 (opusorus)"`.
 //!
 //! ## Fixed-point

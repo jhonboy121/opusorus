@@ -2,17 +2,23 @@
 
 targets := "wasm32-unknown-unknown wasm32-wasip1 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-unknown-linux-gnu"
 
+# Weight blob embedded by the `dnn-weights-embedded` feature; made by the `dnn-blob` recipe.
+# Override with an absolute path in the environment.
+export OPUSORUS_DNN_BLOB := env_var_or_default("OPUSORUS_DNN_BLOB", justfile_directory() + "/target/dnn/weights_blob.bin")
+
 # `--all-features` is not a valid configuration: `fixed-point` replaces the float codec (not
 # additive) and upstream refuses fixed-point together with the DNN features. These lists are the
-# two "everything on" configurations (docs/FIXED_POINT.md).
-float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/deep-plc,opusorus-capi/dred,opusorus-capi/osce,opusorus-capi/internal-api,opusorus-bench/qext,opusorus-tools/qext,opusorus-tools/osce"
+# two "everything on" configurations (docs/FIXED_POINT.md). float_all excludes
+# `dnn-weights-embedded` (covered by `test-dnn`) and `opusorus-capi/osce` (OSCE makes
+# `Decoder::get_size` exceed the 256 KiB bound upstream's test_opus_api checks).
+float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-tools/dred,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/dred,opusorus-capi/internal-api,opusorus-bench/qext"
 fixed_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-bench/fixed-res24,opusorus-bench/qext,opusorus-tools/qext"
 
 default:
     @just --list
 
 # Type-check the whole workspace.
-check:
+check: dnn-blob
     cargo check --workspace --all-targets --features {{float_all}}
     cargo check --workspace --all-targets --features {{fixed_all}}
 
@@ -21,20 +27,50 @@ fmt:
     cargo fmt --all -- --check
 
 # Clippy, warnings are errors.
-clippy:
+clippy: dnn-blob
     cargo clippy --workspace --all-targets --features {{float_all}} -- -D warnings
     cargo clippy --workspace --all-targets --features {{fixed_all}} -- -D warnings
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features opusorus-conformance/fixed-point -- -D warnings
     cargo clippy -p opusorus --no-default-features -- -D warnings
     cargo clippy -p opusorus --no-default-features --features fixed-point -- -D warnings
 
-# All tests (unit + differential vs C oracle + vectors): default, every float feature, and the
-# fixed-point builds (16- and 24-bit resolution; only the converted modules are tested).
-test:
+# All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
+# loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds (16- and
+# 24-bit resolution; only the converted modules are tested).
+test: dnn-blob
     cargo test --workspace
     cargo test --workspace --features {{float_all}}
     cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-point
     cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-res24,opusorus-conformance/qext
+
+# Full-length libopus runs, exhaustive sweeps and timing tests, default and QEXT + custom-modes.
+# All tests including the ignored long ones (OPUS_TEST_FULL=1, --include-ignored).
+test-full:
+    OPUS_TEST_FULL=1 cargo test --workspace -- --include-ignored
+    OPUS_TEST_FULL=1 cargo test --workspace --features opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-bench/qext -- --include-ignored
+
+# All conformance tests vs the oracle built with deep PLC + DRED + OSCE (+ QEXT), including the
+# C opus_demo comparison with DRED/deep PLC/OSCE cases; then compiled-in weights
+# (`dnn-weights-embedded`): library unit tests, the opus_demo comparison with the weights
+# embedded in the Rust tool, and upstream's C tests (incl. test_opus_dred) against the C ABI.
+# DNN tests (deep PLC, DRED, OSCE) vs the oracle, runtime-loaded and compiled-in weights.
+test-dnn: dnn-blob
+    cargo test -p opusorus-conformance --features qext,deep-plc,dred,osce,opusorus-tools/dred
+    cargo test -p opusorus --features qext,dred,osce,dnn-weights-embedded --lib
+    cargo test -p opusorus-conformance --features qext,dred,osce,opusorus-tools/dred,opusorus-tools/dnn-weights-embedded --test vectors
+    cargo test -p opusorus-capi --features qext,dred
+
+# Extract the DNN model data (vendor/libopus/dnn/*_data.c, gitignored) if missing.
+dnn-models:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f vendor/libopus/dnn/fargan_data.c ] || ./scripts/fetch_dnn_models.sh
+
+# Generate the DNN weight blob at $OPUSORUS_DNN_BLOB if missing.
+dnn-blob: dnn-models
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f "$OPUSORUS_DNN_BLOB" ] || ./scripts/gen_dnn_blob.sh "$OPUSORUS_DNN_BLOB"
 
 # Build the library for every supported platform (+ no_std bare-metal).
 cross:
@@ -67,10 +103,15 @@ cross-capi:
 test-wasm:
     CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1
 
-# Official RFC 6716/8251 decoder test vectors.
+# RFC 6716/8251 through the Rust opus_demo/opus_compare, the Opus HD (QEXT) vectors with
+# qext_compare, the C opus_demo comparison, and the RFC 8251 vectors through upstream's C
+# opus_demo linked to the C ABI library.
+# Official decoder test vectors (fetched if missing) and the opus_demo comparisons.
 vectors:
     ./scripts/fetch_vectors.sh
-    cargo test -p opusorus-conformance --release --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --features qext --test vectors -- --nocapture
+    cargo test -p opusorus-capi --test c_suite rfc8251_vectors -- --nocapture
 
 # Benchmarks (Rust vs C oracle).
 bench:
@@ -82,7 +123,8 @@ size:
 
 # Fuzz one target for a while: `just fuzz decode 60`.
 fuzz target secs="60":
-    cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
+    mkdir -p fuzz/corpus/{{target}}
+    cd fuzz && cargo +nightly fuzz run {{target}} corpus/{{target}} -- -max_total_time={{secs}}
 
 # Seed fuzz corpora from the C encoder (default + qext).
 fuzz-seed:

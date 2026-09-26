@@ -14,7 +14,9 @@ crates/opusorus-capi/scripts/pkgconfig.sh --prefix /usr/local   # install lib, h
 ```
 
 Features: `qext` (Opus HD, 96 kHz), `custom-modes` (`opus_custom.h`), `deep-plc` / `osce` /
-`dred` (forwarded to `opusorus`; `OPUS_SET_DNN_BLOB` where the Rust API supports it),
+`dred` (forwarded to `opusorus`; weights loaded with `OPUS_SET_DNN_BLOB` on encoders, decoders
+and DRED decoders, like libopus `USE_WEIGHTS_FILE`), `dnn-weights-embedded` (compiled-in
+weights: `OPUSORUS_DNN_BLOB=/abs/path/weights_blob.bin`, see `scripts/gen_dnn_blob.sh`),
 `internal-api` (also exports the libopus-internal functions used by upstream's
 `test_opus_extensions.c`).
 
@@ -43,7 +45,8 @@ Features: `qext` (Opus HD, 96 kHz), `custom-modes` (`opus_custom.h`), `deep-plc`
 * `OPUS_MULTISTREAM_GET_ENCODER_STATE` / `_DECODER_STATE` return small per-stream handles valid
   while the parent lives, not interior pointers.
 * The private `CELT_GET_MODE` request is not supported; `OPUS_SET_ENERGY_MASK` copies the mask.
-* `opus_dred_*` behaves like a libopus build without `ENABLE_DRED`.
+* `opus_dred_*` behaves like a libopus build without `ENABLE_DRED` unless the `dred` feature is
+  on. `OPUS_SET_DNN_BLOB` is also accepted with compiled-in weights (libopus: `OPUS_UNIMPLEMENTED`).
 * Repacketizer: frame bytes are read at output time, as in C; the output buffer may overlap the
   input packets.
 
@@ -55,3 +58,11 @@ Features: `qext` (Opus HD, 96 kHz), `custom-modes` (`opus_custom.h`), `deep-plc`
 `test_opus_extensions`, `test_opus_custom`, plus `tests/csrc/capi_extra.c`, a static-link run,
 and the RFC 8251 vectors through upstream `opus_demo` / `opus_compare` at 8/12/16/24/48 kHz,
 mono and stereo (skipped when `testdata/vectors/rfc8251` is absent).
+
+With `--features dred` (or `deep-plc` / `osce`) the library is built with compiled-in weights
+(`dnn-weights-embedded`; the blob is `$OPUSORUS_DNN_BLOB` or generated with
+`scripts/gen_dnn_blob.sh`) and the C programs with the matching `ENABLE_*` defines, as upstream
+tests a DNN build: `test_opus_dred` (10 M random DRED payloads through `opus_dred_parse` /
+`opus_dred_process`) is added, `test_opus_encode` parses and decodes the DRED of its packets,
+and `capi_extra.c` checks the DRED API (deferred processing, `OpusDRED` / decoder byte copies,
+argument errors).

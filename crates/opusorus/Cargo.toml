@@ -35,6 +35,11 @@ fixed-point = []
 # 24-bit internal resolution for the fixed-point build (libopus `ENABLE_RES24`, which upstream
 # autotools enables by default for fixed-point builds; `--disable-fixed-res24` turns it off).
 fixed-res24 = ["fixed-point"]
+# Compiled-in DNN weights (libopus built without `USE_WEIGHTS_FILE`): embeds the weight blob
+# at the absolute path given by the `OPUSORUS_DNN_BLOB` environment variable at build time
+# (`scripts/gen_dnn_blob.sh` generates one) and binds the models when a decoder, encoder or DRED
+# decoder is created. Only has an effect together with `deep-plc`, `dred` or `osce`.
+dnn-weights-embedded = []
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

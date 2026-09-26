@@ -172,6 +172,8 @@ pub(crate) enum Object {
     CustomEncoder(crate::custom::CustomEncoder),
     #[cfg(feature = "custom-modes")]
     CustomDecoder(crate::custom::CustomDecoder),
+    #[cfg(feature = "dred")]
+    DredDecoder(opus::dred::DredDecoder),
 }
 
 impl Object {
@@ -188,6 +190,8 @@ impl Object {
             Self::CustomEncoder(_) => Kind::CustomEncoder,
             #[cfg(feature = "custom-modes")]
             Self::CustomDecoder(_) => Kind::CustomDecoder,
+            #[cfg(feature = "dred")]
+            Self::DredDecoder(_) => Kind::DredDecoder,
         }
     }
 }
@@ -406,11 +410,12 @@ pub(crate) unsafe fn install(block: *mut c_void, object: Object) -> CResult<()> 
     Ok(())
 }
 
-/// Writes a registry-less header (states without Rust data, e.g. `OpusDREDDecoder` without
-/// DRED support).
+/// Writes a registry-less header (states without Rust data: `OpusDREDDecoder` without the
+/// `dred` feature).
 ///
 /// # Safety
 /// `block` is valid for writes of `HEADER_SIZE` bytes.
+#[cfg(not(feature = "dred"))]
 pub(crate) unsafe fn write_plain_header(block: *mut c_void, kind: Kind) {
     // SAFETY: caller contract.
     unsafe {

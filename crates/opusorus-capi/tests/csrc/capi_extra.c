@@ -2,8 +2,8 @@
  *
  * Covers what upstream's tests only touch indirectly: byte copies of state blocks (clone and
  * move), multistream stream handles, NULL / wrong-type handles, the repacketizer writing over
- * its own input, projection matrices, DRED stubs, and (with CUSTOM_MODES) a non-48 kHz custom
- * mode. */
+ * its own input, projection matrices, the DRED API (stubs without ENABLE_DRED), and (with
+ * CUSTOM_MODES) a non-48 kHz custom mode. */
 
 /* Public-API view of the headers (declares opus_custom_*_get_size/init). */
 #undef OPUS_BUILD
@@ -233,6 +233,7 @@ static void test_projection(void)
    opus_projection_encoder_destroy(enc);
 }
 
+#ifndef ENABLE_DRED
 static void test_dred_stubs(void)
 {
    int err = 1;
@@ -243,6 +244,95 @@ static void test_dred_stubs(void)
    CHECK(opus_dred_alloc(&err) == NULL && err == OPUS_UNIMPLEMENTED);
    opus_dred_decoder_destroy(dd);
 }
+#else
+/* The DRED API with compiled-in (embedded) weights: a 16 kHz VoIP stream with DRED, parsed
+   with and without deferred processing, byte copies of OpusDRED and decoder states, and the
+   argument checks. */
+static void test_dred(void)
+{
+   int err = 1, k, len, ret, dred_end = -7, got_dred = 0, size;
+   opus_int16 pcm[320], out1[320], out2[320];
+   opus_int32 out24[320];
+   float outf[320];
+   unsigned char packet[MAXP];
+   OpusEncoder *enc;
+   OpusDecoder *dec, *dec2;
+   OpusDREDDecoder *dd, *dd2;
+   OpusDRED *dred, *copy;
+   dd = opus_dred_decoder_create(&err);
+   CHECK(err == OPUS_OK && dd != NULL);
+   dd2 = (OpusDREDDecoder *)malloc(opus_dred_decoder_get_size());
+   CHECK(opus_dred_decoder_init(dd2) == OPUS_OK);
+   CHECK(opus_dred_decoder_ctl(dd2, OPUS_SET_DNN_BLOB("x", 1)) == OPUS_BAD_ARG);
+   CHECK(opus_dred_decoder_ctl(dd2, OPUS_SET_DNN_BLOB("x", -1)) == OPUS_BAD_ARG);
+   CHECK(opus_dred_decoder_ctl(dd2, OPUS_SET_BITRATE(1)) == OPUS_UNIMPLEMENTED);
+   size = opus_dred_get_size();
+   CHECK(size > 11000 && size < 12000);
+   dred = opus_dred_alloc(&err);
+   CHECK(dred != NULL);
+   copy = (OpusDRED *)malloc(size);
+   memset(copy, 0, size);
+   CHECK(opus_dred_process(dd, copy, copy) == OPUS_BAD_ARG);
+   CHECK(opus_dred_process(NULL, dred, copy) == OPUS_BAD_ARG);
+   CHECK(opus_dred_parse(dd, dred, packet, -1, 960, 16000, &dred_end, 0) == OPUS_BAD_ARG);
+   CHECK(opus_dred_process(dd, dred, dred) == OPUS_BAD_ARG);
+
+   enc = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &err);
+   CHECK(err == OPUS_OK && enc != NULL);
+   CHECK(opus_encoder_ctl(enc, OPUS_SET_BITRATE(32000)) == OPUS_OK);
+   CHECK(opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(20)) == OPUS_OK);
+   CHECK(opus_encoder_ctl(enc, OPUS_SET_DRED_DURATION(50)) == OPUS_OK);
+   dec = opus_decoder_create(16000, 1, &err);
+   CHECK(err == OPUS_OK && dec != NULL);
+   for (k = 0; k < 60; k++) {
+      sine(pcm, 320, 1, k);
+      len = opus_encode(enc, pcm, 320, packet, MAXP);
+      CHECK(len > 0);
+      dred_end = -7;
+      ret = opus_dred_parse(dd, dred, packet, len, 16000, 16000, &dred_end, k & 1);
+      CHECK(ret >= 0 && dred_end >= 0 && ret >= dred_end);
+      if (ret > 0) {
+         got_dred++;
+         if (k & 1) {
+            /* Deferred: process into another OpusDRED, then in place. */
+            CHECK(opus_dred_process(dd, dred, copy) == OPUS_OK);
+            CHECK(opus_dred_process(dd, dred, dred) == OPUS_OK);
+            CHECK(memcmp(dred, copy, size) == 0);
+         }
+         /* A byte copy of the processed data and of the decoder conceal identically (the
+            decoder copy is used first: it is materialized on first use). */
+         memcpy(copy, dred, size);
+         dec2 = (OpusDecoder *)malloc(opus_decoder_get_size(1));
+         memcpy(dec2, dec, opus_decoder_get_size(1));
+         CHECK(opus_decoder_dred_decode(dec2, copy, 320, out2, 320) == 320);
+         CHECK(opus_decoder_dred_decode(dec, dred, 320, out1, 320) == 320);
+         CHECK(memcmp(out1, out2, sizeof(out1)) == 0);
+         CHECK(opus_decoder_dred_decode24(dec2, copy, 640, out24, 320) == 320);
+         CHECK(opus_decoder_dred_decode_float(dec2, copy, 320, outf, 320) == 320);
+         opus_decoder_destroy(dec2);
+      }
+      CHECK(opus_decode(dec, packet, len, out1, 320, 0) == 320);
+   }
+   CHECK(got_dred > 20);
+   /* A NULL OpusDRED conceals like a lost packet; bad frame sizes are rejected. */
+   CHECK(opus_decoder_dred_decode(dec, NULL, 0, out1, 320) == 320);
+   CHECK(opus_decoder_dred_decode(dec, dred, 0, out1, 0) == OPUS_BAD_ARG);
+   CHECK(opus_decoder_dred_decode_float(dec, dred, 0, outf, 100) == OPUS_BAD_ARG);
+   /* A packet without DRED. */
+   CHECK(opus_encoder_ctl(enc, OPUS_SET_DRED_DURATION(0)) == OPUS_OK);
+   len = opus_encode(enc, pcm, 320, packet, MAXP);
+   dred_end = -7;
+   CHECK(opus_dred_parse(dd2, dred, packet, len, 16000, 16000, &dred_end, 0) == 0);
+   CHECK(dred_end == 0);
+   CHECK(opus_dred_process(dd2, dred, dred) == OPUS_BAD_ARG);
+   opus_encoder_destroy(enc);
+   opus_decoder_destroy(dec);
+   opus_dred_free(dred);
+   free(copy);
+   opus_dred_decoder_destroy(dd2);
+   opus_dred_decoder_destroy(dd);
+}
+#endif
 
 #ifdef CUSTOM_MODES
 static void test_custom_16k(void)
@@ -292,7 +382,11 @@ int main(void)
    test_stream_handles();
    test_repacketizer_in_place();
    test_projection();
+#ifdef ENABLE_DRED
+   test_dred();
+#else
    test_dred_stubs();
+#endif
 #ifdef CUSTOM_MODES
    test_custom_16k();
 #endif

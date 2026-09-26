@@ -24,12 +24,19 @@
 //!   status after a DRED parse attempt is that call's return value, and an error from the
 //!   decoder is added to the sample total used by the statistics.
 //! * DRED: `-dred <n>` sets `OPUS_SET_DRED_DURATION` on the encoder (a no-op returning
-//!   `OPUS_UNIMPLEMENTED` without the `dred` feature, as in C). opusorus does not expose the
-//!   `opus_dred_parse`/`opus_decoder_dred_decode24` API yet, so the decoder side behaves like a
-//!   C build without `ENABLE_DRED` (`opus_dred_parse` returns `OPUS_UNIMPLEMENTED`, recovery uses
-//!   regular PLC/FEC).
-//! * Not ported: `-sim_loss` (`ENABLE_LOSSGEN`), the `ENABLE_OSCE_TRAINING_DATA` options and
-//!   `USE_WEIGHTS_FILE` (none of them are in a default libopus build).
+//!   `OPUS_UNIMPLEMENTED` without the `dred` feature, as in C). With this crate's `dred` feature
+//!   the decoder side is upstream's: after a burst of losses the next packet's redundancy is
+//!   parsed (`DredDecoder::parse`, `opus_dred_parse`) and the lost frames are concealed from it
+//!   (`Decoder::opus_decoder_dred_decode24`); without it, it behaves like a C build without
+//!   `ENABLE_DRED` (`opus_dred_parse` returns `OPUS_UNIMPLEMENTED`, recovery uses regular
+//!   PLC/FEC).
+//! * DNN weights (features `deep-plc`, `dred`, `osce`): with `dnn-weights-embedded` the models
+//!   are compiled in, as in a default libopus DNN build. Otherwise [`opus_demo_main`] reads
+//!   `weights_blob.bin` from the working directory and sets it on the encoder, decoder and DRED
+//!   decoder like a libopus `USE_WEIGHTS_FILE` build (silently running without models if the
+//!   file does not exist); [`opus_demo_main_with_weights`] takes the blob as an argument.
+//! * Not ported: `-sim_loss` (`ENABLE_LOSSGEN`) and the `ENABLE_OSCE_TRAINING_DATA` options
+//!   (not in a default libopus build).
 //! * Where C has undefined behaviour (a negative sample count to `fread` after a frame-size
 //!   change, out-of-range float input), the Rust port reads nothing / saturates instead.
 //! * I/O errors while reading an opened input file are returned as `io::Error` (C treats them as
@@ -38,6 +45,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
+#[cfg(not(feature = "dred"))]
+use opusorus::Error;
 use opusorus::celt::celt::{opus_get_version_string, opus_strerror};
 use opusorus::constants::raw::{
     OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_RESTRICTED_CELT, OPUS_APPLICATION_RESTRICTED_LOWDELAY,
@@ -47,6 +56,8 @@ use opusorus::constants::raw::{
     OPUS_FRAMESIZE_20_MS, OPUS_FRAMESIZE_40_MS, OPUS_FRAMESIZE_60_MS, OPUS_FRAMESIZE_80_MS,
     OPUS_FRAMESIZE_100_MS, OPUS_FRAMESIZE_120_MS, OPUS_FRAMESIZE_ARG,
 };
+#[cfg(feature = "dred")]
+use opusorus::dred::{Dred, DredDecoder};
 #[cfg(feature = "qext")]
 use opusorus::encoder::request::OPUS_SET_QEXT_REQUEST;
 use opusorus::encoder::request::{
@@ -59,12 +70,24 @@ use opusorus::encoder::request::{
 use opusorus::packet::{
     MODE_CELT_ONLY, MODE_SILK_ONLY, get_nb_frames, get_samples_per_frame, has_lbrr,
 };
-use opusorus::{Decoder, Encoder, Error};
+use opusorus::{Decoder, Encoder};
 
 use crate::compare::{EXIT_FAILURE, EXIT_SUCCESS, argv0, c_atoi, c_fmt_f, c_isspace};
 
 /// `MAX_PACKET`: largest payload accepted by `-max_payload` (and the default).
 pub const MAX_PACKET: i32 = 15000;
+
+/// Whether this build has deep PLC (feature `deep-plc`, implied by `dred` and `osce`).
+pub const DEEP_PLC: bool = cfg!(feature = "deep-plc");
+/// Whether this build has DRED decoding (feature `dred`).
+pub const DRED: bool = cfg!(feature = "dred");
+/// Whether this build has OSCE (feature `osce`).
+pub const OSCE: bool = cfg!(feature = "osce");
+/// Whether the DNN weights are compiled in (feature `dnn-weights-embedded`).
+pub const WEIGHTS_EMBEDDED: bool = cfg!(feature = "dnn-weights-embedded");
+
+/// The weight file of a libopus `USE_WEIGHTS_FILE` `opus_demo`.
+pub const WEIGHTS_FILE: &str = "weights_blob.bin";
 
 /// `MAX_SAMPLING_RATE`.
 #[cfg(feature = "qext")]
@@ -480,8 +503,34 @@ pub fn opus_demo_main(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> io::Result<i32> {
+    let weights = if DEEP_PLC && !WEIGHTS_EMBEDDED {
+        // USE_WEIGHTS_FILE: `load_blob("weights_blob.bin")`.
+        match std::fs::read(WEIGHTS_FILE) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+    opus_demo_main_with_weights(args, stdout, stderr, weights.as_deref())
+}
+
+/// [`opus_demo_main`] with the DNN weight blob given by the caller instead of read from
+/// [`WEIGHTS_FILE`]: `Some(blob)` is set with `OPUS_SET_DNN_BLOB` on the encoder, decoder and
+/// DRED decoder (errors ignored, as in C); `None` leaves them with the compiled-in models
+/// (feature `dnn-weights-embedded`) or without models. Ignored without DNN features.
+///
+/// # Errors
+/// As [`opus_demo_main`].
+pub fn opus_demo_main_with_weights(
+    args: &[String],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    weights: Option<&[u8]>,
+) -> io::Result<i32> {
     let mut fout = None;
-    let ret = run(args, stdout, stderr, &mut fout)?;
+    let ret = run(args, stdout, stderr, &mut fout, weights)?;
     // fclose(fout)
     if let Some(mut f) = fout {
         f.flush()?;
@@ -496,6 +545,7 @@ fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     fout_slot: &mut Option<BufWriter<File>>,
+    weights: Option<&[u8]>,
 ) -> io::Result<i32> {
     let argc = args.len();
     let mut ret = EXIT_FAILURE;
@@ -985,7 +1035,26 @@ fn run(
         }
         frame_size = 2 * sampling_rate;
     }
-    // opus_dred_decoder_create()/opus_dred_alloc(): see the module docs (no DRED decoding).
+    // opus_dred_decoder_create() / opus_dred_alloc() (compiled-in weights: bound here).
+    #[cfg(feature = "dred")]
+    let mut dred_dec = DredDecoder::new();
+    #[cfg(feature = "dred")]
+    let mut dred = Dred::new();
+    // USE_WEIGHTS_FILE: OPUS_SET_DNN_BLOB on the encoder, decoder and DRED decoder.
+    #[cfg(feature = "deep-plc")]
+    if let Some(blob) = weights {
+        #[cfg(feature = "dred")]
+        if let Some(e) = enc.as_mut() {
+            ctl_ignored(e.set_dnn_blob(blob));
+        }
+        if let Some(d) = dec.as_mut() {
+            ctl_ignored(d.set_dnn_blob(blob));
+        }
+        #[cfg(feature = "dred")]
+        ctl_ignored(dred_dec.set_dnn_blob(blob));
+    }
+    #[cfg(not(feature = "deep-plc"))]
+    let _ = weights;
 
     let mut rng = GlibcRand::default();
     let mut stop = false;
@@ -1180,15 +1249,34 @@ fn run(
             if run_decoder != 0 {
                 run_decoder += lost_count;
             }
-            if lost == 0 && lost_count > 0 {
-                // Only decode the amount we need to fill in the gap. C:
-                //   dred_input = lost_count*OPUS_GET_LAST_PACKET_DURATION;
-                //   ret = opus_dred_parse(...); dred_input = ret > 0 ? ret : 0;
-                // Without DRED decoding support opus_dred_parse returns OPUS_UNIMPLEMENTED, so
-                // dred_input is 0 and lost frames are concealed with regular PLC below.
-                ret = Error::Unimplemented.code();
-            }
             let packet = &data[..len as usize];
+            #[cfg(feature = "dred")]
+            let mut dred_input = 0i32;
+            if lost == 0 && lost_count > 0 {
+                #[cfg(feature = "dred")]
+                {
+                    let output_samples = d.last_packet_duration() as i32;
+                    dred_input = lost_count * output_samples;
+                    // Only decode the amount we need to fill in the gap.
+                    ret = match dred_dec.parse(
+                        &mut dred,
+                        packet,
+                        sampling_rate.min(dred_input.max(0)),
+                        sampling_rate,
+                        false,
+                    ) {
+                        Ok((offset, _dred_end)) => offset,
+                        Err(e) => e.code(),
+                    };
+                    dred_input = if ret > 0 { ret } else { 0 };
+                }
+                // Without DRED support opus_dred_parse returns OPUS_UNIMPLEMENTED, so dred_input
+                // is 0 and lost frames are concealed with regular PLC below.
+                #[cfg(not(feature = "dred"))]
+                {
+                    ret = Error::Unimplemented.code();
+                }
+            }
             // FIXME (C): figure out how to trigger the decoder when the last packet of the file
             // is lost.
             for fr in 0..run_decoder {
@@ -1201,8 +1289,23 @@ fn run(
                         c_ret(d.opus_decode24(Some(packet), &mut out_buf, output_samples, 1));
                 } else if fr < lost_count {
                     output_samples = d.last_packet_duration() as i32;
-                    // C: opus_decoder_dred_decode24 if dred_input > 0 (never, see above).
-                    output_samples = c_ret(d.opus_decode24(None, &mut out_buf, output_samples, 0));
+                    #[cfg(feature = "dred")]
+                    if dred_input > 0 {
+                        output_samples = c_ret(d.opus_decoder_dred_decode24(
+                            &dred,
+                            (lost_count - fr) * output_samples,
+                            &mut out_buf,
+                            output_samples,
+                        ));
+                    } else {
+                        output_samples =
+                            c_ret(d.opus_decode24(None, &mut out_buf, output_samples, 0));
+                    }
+                    #[cfg(not(feature = "dred"))]
+                    {
+                        output_samples =
+                            c_ret(d.opus_decode24(None, &mut out_buf, output_samples, 0));
+                    }
                 } else {
                     output_samples = max_frame_size;
                     output_samples =

@@ -10,11 +10,14 @@
 //! * [`pitchdnn`], [`lpcnet_enc`]: the pitch DNN and the LPCNet feature extraction,
 //! * [`nndsp`]: the adaptive conv/comb/shape layers of OSCE.
 //!
-//! Model weights are never compiled in: they are parsed from a libopus weight blob
-//! (upstream `USE_WEIGHTS_FILE` / `OPUS_SET_DNN_BLOB` path, PLAN D-015).
+//! Model weights are parsed from a libopus weight blob (upstream `USE_WEIGHTS_FILE` /
+//! `OPUS_SET_DNN_BLOB` path, PLAN D-015); with the `dnn-weights-embedded` feature a blob is
+//! compiled in and bound at initialization ([`embedded`]).
 
 pub mod burg;
 pub mod common;
+#[cfg(feature = "dnn-weights-embedded")]
+pub mod embedded;
 pub mod freq;
 pub mod kiss99;
 pub mod lpcnet_enc;
