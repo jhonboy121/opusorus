@@ -1,0 +1,117 @@
+[package]
+name = "opusorus-fuzz"
+version = "0.0.0"
+description = "cargo-fuzz targets for opusorus: robustness and differential fuzzing against the C oracle."
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: the root workspace lists `fuzz` in `exclude`, so nightly-only fuzzing
+# never affects `cargo build --workspace`.
+[workspace]
+members = ["."]
+
+[features]
+# Mirror the codec features on both the port and the oracle so they stay in the same config.
+qext = ["opusorus/qext", "opusorus-oracle/qext"]
+custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opusorus = { path = "../crates/opusorus", features = ["std", "internals"] }
+opusorus-oracle = { path = "../crates/opusorus-oracle" }
+
+[profile.release]
+debug = 1
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+missing_const_for_fn = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+allow_attributes_without_reason = "warn"
+unwrap_or_default = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential_decode"
+path = "fuzz_targets/differential_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential_encode"
+path = "fuzz_targets/differential_encode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip_invariants"
+path = "fuzz_targets/roundtrip_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repacketizer"
+path = "fuzz_targets/repacketizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_parse_extensions"
+path = "fuzz_targets/packet_parse_extensions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential_ms_encode"
+path = "fuzz_targets/differential_ms_encode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multistream_decode"
+path = "fuzz_targets/multistream_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "projection_decode"
+path = "fuzz_targets/projection_decode.rs"
+test = false
+doc = false
+bench = false
