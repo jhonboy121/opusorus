@@ -588,7 +588,7 @@ Deviations and behaviour, all documented in the module doc:
   - the add orders differ between the deemphasis variants (x+VERY_SMALL+m vs x+m+VERY_SMALL);
   - the NaN-catching `!(S1 > 0.2f*S2)` test;
   - the (0.008f*0.008f)*i*i lag window.
-- **FIXED_POINT:** branches are skipped, each with a marker.
+- **FIXED_POINT:** ported by FX3 `fixed_celt_decoder` (see docs/FIXED_POINT.md). In fixed builds `CeltDecState` dumps (oracle) carry `vals: Vec<StateVal>` (`opus_int32`-widened) instead of floats; the oracle shim takes/returns the build's `opus_res`/`celt_sig`/`celt_norm`/`celt_glog`/`opus_val16` types, and `CeltEnc::encode` still takes float PCM (converted with `FLOAT2RES` in C).
 - **Buffer layout and scratch:**
   - The C trailing arrays are separate Vecs.
   - decode_mem is a single Vec of channels*(DECODE_BUFFER_SIZE*qext_scale+overlap), split per channel with split_at_mut.

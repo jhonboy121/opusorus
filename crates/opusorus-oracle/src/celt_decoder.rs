@@ -1,4 +1,8 @@
-//! Oracle bindings for unit `celt_decoder` (celt/celt_decoder.c, float build).
+//! Oracle bindings for unit `celt_decoder` (celt/celt_decoder.c), in the float and in the
+//! fixed-point oracle (`csrc/celt_decoder.c` is `// oracle-build: any`).
+//!
+//! The libopus types are mirrored by [`Res`], [`Sig`], [`Norm`], [`Glog`], [`Val16`] and
+//! [`StateVal`] (float in the float build, integers in the fixed-point build).
 //!
 //! * [`CeltDec`]: a C `CELTDecoder` (library `celt_decoder_init` / `celt_decode_with_ec[_dred]`
 //!   / `opus_custom_decoder_ctl`, or with `custom-modes` an `opus_custom_decoder_create`d one)
@@ -16,6 +20,48 @@
 
 use core::ffi::{c_int, c_void};
 use core::ptr;
+
+/// `opus_res`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Res = f32;
+/// `opus_res` (24-bit resolution).
+#[cfg(feature = "fixed-res24")]
+pub type Res = i32;
+/// `opus_res` (16-bit resolution).
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+pub type Res = i16;
+/// `celt_sig`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Sig = f32;
+/// `celt_sig`.
+#[cfg(feature = "fixed-point")]
+pub type Sig = i32;
+/// `celt_norm`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Norm = f32;
+/// `celt_norm` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Norm = i32;
+/// `celt_glog`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Glog = f32;
+/// `celt_glog` (Q24).
+#[cfg(feature = "fixed-point")]
+pub type Glog = i32;
+/// `opus_val16`.
+#[cfg(not(feature = "fixed-point"))]
+pub type Val16 = f32;
+/// `opus_val16`.
+#[cfg(feature = "fixed-point")]
+pub type Val16 = i16;
+/// Element type of the value array of a [`CeltDecState`] dump (`cd_val` in the shim): every
+/// field widened to `opus_int32` in the fixed-point build.
+#[cfg(not(feature = "fixed-point"))]
+pub type StateVal = f32;
+/// Element type of the value array of a [`CeltDecState`] dump (`cd_val` in the shim): every
+/// field widened to `opus_int32` in the fixed-point build.
+#[cfg(feature = "fixed-point")]
+pub type StateVal = i32;
 
 unsafe extern "C" {
     fn oracle_cd_has_qext() -> c_int;
@@ -36,7 +82,7 @@ unsafe extern "C" {
         p: *mut c_void,
         data: *const u8,
         len: c_int,
-        pcm: *mut f32,
+        pcm: *mut Res,
         frame_size: c_int,
         accum: c_int,
         qext: *const u8,
@@ -46,7 +92,7 @@ unsafe extern "C" {
         p: *mut c_void,
         data: *const u8,
         len: c_int,
-        pcm: *mut f32,
+        pcm: *mut Res,
         frame_size: c_int,
         accum: c_int,
         fts: *const u32,
@@ -78,7 +124,7 @@ unsafe extern "C" {
         pcm: *mut f32,
         frame_size: c_int,
     ) -> c_int;
-    fn oracle_cd_state(p: *mut c_void, ints: *mut c_int, floats: *mut f32) -> c_int;
+    fn oracle_cd_state(p: *mut c_void, ints: *mut c_int, vals: *mut StateVal) -> c_int;
     fn oracle_cd_tf_decode(
         start: c_int,
         end: c_int,
@@ -91,23 +137,23 @@ unsafe extern "C" {
         ec_out: *mut u32,
     );
     fn oracle_cd_deemphasis(
-        in0: *const f32,
-        in1: *const f32,
-        pcm: *mut f32,
+        in0: *const Sig,
+        in1: *const Sig,
+        pcm: *mut Res,
         n: c_int,
         c: c_int,
         downsample: c_int,
-        coef: *const f32,
-        mem: *mut f32,
+        coef: *const Val16,
+        mem: *mut Sig,
         accum: c_int,
     );
     fn oracle_cd_celt_synthesis(
         fs: c_int,
-        x: *mut f32,
-        out0: *mut f32,
-        out1: *mut f32,
+        x: *mut Norm,
+        out0: *mut Sig,
+        out1: *mut Sig,
         off: c_int,
-        old_band_e: *mut f32,
+        old_band_e: *mut Glog,
         start: c_int,
         eff_end: c_int,
         c: c_int,
@@ -117,10 +163,10 @@ unsafe extern "C" {
         downsample: c_int,
         silence: c_int,
         use_qext: c_int,
-        qext_band_log_e: *mut f32,
+        qext_band_log_e: *mut Glog,
         qext_end: c_int,
     );
-    fn oracle_cd_plc_pitch_search(fs: c_int, mem0: *mut f32, mem1: *mut f32, c: c_int) -> c_int;
+    fn oracle_cd_plc_pitch_search(fs: c_int, mem0: *mut Sig, mem1: *mut Sig, c: c_int) -> c_int;
     fn oracle_cd_enc_new(fs: c_int, channels: c_int, err: *mut c_int) -> *mut c_void;
     #[cfg(feature = "custom-modes")]
     fn oracle_cd_enc_custom_new(
@@ -177,8 +223,8 @@ const fn opt_ptr(d: Option<&[u8]>) -> *const u8 {
 pub struct CeltDecState {
     /// Integer fields.
     pub ints: [i32; STATE_NINTS],
-    /// Float fields and arrays, in order.
-    pub floats: Vec<f32>,
+    /// The other fields and arrays, in order (see [`StateVal`]).
+    pub vals: Vec<StateVal>,
 }
 
 /// A C CELT decoder.
@@ -245,7 +291,7 @@ impl CeltDec {
         &mut self,
         data: Option<&[u8]>,
         len: i32,
-        pcm: &mut [f32],
+        pcm: &mut [Res],
         frame_size: i32,
         accum: bool,
         qext: Option<&[u8]>,
@@ -276,7 +322,7 @@ impl CeltDec {
     pub fn decode_shared(
         &mut self,
         data: &[u8],
-        pcm: &mut [f32],
+        pcm: &mut [Res],
         frame_size: i32,
         accum: bool,
         fts: &[u32],
@@ -358,13 +404,13 @@ impl CeltDec {
 
     /// Full state dump.
     pub fn state(&mut self) -> CeltDecState {
-        // SAFETY: querying the float count with NULL buffers.
+        // SAFETY: querying the value count with NULL buffers.
         let n = unsafe { oracle_cd_state(self.ptr, ptr::null_mut(), ptr::null_mut()) };
         let mut ints = [0i32; STATE_NINTS];
-        let mut floats = vec![0f32; n as usize];
-        // SAFETY: ints has STATE_NINTS entries and floats the queried count.
-        unsafe { oracle_cd_state(self.ptr, ints.as_mut_ptr(), floats.as_mut_ptr()) };
-        CeltDecState { ints, floats }
+        let mut vals = vec![StateVal::default(); n as usize];
+        // SAFETY: ints has STATE_NINTS entries and vals the queried count.
+        unsafe { oracle_cd_state(self.ptr, ints.as_mut_ptr(), vals.as_mut_ptr()) };
+        CeltDecState { ints, vals }
     }
 }
 
@@ -419,8 +465,9 @@ impl CeltEnc {
         unsafe { oracle_cd_enc_ctl(self.ptr, request, value) }
     }
 
-    /// `celt_encode_with_ec(st, pcm, frame_size, out+1, nbytes, NULL)`. Returns the C return
-    /// value and the buffer `out` (`out[0]` is a TOC placeholder the QEXT path may modify;
+    /// `celt_encode_with_ec(st, pcm, frame_size, out+1, nbytes, NULL)` with the float input
+    /// converted with `FLOAT2RES` (`FLOAT2INT16`/`FLOAT2INT24` in the fixed-point build). Returns
+    /// the C return value and the buffer `out` (`out[0]` is a TOC placeholder the QEXT path may modify;
     /// the packet is `out[1..1+ret]`).
     pub fn encode(&mut self, pcm: &[f32], frame_size: i32, nbytes: i32) -> (i32, Vec<u8>) {
         assert!(pcm.len() >= frame_size.max(0) as usize * self.channels);
@@ -501,14 +548,14 @@ pub fn tf_decode(
 
 /// `deemphasis(in, pcm, N, C, downsample, coef, mem, accum)`.
 pub fn deemphasis(
-    in0: &[f32],
-    in1: &[f32],
-    pcm: &mut [f32],
+    in0: &[Sig],
+    in1: &[Sig],
+    pcm: &mut [Res],
     n: usize,
     c: usize,
     downsample: i32,
-    coef: &[f32; 4],
-    mem: &mut [f32; 2],
+    coef: &[Val16; 4],
+    mem: &mut [Sig; 2],
     accum: bool,
 ) {
     assert!(in0.len() >= n && (c < 2 || in1.len() >= n));
@@ -533,11 +580,11 @@ pub fn deemphasis(
 /// `outs[c][off..]`. With `use_qext`, `qext_mode = compute_qext_mode(mode)`.
 pub fn celt_synthesis(
     fs: i32,
-    x: &mut [f32],
-    out0: &mut [f32],
-    out1: Option<&mut [f32]>,
+    x: &mut [Norm],
+    out0: &mut [Sig],
+    out1: Option<&mut [Sig]>,
     off: usize,
-    old_band_e: &mut [f32],
+    old_band_e: &mut [Glog],
     start: i32,
     eff_end: i32,
     c: i32,
@@ -547,7 +594,7 @@ pub fn celt_synthesis(
     downsample: i32,
     silence: bool,
     use_qext: bool,
-    qext_band_log_e: &mut [f32],
+    qext_band_log_e: &mut [Glog],
     qext_end: i32,
 ) {
     let n = (fs / 400) << lm;
@@ -587,7 +634,7 @@ pub fn celt_synthesis(
 
 /// `celt_plc_pitch_search` on `mem0`/`mem1` (each `DECODE_BUFFER_SIZE*qext_scale` samples) for a
 /// decoder at `fs` (48000, or 96000 with QEXT).
-pub fn plc_pitch_search(fs: i32, mem0: &mut [f32], mem1: &mut [f32], c: i32) -> i32 {
+pub fn plc_pitch_search(fs: i32, mem0: &mut [Sig], mem1: &mut [Sig], c: i32) -> i32 {
     let dbs = if fs == 96000 { 4096 } else { 2048 };
     assert!(mem0.len() >= dbs && (c < 2 || mem1.len() >= dbs));
     // SAFETY: buffers hold the decode buffer size read by the C function.

@@ -1,5 +1,9 @@
 /* Oracle C shims for unit celt_decoder (celt/celt_decoder.c).
  *
+ * Compiled in the float and in the fixed-point oracle: the shims use the libopus types
+ * (opus_res, celt_sig, celt_norm, celt_glog, opus_val16 are float in the float build, integers in
+ * the fixed-point build), mirrored by the type aliases of opusorus-oracle/src/celt_decoder.rs.
+ *
  * celt_decoder.c is included with every external symbol renamed (oracle_cdc_*) so the private
  * `struct OpusCustomDecoder` and the static helpers (tf_decode, deemphasis, celt_synthesis,
  * celt_plc_pitch_search) are reachable. The full-decoder handles call the *library* functions
@@ -7,6 +11,7 @@
  * copy is only used for the static helpers and for the struct layout (state dumps).
  *
  * A CELT encoder handle (library celt_encode_with_ec) generates realistic test packets. */
+// oracle-build: any
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +56,8 @@ int celt_decoder_get_size(int channels);
 int celt_decoder_init(CELTDecoder *st, opus_int32 sampling_rate, int channels);
 int celt_decode_with_ec(CELTDecoder *st, const unsigned char *data, int len, opus_res *pcm,
                         int frame_size, ec_dec *dec, int accum);
+int celt_encode_with_ec(CELTEncoder *st, const opus_res *pcm, int frame_size,
+                        unsigned char *compressed, int nbCompressedBytes, ec_enc *enc);
 #ifdef ENABLE_QEXT
 int celt_decode_with_ec_dred(CELTDecoder *st, const unsigned char *data, int len,
                              opus_res *pcm, int frame_size, ec_dec *dec, int accum,
@@ -167,7 +174,7 @@ int oracle_cd_get_mode_ok(void *p) {
 }
 
 /* celt_decode_with_ec[_dred] with its own range decoder (data may be NULL). */
-int oracle_cd_decode(void *p, const unsigned char *data, int len, float *pcm, int frame_size,
+int oracle_cd_decode(void *p, const unsigned char *data, int len, opus_res *pcm, int frame_size,
                      int accum, const unsigned char *qext, int qext_len) {
   oracle_cd *h = (oracle_cd *)p;
 #ifdef ENABLE_QEXT
@@ -186,7 +193,7 @@ int oracle_cd_decode(void *p, const unsigned char *data, int len, float *pcm, in
 /* Hybrid-style decode: a range decoder over data[0..len) first decodes n uniform symbols
    (ec_dec_uint(fts[i]), written to vals[i]) standing in for the SILK layer, then CELT decodes
    from the same range decoder. ec_out: rng, tell, tell_frac, error. */
-int oracle_cd_decode_shared(void *p, const unsigned char *data, int len, float *pcm,
+int oracle_cd_decode_shared(void *p, const unsigned char *data, int len, opus_res *pcm,
                             int frame_size, int accum, const unsigned *fts, unsigned *vals,
                             int n, unsigned ec_out[4]) {
   oracle_cd *h = (oracle_cd *)p;
@@ -219,20 +226,29 @@ int oracle_cd_custom_decode_float(void *p, const unsigned char *data, int len, f
 
 #define ORACLE_CD_NINTS 22
 
+/* Element type of the state dump's value array: float in the float build, opus_int32 in the
+   fixed-point build (every value widened). */
+#ifdef FIXED_POINT
+typedef opus_int32 cd_val;
+#else
+typedef float cd_val;
+#endif
+
 /* State dump. ints: overlap, channels, stream_channels, downsample, start, end, signalling,
    disable_inv, complexity, qext_scale (1 without QEXT), rng, error, last_pitch_index,
    loss_duration, plc_duration, last_frame_type, skip_plc, postfilter_period,
    postfilter_period_old, postfilter_tapset, postfilter_tapset_old, prefilter_and_fold.
-   floats (returns the count; pass NULL to query): postfilter_gain, postfilter_gain_old,
+   vals (returns the count; pass NULL to query): postfilter_gain, postfilter_gain_old,
    preemph_memD[2], qext_oldBandE[2*NB_QEXT_BANDS] (QEXT only), _decode_mem
    (channels*(dbs+overlap)), oldEBands, oldLogE, oldLogE2, backgroundLogE (2*nbEBands each),
    lpc (channels*CELT_LPC_ORDER). */
-int oracle_cd_state(void *p, int *ints, float *floats) {
+int oracle_cd_state(void *p, int *ints, cd_val *vals) {
   CELTDecoder *st = ((oracle_cd *)p)->st;
   int qext_scale = 1;
   int nb = st->mode->nbEBands;
   int dbs, mem_len, cnt, i;
-  float *oldBandE;
+  celt_glog *oldBandE;
+  opus_val16 *lpc;
 #ifdef ENABLE_QEXT
   qext_scale = st->qext_scale;
 #endif
@@ -266,18 +282,20 @@ int oracle_cd_state(void *p, int *ints, float *floats) {
     ints[20] = st->postfilter_tapset_old;
     ints[21] = st->prefilter_and_fold;
   }
-  if (floats) {
+  if (vals) {
     int k = 0;
-    floats[k++] = st->postfilter_gain;
-    floats[k++] = st->postfilter_gain_old;
-    floats[k++] = st->preemph_memD[0];
-    floats[k++] = st->preemph_memD[1];
+    vals[k++] = st->postfilter_gain;
+    vals[k++] = st->postfilter_gain_old;
+    vals[k++] = st->preemph_memD[0];
+    vals[k++] = st->preemph_memD[1];
 #ifdef ENABLE_QEXT
-    for (i = 0; i < 2 * NB_QEXT_BANDS; i++) floats[k++] = st->qext_oldBandE[i];
+    for (i = 0; i < 2 * NB_QEXT_BANDS; i++) vals[k++] = st->qext_oldBandE[i];
 #endif
-    for (i = 0; i < mem_len; i++) floats[k++] = st->_decode_mem[i];
-    oldBandE = (float *)(st->_decode_mem + mem_len);
-    for (i = 0; i < 8 * nb + st->channels * CELT_LPC_ORDER; i++) floats[k++] = oldBandE[i];
+    for (i = 0; i < mem_len; i++) vals[k++] = st->_decode_mem[i];
+    oldBandE = (celt_glog *)(st->_decode_mem + mem_len);
+    for (i = 0; i < 8 * nb; i++) vals[k++] = oldBandE[i];
+    lpc = (opus_val16 *)(oldBandE + 8 * nb);
+    for (i = 0; i < st->channels * CELT_LPC_ORDER; i++) vals[k++] = lpc[i];
   }
   return cnt;
 }
@@ -299,8 +317,8 @@ void oracle_cd_tf_decode(int start, int end, int isTransient, int *tf_res, int L
   ec_out[1] = (unsigned)ec_tell(&dec);
 }
 
-void oracle_cd_deemphasis(const float *in0, const float *in1, float *pcm, int N, int C,
-                          int downsample, const float coef[4], float mem[2], int accum) {
+void oracle_cd_deemphasis(const celt_sig *in0, const celt_sig *in1, opus_res *pcm, int N, int C,
+                          int downsample, const opus_val16 coef[4], celt_sig mem[2], int accum) {
   celt_sig *in[2];
   in[0] = (celt_sig *)in0;
   in[1] = (celt_sig *)in1;
@@ -312,10 +330,10 @@ static const CELTMode *cd_mode(int fs) { return opus_custom_mode_create(fs, fs /
 
 /* celt_synthesis. out0/out1: channel buffers; out_syn[c] = outc + off. qext: when use_qext,
    qext_mode = compute_qext_mode(mode). */
-void oracle_cd_celt_synthesis(int fs, float *X, float *out0, float *out1, int off,
-                              float *oldBandE, int start, int effEnd, int C, int CC,
+void oracle_cd_celt_synthesis(int fs, celt_norm *X, celt_sig *out0, celt_sig *out1, int off,
+                              celt_glog *oldBandE, int start, int effEnd, int C, int CC,
                               int isTransient, int LM, int downsample, int silence, int use_qext,
-                              float *qext_bandLogE, int qext_end) {
+                              celt_glog *qext_bandLogE, int qext_end) {
   const CELTMode *mode = cd_mode(fs);
   celt_sig *out_syn[2];
   out_syn[0] = out0 + off;
@@ -341,7 +359,7 @@ void oracle_cd_celt_synthesis(int fs, float *X, float *out0, float *out1, int of
 }
 
 /* celt_plc_pitch_search on mem0/mem1 (each dbs samples) for a decoder at fs. */
-int oracle_cd_plc_pitch_search(int fs, float *mem0, float *mem1, int C) {
+int oracle_cd_plc_pitch_search(int fs, celt_sig *mem0, celt_sig *mem1, int C) {
   CELTDecoder *st = (CELTDecoder *)calloc(1, celt_decoder_get_size(2));
   celt_sig *decode_mem[2];
   int ret;
@@ -361,12 +379,14 @@ typedef struct {
   CELTEncoder *st;
   CELTMode *custom_mode;
   int custom;
+  int channels;
 } oracle_cd_enc;
 
 void *oracle_cd_enc_new(int fs, int channels, int *err) {
   oracle_cd_enc *h = (oracle_cd_enc *)calloc(1, sizeof(oracle_cd_enc));
   if (!h) return NULL;
   h->st = (CELTEncoder *)calloc(1, celt_encoder_get_size(2));
+  h->channels = channels;
   *err = celt_encoder_init(h->st, fs, channels, 0);
   opus_custom_encoder_ctl(h->st, CELT_SET_SIGNALLING(0));
   return h;
@@ -381,6 +401,7 @@ void *oracle_cd_enc_custom_new(int fs, int frame_size, int channels, int *err) {
     free(h);
     return NULL;
   }
+  h->channels = channels;
   h->st = opus_custom_encoder_create(h->custom_mode, channels, err);
   if (!h->st) {
     opus_custom_mode_destroy(h->custom_mode);
@@ -411,20 +432,39 @@ int oracle_cd_enc_ctl(void *p, int request, int value) {
   return opus_custom_encoder_ctl(((oracle_cd_enc *)p)->st, request, (opus_int32)value);
 }
 
-/* Encodes into out[1..1+nbytes) (out[0] is a TOC placeholder the QEXT path may modify). */
+/* pcm[0..n) converted to opus_res with FLOAT2RES (a copy of the input in the float build);
+   free() the result. */
+static opus_res *cd_to_res(const float *pcm, int n) {
+  opus_res *r = (opus_res *)malloc(sizeof(opus_res) * (n > 0 ? n : 1));
+  int i;
+  for (i = 0; i < n; i++) r[i] = FLOAT2RES(pcm[i]);
+  return r;
+}
+
+/* Encodes into out[1..1+nbytes) (out[0] is a TOC placeholder the QEXT path may modify). The
+   float input (frame_size*channels samples) is converted with FLOAT2RES. */
 int oracle_cd_enc_encode(void *p, const float *pcm, int frame_size, unsigned char *out,
                          int nbytes) {
+  oracle_cd_enc *h = (oracle_cd_enc *)p;
+  opus_res *in = cd_to_res(pcm, frame_size * h->channels);
+  int ret;
   out[0] = 0;
-  return celt_encode_with_ec(((oracle_cd_enc *)p)->st, pcm, frame_size, out + 1, nbytes, NULL);
+  ret = celt_encode_with_ec(h->st, in, frame_size, out + 1, nbytes, NULL);
+  free(in);
+  return ret;
 }
 
 /* Hybrid-style: n uniform symbols (vals[i] < fts[i]) are range coded first, then CELT encodes
    into the same range coder (as the Opus encoder does after SILK). */
 int oracle_cd_enc_encode_shared(void *p, const float *pcm, int frame_size, unsigned char *out,
                                 int nbytes, const unsigned *fts, const unsigned *vals, int n) {
+  oracle_cd_enc *h = (oracle_cd_enc *)p;
+  opus_res *in = cd_to_res(pcm, frame_size * h->channels);
   ec_enc enc;
-  int i;
+  int i, ret;
   ec_enc_init(&enc, out, nbytes);
   for (i = 0; i < n; i++) ec_enc_uint(&enc, vals[i], fts[i]);
-  return celt_encode_with_ec(((oracle_cd_enc *)p)->st, pcm, frame_size, NULL, nbytes, &enc);
+  ret = celt_encode_with_ec(h->st, in, frame_size, NULL, nbytes, &enc);
+  free(in);
+  return ret;
 }

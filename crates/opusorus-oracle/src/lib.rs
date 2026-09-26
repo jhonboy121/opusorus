@@ -21,6 +21,7 @@ pub mod silk_encoder_fix;
 // Units whose shims compile in both oracles (`// oracle-build: any`).
 pub mod analysis;
 pub mod celt_bands;
+pub mod celt_decoder;
 pub mod celt_encoder;
 pub mod celt_fft;
 pub mod celt_modes;
@@ -33,8 +34,6 @@ pub mod silk_resampler;
 
 // Float-only units: their shims (no `// oracle-build:` marker) are not compiled into a fixed-point
 // oracle. A unit converted to fixed point marks its shim `any`/`fixed` and lifts the cfg here.
-#[cfg(not(feature = "fixed-point"))]
-pub mod celt_decoder;
 #[cfg(not(feature = "fixed-point"))]
 pub mod dnn_core;
 #[cfg(not(feature = "fixed-point"))]

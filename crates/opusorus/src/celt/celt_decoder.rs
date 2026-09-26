@@ -1,5 +1,5 @@
 //! Port of celt/celt_decoder.c (+ the `CELTDecoder` declarations of celt/celt.h): the CELT
-//! decoder (float build).
+//! decoder, float and fixed-point (`fixed-point` / `fixed-res24`) builds.
 //!
 //! * [`CeltDecoder`] is the C `struct OpusCustomDecoder`. The C trailing arrays (`_decode_mem`,
 //!   `oldEBands`, `oldLogE`, `oldLogE2`, `backgroundLogE`, `lpc`) are owned `Vec`s sized at init;
@@ -21,6 +21,13 @@
 //! channels is rejected at init. C's `celt_assert`s (`validate_celt_decoder`) are
 //! `debug_assert!`s.
 //!
+//! Fixed point (`FIXED_POINT`): the code shared with the float build is written against the
+//! `celt::arch` macros (integer `celt_sig`/`celt_norm`/`celt_glog`, Q15 `opus_val16`); the
+//! `#ifdef FIXED_POINT` branches of the pitch PLC (noise floor and lag window of the
+//! autocorrelation, LPC bandwidth expansion, decay energy shift, `SIG_SAT` saturation after the
+//! synthesis filter, explosion test), the post-filter gain and the `opus_custom_decode*`
+//! variants (direct decoding into the `opus_res` output) are `#[cfg]` pairs.
+//!
 //! DNN (`deep-plc` / `dred` features, C `ENABLE_DEEP_PLC` / `ENABLE_DRED`): the neural PLC of
 //! `celt_decode_lost` (`FRAME_PLC_NEURAL` / `FRAME_DRED`, `update_plc_state`, the 16 → 48 kHz
 //! resampling of the LPCNet concealment) runs when an [`LpcnetPlcState`] is passed through
@@ -38,9 +45,12 @@ use alloc::vec::Vec;
 
 use crate::celt::arch::{
     CeltGlog, CeltNorm, CeltSig, OpusRes, OpusVal16, OpusVal32, Q15ONE, Q31ONE, VERY_SMALL,
-    add_res, add32, coef2val16, extend32, gconst, half32, imax, imin, max32, maxg, min32, ming,
-    mult16_16, mult16_16_q15, mult16_32_q15, qconst16, saturate, shl32, shr32, sig2res, sround16,
+    add_res, add32, coef2val16, extend32, extract16, gconst, half32, imax, imin, max32, maxg,
+    min32, ming, mult16_16, mult16_16_q15, mult16_32_q15, qconst16, saturate, shl32, shr32,
+    sig2res, sround16,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::arch::{NORM_SHIFT, SIG_SAT, SIG_SHIFT, abs16};
 use crate::celt::bands::{
     BandsScratch, SPREAD_NORMAL, anti_collapse, celt_lcg_rand, denormalise_bands, quant_all_bands,
 };
@@ -57,6 +67,8 @@ use crate::celt::celt_lpc::{
 };
 use crate::celt::entcode::{BITRES, EcCoder};
 use crate::celt::entdec::EcDec;
+#[cfg(feature = "fixed-point")]
+use crate::celt::mathops::{celt_maxabs16, celt_zlog2};
 use crate::celt::mathops::{celt_sqrt, frac_div32};
 use crate::celt::mdct::clt_mdct_backward;
 use crate::celt::modes::{DEC_PITCH_BUF_SIZE, MAX_PERIOD, opus_custom_mode_create};
@@ -70,7 +82,7 @@ use crate::celt::rate::clt_compute_allocation;
 #[cfg(feature = "qext")]
 use crate::celt::rate::clt_compute_extra_allocation;
 use crate::celt::static_modes::CeltMode;
-use crate::celt::vq::renormalise_vector;
+use crate::celt::vq::{renormalise_vector, v32};
 #[cfg(feature = "deep-plc")]
 use crate::dnn::freq::{FRAME_SIZE as LPCNET_FRAME_SIZE, PREEMPHASIS as LPCNET_PREEMPHASIS};
 #[cfg(feature = "deep-plc")]
@@ -107,10 +119,13 @@ pub const PLC_UPDATE_FRAMES: usize = 4;
 pub const PLC_UPDATE_SAMPLES: usize = PLC_UPDATE_FRAMES * 160;
 
 /// `SIG_SHIFT` (celt/arch.h); a no-op shift amount in the float build.
+#[cfg(not(feature = "fixed-point"))]
 const SIG_SHIFT: i32 = 12;
 /// `NORM_SHIFT` (celt/arch.h); a no-op shift amount in the float build.
+#[cfg(not(feature = "fixed-point"))]
 const NORM_SHIFT: i32 = 24;
 /// `SIG_SAT` (celt/arch.h); `SATURATE` is a no-op in the float build.
+#[cfg(not(feature = "fixed-point"))]
 const SIG_SAT: i32 = 536_870_911;
 
 /// `OPUS_SET_COMPLEXITY_REQUEST`.
@@ -229,8 +244,8 @@ fn with_frame_bufs<R>(
     f: impl FnOnce(&mut FrameBufs<'_>) -> R,
 ) -> R {
     if n <= STACK_N {
-        let mut x: [CeltNorm; 2 * STACK_N] = [0.0; 2 * STACK_N];
-        let mut freq: [CeltSig; STACK_N] = [0.0; STACK_N];
+        let mut x: [CeltNorm; 2 * STACK_N] = [CeltNorm::default(); 2 * STACK_N];
+        let mut freq: [CeltSig; STACK_N] = [CeltSig::default(); STACK_N];
         return f(&mut FrameBufs {
             x: &mut x[..2 * n],
             freq: &mut freq[..n],
@@ -238,16 +253,16 @@ fn with_frame_bufs<R>(
     }
     #[cfg(feature = "qext")]
     if n <= 2 * STACK_N {
-        let mut x: [CeltNorm; 4 * STACK_N] = [0.0; 4 * STACK_N];
-        let mut freq: [CeltSig; 2 * STACK_N] = [0.0; 2 * STACK_N];
+        let mut x: [CeltNorm; 4 * STACK_N] = [CeltNorm::default(); 4 * STACK_N];
+        let mut freq: [CeltSig; 2 * STACK_N] = [CeltSig::default(); 2 * STACK_N];
         return f(&mut FrameBufs {
             x: &mut x[..2 * n],
             freq: &mut freq[..n],
         });
     }
     if x_heap.len() < 2 * n {
-        x_heap.resize(2 * n, 0.0);
-        freq_heap.resize(n, 0.0);
+        x_heap.resize(2 * n, CeltNorm::default());
+        freq_heap.resize(n, CeltSig::default());
     }
     f(&mut FrameBufs {
         x: &mut x_heap[..2 * n],
@@ -438,6 +453,19 @@ fn bands_scratch_size(mode: &CeltMode, max_lm: i32) -> usize {
     (norm + 10 * widest) * size_of::<CeltNorm>()
 }
 
+/// `a - b` for `opus_val16` operands whose C result (an `int`) is stored in an `opus_val16`.
+#[cfg(feature = "fixed-point")]
+#[inline(always)]
+fn q15_sub(a: OpusVal16, b: impl Into<i32>) -> OpusVal16 {
+    extract16(i32::from(a) - b.into())
+}
+/// `a - b` for `opus_val16` operands (float build).
+#[cfg(not(feature = "fixed-point"))]
+#[inline(always)]
+const fn q15_sub(a: OpusVal16, b: OpusVal16) -> OpusVal16 {
+    a - b
+}
+
 /// Port of celt/celt_decoder.c:deemphasis_stereo_simple: special case for stereo with no
 /// downsampling and no accumulation (only compiled without custom modes / QEXT, as in C).
 #[cfg(not(any(feature = "custom-modes", feature = "qext")))]
@@ -497,7 +525,8 @@ pub fn deemphasis(
     let ds = downsample as usize;
     let nd = n / ds;
     // C: `#if defined(CUSTOM_MODES) || ... || defined(ENABLE_QEXT)` around this branch.
-    let custom = cfg!(any(feature = "custom-modes", feature = "qext")) && coef[1] != 0.0;
+    let custom =
+        cfg!(any(feature = "custom-modes", feature = "qext")) && coef[1] != OpusVal16::default();
     if c == 2 && downsample == 1 {
         // Perf: stereo without downsampling with both channels in one loop, so that their
         // recursions overlap; the same operations per sample as the per-channel loops below
@@ -992,12 +1021,12 @@ impl<'m> CeltDecoder<'m> {
             skip_plc: 0,
             postfilter_period: 0,
             postfilter_period_old: 0,
-            postfilter_gain: 0.0,
-            postfilter_gain_old: 0.0,
+            postfilter_gain: OpusVal16::default(),
+            postfilter_gain_old: OpusVal16::default(),
             postfilter_tapset: 0,
             postfilter_tapset_old: 0,
             prefilter_and_fold: 0,
-            preemph_mem_d: [0.0; 2],
+            preemph_mem_d: [CeltSig::default(); 2],
             #[cfg(feature = "deep-plc")]
             plc_pcm: [0; PLC_UPDATE_SAMPLES],
             #[cfg(feature = "deep-plc")]
@@ -1005,13 +1034,13 @@ impl<'m> CeltDecoder<'m> {
             #[cfg(feature = "deep-plc")]
             plc_preemphasis_mem: 0.0,
             #[cfg(feature = "qext")]
-            qext_old_band_e: [0.0; 2 * NB_QEXT_BANDS as usize],
-            decode_mem: vec![0.0; channels as usize * (dbs + overlap as usize)],
-            old_ebands: vec![0.0; 2 * nb],
-            old_log_e: vec![0.0; 2 * nb],
-            old_log_e2: vec![0.0; 2 * nb],
-            background_log_e: vec![0.0; 2 * nb],
-            lpc: vec![0.0; channels as usize * CELT_LPC_ORDER],
+            qext_old_band_e: [CeltGlog::default(); 2 * NB_QEXT_BANDS as usize],
+            decode_mem: vec![CeltSig::default(); channels as usize * (dbs + overlap as usize)],
+            old_ebands: vec![CeltGlog::default(); 2 * nb],
+            old_log_e: vec![CeltGlog::default(); 2 * nb],
+            old_log_e2: vec![CeltGlog::default(); 2 * nb],
+            background_log_e: vec![CeltGlog::default(); 2 * nb],
+            lpc: vec![OpusVal16::default(); channels as usize * CELT_LPC_ORDER],
             scratch: DecoderScratch::new(mode),
         };
         st.reset();
@@ -1049,12 +1078,12 @@ impl<'m> CeltDecoder<'m> {
         self.skip_plc = 0;
         self.postfilter_period = 0;
         self.postfilter_period_old = 0;
-        self.postfilter_gain = 0.0;
-        self.postfilter_gain_old = 0.0;
+        self.postfilter_gain = OpusVal16::default();
+        self.postfilter_gain_old = OpusVal16::default();
         self.postfilter_tapset = 0;
         self.postfilter_tapset_old = 0;
         self.prefilter_and_fold = 0;
-        self.preemph_mem_d = [0.0; 2];
+        self.preemph_mem_d = [CeltSig::default(); 2];
         #[cfg(feature = "deep-plc")]
         {
             self.plc_pcm = [0; PLC_UPDATE_SAMPLES];
@@ -1063,12 +1092,12 @@ impl<'m> CeltDecoder<'m> {
         }
         #[cfg(feature = "qext")]
         {
-            self.qext_old_band_e = [0.0; 2 * NB_QEXT_BANDS as usize];
+            self.qext_old_band_e = [CeltGlog::default(); 2 * NB_QEXT_BANDS as usize];
         }
-        self.decode_mem.fill(0.0);
-        self.old_ebands.fill(0.0);
-        self.background_log_e.fill(0.0);
-        self.lpc.fill(0.0);
+        self.decode_mem.fill(CeltSig::default());
+        self.old_ebands.fill(CeltGlog::default());
+        self.background_log_e.fill(CeltGlog::default());
+        self.lpc.fill(OpusVal16::default());
         self.old_log_e.fill(-gconst(28.0));
         self.old_log_e2.fill(-gconst(28.0));
         self.skip_plc = 1;
@@ -1082,7 +1111,7 @@ impl<'m> CeltDecoder<'m> {
         let overlap = self.overlap as usize;
         let stride = dbs + overlap;
         let window = &self.mode.window[..overlap];
-        let mut etmp_buf: [OpusVal32; MAX_OVERLAP] = [0.0; MAX_OVERLAP];
+        let mut etmp_buf: [OpusVal32; MAX_OVERLAP] = [OpusVal32::default(); MAX_OVERLAP];
         let etmp = &mut etmp_buf[..overlap];
         for c in 0..self.channels as usize {
             let chan = &mut self.decode_mem[c * stride..(c + 1) * stride];
@@ -1305,7 +1334,7 @@ impl<'m> CeltDecoder<'m> {
                 let qext_scale = self.qext_scale();
                 let (d0, d1) = self.decode_mem.split_at(stride);
                 let chans: [&[CeltSig]; 2] = [d0, if cn == 2 { d1 } else { &[] }];
-                let mut lp_pitch_buf = [0.0; (DECODE_BUFFER_SIZE >> 1) as usize];
+                let mut lp_pitch_buf = [OpusVal16::default(); (DECODE_BUFFER_SIZE >> 1) as usize];
                 pitch_index =
                     celt_plc_pitch_search(&chans[..cn], cn, qext_scale, &mut lp_pitch_buf);
                 self.last_pitch_index = pitch_index;
@@ -1335,12 +1364,13 @@ impl<'m> CeltDecoder<'m> {
             let window = &mode.window[..];
             let ord = CELT_LPC_ORDER;
             let mut exc_stack: [OpusVal16; MAX_MAX_PERIOD + CELT_LPC_ORDER] =
-                [0.0; MAX_MAX_PERIOD + CELT_LPC_ORDER];
-            let mut fir_tmp_stack: [OpusVal16; MAX_MAX_PERIOD] = [0.0; MAX_MAX_PERIOD];
+                [OpusVal16::default(); MAX_MAX_PERIOD + CELT_LPC_ORDER];
+            let mut fir_tmp_stack: [OpusVal16; MAX_MAX_PERIOD] =
+                [OpusVal16::default(); MAX_MAX_PERIOD];
             let exc_buf = &mut exc_stack[..max_period + ord];
             let fir_tmp = &mut fir_tmp_stack[..exc_length];
             for c in 0..cn {
-                let mut s1: OpusVal32 = 0.0;
+                let mut s1: OpusVal32 = OpusVal32::default();
                 let buf = &mut self.decode_mem[c * stride..(c + 1) * stride];
                 let lpc_c = &mut self.lpc[c * ord..(c + 1) * ord];
 
@@ -1350,21 +1380,52 @@ impl<'m> CeltDecoder<'m> {
                 }
 
                 if search {
-                    let mut ac: [OpusVal32; CELT_LPC_ORDER + 1] = [0.0; CELT_LPC_ORDER + 1];
+                    let mut ac: [OpusVal32; CELT_LPC_ORDER + 1] =
+                        [OpusVal32::default(); CELT_LPC_ORDER + 1];
                     // Compute LPC coefficients for the last MAX_PERIOD samples before the
                     // first loss so we can work in the excitation-filter domain.
+                    // C ignores the returned scaling shift.
                     _celt_autocorr(&exc_buf[ord..], &mut ac, window, overlap, ord, max_period);
                     // Add a noise floor of -40 dB.
-                    // FIXED_POINT: not ported (float build).
-                    ac[0] *= 1.0001f32;
+                    #[cfg(feature = "fixed-point")]
+                    {
+                        ac[0] += shr32(ac[0], 13);
+                    }
+                    #[cfg(not(feature = "fixed-point"))]
+                    {
+                        ac[0] *= 1.0001f32;
+                    }
                     // Use lag windowing to stabilize the Levinson-Durbin recursion.
                     for i in 1..=ord {
                         // ac[i] *= exp(-.5*(2*M_PI*.002*i)*(2*M_PI*.002*i));
-                        // FIXED_POINT: not ported (float build).
-                        ac[i] -= ac[i] * (0.008f32 * 0.008f32) * i as f32 * i as f32;
+                        #[cfg(feature = "fixed-point")]
+                        {
+                            ac[i] -= mult16_32_q15((2 * i * i) as i32, ac[i]);
+                        }
+                        #[cfg(not(feature = "fixed-point"))]
+                        {
+                            ac[i] -= ac[i] * (0.008f32 * 0.008f32) * i as f32 * i as f32;
+                        }
                     }
                     _celt_lpc(lpc_c, &ac, ord);
-                    // FIXED_POINT: bandwidth expansion loop not ported (float build).
+                    // For fixed-point, apply bandwidth expansion until we can guarantee that
+                    // no overflow can happen in the IIR filter. This means:
+                    // 32768*sum(abs(filter)) < 2^31
+                    #[cfg(feature = "fixed-point")]
+                    loop {
+                        let mut tmp: OpusVal16 = Q15ONE;
+                        let mut sum: OpusVal32 = OpusVal32::from(qconst16(1.0, SIG_SHIFT));
+                        for &v in lpc_c.iter() {
+                            sum += abs16(v);
+                        }
+                        if sum < 65535 {
+                            break;
+                        }
+                        for v in lpc_c.iter_mut() {
+                            tmp = extract16(mult16_16_q15(qconst16(0.99f32 as f64, 15), tmp));
+                            *v = extract16(mult16_16_q15(*v, tmp));
+                        }
+                    }
                 }
                 // Initialize the LPC history with the samples just before the start of the
                 // region for which we're computing the excitation.
@@ -1386,19 +1447,32 @@ impl<'m> CeltDecoder<'m> {
                 // adding energy when concealing in a segment with decaying energy.
                 let decay: OpusVal16;
                 {
-                    let mut e1: OpusVal32 = 1.0;
-                    let mut e2: OpusVal32 = 1.0;
-                    // FIXED_POINT: shift computation not ported (float build).
-                    let decay_length = exc_length >> 1;
+                    let mut e1: OpusVal32 = v32(1);
+                    let mut e2: OpusVal32 = v32(1);
                     let exc = &exc_buf[ord..];
+                    #[cfg(feature = "fixed-point")]
+                    #[allow(unused_mut, reason = "only incremented with QEXT")]
+                    let mut shift = imax(
+                        0,
+                        2 * celt_zlog2(celt_maxabs16(&exc[max_period - exc_length..max_period]))
+                            - 20,
+                    );
+                    #[cfg(all(feature = "fixed-point", feature = "qext"))]
+                    if self.qext_scale == 2 {
+                        shift += 1;
+                    }
+                    // C: `shift` only appears in shifts, which are no-ops in the float build.
+                    #[cfg(not(feature = "fixed-point"))]
+                    let shift = 0;
+                    let decay_length = exc_length >> 1;
                     for i in 0..decay_length {
                         let e: OpusVal16 = exc[max_period - decay_length + i];
-                        e1 += shr32(mult16_16(e, e), 0);
+                        e1 += shr32(mult16_16(e, e), shift);
                         let e: OpusVal16 = exc[max_period - 2 * decay_length + i];
-                        e2 += shr32(mult16_16(e, e), 0);
+                        e2 += shr32(mult16_16(e, e), shift);
                     }
                     e1 = min32(e1, e2);
-                    decay = celt_sqrt(frac_div32(shr32(e1, 1), e2));
+                    decay = extract16(celt_sqrt(frac_div32(shr32(e1, 1), e2)));
                 }
 
                 // Move the decoder memory one frame to the left to give us room to add the
@@ -1413,12 +1487,12 @@ impl<'m> CeltDecoder<'m> {
                 // (including overlap/2 samples on both sides).
                 let extrapolation_len = n + overlap;
                 // We also apply fading if this is not the first loss.
-                let mut attenuation: OpusVal16 = mult16_16_q15(fade, decay);
+                let mut attenuation: OpusVal16 = extract16(mult16_16_q15(fade, decay));
                 let mut j = 0usize;
                 for i in 0..extrapolation_len {
                     if j >= pitch_index_u {
                         j -= pitch_index_u;
-                        attenuation = mult16_16_q15(attenuation, decay);
+                        attenuation = extract16(mult16_16_q15(attenuation, decay));
                     }
                     buf[dbs - n + i] = shl32(
                         extend32(mult16_16_q15(
@@ -1437,7 +1511,8 @@ impl<'m> CeltDecoder<'m> {
                     j += 1;
                 }
                 {
-                    let mut lpc_mem: [OpusVal16; CELT_LPC_ORDER] = [0.0; CELT_LPC_ORDER];
+                    let mut lpc_mem: [OpusVal16; CELT_LPC_ORDER] =
+                        [OpusVal16::default(); CELT_LPC_ORDER];
                     // Copy the last decoded samples (prior to the overlap region) to synthesis
                     // filter memory so we can have a continuous signal.
                     for i in 0..ord {
@@ -1452,34 +1527,42 @@ impl<'m> CeltDecoder<'m> {
                         ord,
                         &mut lpc_mem,
                     );
-                    // FIXED_POINT: saturation not ported (float build).
+                    #[cfg(feature = "fixed-point")]
+                    for v in buf[dbs - n..dbs - n + extrapolation_len].iter_mut() {
+                        *v = saturate(*v, SIG_SAT);
+                    }
                 }
 
                 // Check if the synthesis energy is higher than expected, which can happen with
                 // the signal changes during our window. If so, attenuate.
                 {
-                    let mut s2: OpusVal32 = 0.0;
+                    let mut s2: OpusVal32 = OpusVal32::default();
                     let out = &mut buf[dbs - n..dbs - n + extrapolation_len];
                     for &v in out.iter() {
                         let tmp: OpusVal16 = sround16(v, SIG_SHIFT);
                         s2 += shr32(mult16_16(tmp, tmp), 11);
                     }
                     // This checks for an "explosion" in the synthesis.
-                    // FIXED_POINT: not ported (float build).
+                    #[cfg(feature = "fixed-point")]
+                    let explosion = s1 <= shr32(s2, 2);
                     // The float test is written this way to catch NaNs in the output of the IIR
                     // filter at the same time.
+                    #[cfg(not(feature = "fixed-point"))]
                     #[expect(
                         clippy::neg_cmp_op_on_partial_ord,
                         reason = "C writes the test this way to also catch NaNs"
                     )]
                     let explosion = !(s1 > 0.2f32 * s2);
                     if explosion {
-                        out.fill(0.0);
+                        out.fill(CeltSig::default());
                     } else if s1 < s2 {
-                        let ratio: OpusVal16 = celt_sqrt(frac_div32(shr32(s1, 1) + 1.0, s2 + 1.0));
+                        let ratio: OpusVal16 =
+                            extract16(celt_sqrt(frac_div32(shr32(s1, 1) + v32(1), s2 + v32(1))));
                         for i in 0..overlap {
-                            let tmp_g: OpusVal16 =
-                                Q15ONE - mult16_16_q15(coef2val16(window[i]), Q15ONE - ratio);
+                            let tmp_g: OpusVal16 = q15_sub(
+                                Q15ONE,
+                                mult16_16_q15(coef2val16(window[i]), q15_sub(Q15ONE, ratio)),
+                            );
                             out[i] = mult16_32_q15(tmp_g, out[i]);
                         }
                         for v in out[overlap..].iter_mut() {
@@ -2044,7 +2127,7 @@ impl<'m> CeltDecoder<'m> {
             dec.nbits_total += tell - dec.tell();
         }
 
-        let mut postfilter_gain: OpusVal16 = 0.0;
+        let mut postfilter_gain: OpusVal16 = OpusVal16::default();
         let mut postfilter_pitch: i32 = 0;
         let mut postfilter_tapset: i32 = 0;
         if start == 0 && tell + 16 <= total_bits {
@@ -2055,7 +2138,14 @@ impl<'m> CeltDecoder<'m> {
                 if dec.tell() + 2 <= total_bits {
                     postfilter_tapset = dec.dec_icdf(&TAPSET_ICDF, 2) as i32;
                 }
-                postfilter_gain = qconst16(0.09375, 15) * (qg + 1) as f32;
+                #[cfg(feature = "fixed-point")]
+                {
+                    postfilter_gain = extract16(i32::from(qconst16(0.09375, 15)) * (qg + 1));
+                }
+                #[cfg(not(feature = "fixed-point"))]
+                {
+                    postfilter_gain = qconst16(0.09375, 15) * (qg + 1) as f32;
+                }
             }
             tell = dec.tell();
         }
@@ -2080,7 +2170,7 @@ impl<'m> CeltDecoder<'m> {
         // reduce the risk of getting loud artifacts.
         if !intra_ener && self.loss_duration != 0 {
             for ch in 0..2usize {
-                let mut safety: CeltGlog = 0.0;
+                let mut safety: CeltGlog = CeltGlog::default();
                 let missing = imin(10, self.loss_duration >> lm);
                 if lm == 0 {
                     safety = gconst(1.5);
@@ -2096,7 +2186,7 @@ impl<'m> CeltDecoder<'m> {
                         let e2: OpusVal32 = self.old_log_e2[idx];
                         let mut slope: OpusVal32 = max32(e1 - e0, half32(e2 - e0));
                         slope = ming(slope, gconst(2.0));
-                        e0 -= max32(0.0, (1 + missing) as f32 * slope);
+                        e0 -= max32(OpusVal32::default(), v32(1 + missing) * slope);
                         self.old_ebands[idx] = max32(-gconst(20.0), e0);
                     } else {
                         // Otherwise take the min of the last frames.
@@ -2271,8 +2361,8 @@ impl<'m> CeltDecoder<'m> {
                 c,
                 lm,
                 &mut EcCoder::Dec(&mut ext_dec),
-                0.0,
-                0.0,
+                OpusVal16::default(),
+                OpusVal32::default(),
             );
             if qext_bytes > 0 {
                 unquant_fine_energy(
@@ -2495,7 +2585,7 @@ impl<'m> CeltDecoder<'m> {
         // dB/second, but when we're in DTX we give the weight of all missing packets to the
         // update packet.
         let max_background_increase: CeltGlog =
-            imin(160, self.loss_duration + m) as f32 * gconst(0.001);
+            v32(imin(160, self.loss_duration + m)) * gconst(0.001);
         for i in 0..2 * nb {
             self.background_log_e[i] = ming(
                 self.background_log_e[i] + max_background_increase,
@@ -2505,12 +2595,12 @@ impl<'m> CeltDecoder<'m> {
         // In case start or end were to change
         for ch in 0..2usize {
             for i in 0..start as usize {
-                self.old_ebands[ch * nb + i] = 0.0;
+                self.old_ebands[ch * nb + i] = CeltGlog::default();
                 self.old_log_e[ch * nb + i] = -gconst(28.0);
                 self.old_log_e2[ch * nb + i] = -gconst(28.0);
             }
             for i in end as usize..nb {
-                self.old_ebands[ch * nb + i] = 0.0;
+                self.old_ebands[ch * nb + i] = CeltGlog::default();
                 self.old_log_e[ch * nb + i] = -gconst(28.0);
                 self.old_log_e2[ch * nb + i] = -gconst(28.0);
             }
@@ -2848,11 +2938,13 @@ impl<'m> CustomDecoder<'m> {
         let n_max = (mode.short_mdct_size * mode.nb_short_mdcts) as usize;
         Ok(Self {
             st,
-            out: vec![0.0; channels as usize * n_max],
+            out: vec![OpusRes::default(); channels as usize * n_max],
         })
     }
 
-    /// Port of celt/celt_decoder.c:opus_custom_decode_float.
+    /// Port of celt/celt_decoder.c:opus_custom_decode_float (float build: decodes straight
+    /// into `pcm`).
+    #[cfg(not(feature = "fixed-point"))]
     pub fn opus_custom_decode_float(
         &mut self,
         data: Option<&[u8]>,
@@ -2864,19 +2956,56 @@ impl<'m> CustomDecoder<'m> {
             .celt_decode_with_ec(data, len, pcm, frame_size, None, false)
     }
 
-    /// Decodes into the internal `opus_res` buffer (`C*frame_size` samples).
-    fn decode_to_out(&mut self, data: Option<&[u8]>, len: i32, frame_size: i32) -> Result<i32> {
+    /// Port of celt/celt_decoder.c:opus_custom_decode_float (fixed-point build: decodes to
+    /// `opus_res` and converts with `RES2FLOAT`).
+    #[cfg(feature = "fixed-point")]
+    pub fn opus_custom_decode_float(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [f32],
+        frame_size: i32,
+    ) -> Result<i32> {
+        self.decode_convert(data, len, pcm, frame_size, crate::celt::arch::res2float)
+    }
+
+    /// Decodes into the internal `opus_res` buffer (`C*frame_size` samples, the C VLA `out`)
+    /// and converts the `C*ret` decoded samples into `pcm` with `conv` (C: only when the
+    /// decoder returns a positive count; errors are returned before `pcm` is touched).
+    fn decode_convert<T>(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [T],
+        frame_size: i32,
+        conv: impl Fn(OpusRes) -> T,
+    ) -> Result<i32> {
         let c = self.st.channels as usize;
         let need = c * frame_size.max(0) as usize;
         if self.out.len() < need {
-            self.out.resize(need, 0.0);
+            self.out.resize(need, OpusRes::default());
         }
-        self.st
-            .celt_decode_with_ec(data, len, &mut self.out[..need], frame_size, None, false)
+        let ret = self.st.celt_decode_with_ec(
+            data,
+            len,
+            &mut self.out[..need],
+            frame_size,
+            None,
+            false,
+        )?;
+        let cnt = c * ret as usize;
+        if pcm.len() < cnt {
+            return Err(Error::BadArg);
+        }
+        for (p, &o) in pcm[..cnt].iter_mut().zip(&self.out[..cnt]) {
+            *p = conv(o);
+        }
+        Ok(ret)
     }
 
-    /// Port of celt/celt_decoder.c:opus_custom_decode (float build: decodes to `opus_res` and
-    /// converts with `RES2INT16`).
+    /// Port of celt/celt_decoder.c:opus_custom_decode (16-bit fixed-point build: `opus_res` is
+    /// 16-bit, so it decodes straight into `pcm`).
+    #[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
     pub fn opus_custom_decode(
         &mut self,
         data: Option<&[u8]>,
@@ -2884,19 +3013,26 @@ impl<'m> CustomDecoder<'m> {
         pcm: &mut [i16],
         frame_size: i32,
     ) -> Result<i32> {
-        let ret = self.decode_to_out(data, len, frame_size)?;
-        let cnt = self.st.channels as usize * ret as usize;
-        if pcm.len() < cnt {
-            return Err(Error::BadArg);
-        }
-        for (p, &o) in pcm[..cnt].iter_mut().zip(&self.out[..cnt]) {
-            *p = crate::celt::arch::res2int16(o);
-        }
-        Ok(ret)
+        self.st
+            .celt_decode_with_ec(data, len, pcm, frame_size, None, false)
     }
 
-    /// Port of celt/celt_decoder.c:opus_custom_decode24 (float build: decodes to `opus_res` and
-    /// converts with `RES2INT24`).
+    /// Port of celt/celt_decoder.c:opus_custom_decode (decodes to `opus_res` and converts with
+    /// `RES2INT16`).
+    #[cfg(not(all(feature = "fixed-point", not(feature = "fixed-res24"))))]
+    pub fn opus_custom_decode(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [i16],
+        frame_size: i32,
+    ) -> Result<i32> {
+        self.decode_convert(data, len, pcm, frame_size, crate::celt::arch::res2int16)
+    }
+
+    /// Port of celt/celt_decoder.c:opus_custom_decode24 (24-bit fixed-point build: `opus_res` is
+    /// 24-bit, so it decodes straight into `pcm`).
+    #[cfg(feature = "fixed-res24")]
     pub fn opus_custom_decode24(
         &mut self,
         data: Option<&[u8]>,
@@ -2904,15 +3040,21 @@ impl<'m> CustomDecoder<'m> {
         pcm: &mut [i32],
         frame_size: i32,
     ) -> Result<i32> {
-        let ret = self.decode_to_out(data, len, frame_size)?;
-        let cnt = self.st.channels as usize * ret as usize;
-        if pcm.len() < cnt {
-            return Err(Error::BadArg);
-        }
-        for (p, &o) in pcm[..cnt].iter_mut().zip(&self.out[..cnt]) {
-            *p = crate::celt::arch::res2int24(o);
-        }
-        Ok(ret)
+        self.st
+            .celt_decode_with_ec(data, len, pcm, frame_size, None, false)
+    }
+
+    /// Port of celt/celt_decoder.c:opus_custom_decode24 (decodes to `opus_res` and converts
+    /// with `RES2INT24`).
+    #[cfg(not(feature = "fixed-res24"))]
+    pub fn opus_custom_decode24(
+        &mut self,
+        data: Option<&[u8]>,
+        len: i32,
+        pcm: &mut [i32],
+        frame_size: i32,
+    ) -> Result<i32> {
+        self.decode_convert(data, len, pcm, frame_size, crate::celt::arch::res2int24)
     }
 }
 

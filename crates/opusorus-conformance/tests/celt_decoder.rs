@@ -8,10 +8,13 @@
 //! (`tf_decode`, `deemphasis`, `celt_synthesis`, `celt_plc_pitch_search`) and the CTLs. QEXT
 //! (96 kHz and 48 kHz extension payloads) and custom modes (`opus_custom_decode*`) run with
 //! their features.
+//!
+//! Shared by the float and the fixed-point builds (`fixed-point`, `fixed-res24`, with or
+//! without `qext` / `custom-modes`): the C encoder of the matching oracle produces the packets
+//! (float test signals converted with `FLOAT2RES`), the helper inputs are generated as float
+//! values and converted to the build's types, and every comparison (PCM as `opus_res`, final
+//! range, complete decoder state) is bit-exact.
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,13 +23,121 @@
     reason = "test code: failures should panic"
 )]
 
+use opusorus::celt::arch::{CeltGlog, CeltNorm, CeltSig, OpusVal16};
 use opusorus::celt::celt_decoder::*;
 use opusorus::celt::entdec::EcDec;
 use opusorus::celt::modes::opus_custom_mode_create;
 use opusorus::celt::static_modes::CeltMode;
-use opusorus_conformance::{Rng, assert_bits_eq_f32, assert_slice_eq, signals};
-use opusorus_oracle::celt_decoder::{self as c, CeltDecState, CeltEnc};
+#[cfg(feature = "custom-modes")]
+use opusorus_conformance::assert_bits_eq_f32;
+use opusorus_conformance::{Rng, assert_slice_eq, signals};
+use opusorus_oracle::celt_decoder::{self as c, CeltDecState, CeltEnc, Res, StateVal};
 use opusorus_oracle::sys;
+
+// ---------------------------------------------------------------------------------------------
+// Build-generic values
+// ---------------------------------------------------------------------------------------------
+
+/// Bit pattern of a value, for bit-exact comparisons of float and integer data alike.
+trait Bits: Copy + core::fmt::Debug {
+    fn bits(self) -> u64;
+}
+impl Bits for f32 {
+    fn bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+impl Bits for i32 {
+    fn bits(self) -> u64 {
+        u64::from(self as u32)
+    }
+}
+impl Bits for i16 {
+    fn bits(self) -> u64 {
+        u64::from(self as u16)
+    }
+}
+
+/// Asserts that two slices are bit-identical.
+#[track_caller]
+fn assert_v<T: Bits>(what: &str, rust: &[T], c: &[T]) {
+    assert_eq!(rust.len(), c.len(), "{what}: length mismatch");
+    if let Some(i) = rust.iter().zip(c).position(|(a, b)| a.bits() != b.bits()) {
+        panic!(
+            "{what}: first mismatch at {i}: rust={:?} c={:?}",
+            rust[i], c[i]
+        );
+    }
+}
+
+/// Scales `x` by `2^q` with rounding and saturation to `[-lim, lim]` (fixed-point inputs).
+#[cfg(feature = "fixed-point")]
+fn fx(x: f32, q: i32, lim: i64) -> i64 {
+    ((f64::from(x) * (1i64 << q) as f64).round() as i64).clamp(-lim, lim)
+}
+
+/// An `opus_res` from a float sample in [-1, 1] (`FLOAT2RES`-like; the float build keeps it).
+#[cfg(not(feature = "fixed-point"))]
+const fn res(x: f32) -> Res {
+    x
+}
+#[cfg(feature = "fixed-res24")]
+fn res(x: f32) -> Res {
+    fx(x, 23, (1 << 23) - 1) as i32
+}
+#[cfg(all(feature = "fixed-point", not(feature = "fixed-res24")))]
+fn res(x: f32) -> Res {
+    fx(x, 15, 32767) as i16
+}
+/// A `celt_sig` from a value in 16-bit PCM units (`SIG_SHIFT` above them in the fixed-point
+/// build, saturated to `SIG_SAT` like the decoder's signals).
+#[cfg(not(feature = "fixed-point"))]
+const fn sig(x: f32) -> CeltSig {
+    x
+}
+#[cfg(feature = "fixed-point")]
+fn sig(x: f32) -> CeltSig {
+    fx(x, 12, 536_870_911) as i32
+}
+/// A `celt_norm` from a float value (Q24 in the fixed-point build).
+#[cfg(not(feature = "fixed-point"))]
+const fn nrm(x: f32) -> CeltNorm {
+    x
+}
+#[cfg(feature = "fixed-point")]
+fn nrm(x: f32) -> CeltNorm {
+    fx(x, 24, 1 << 30) as i32
+}
+/// A `celt_glog` from a value in log2 units (Q24 in the fixed-point build).
+#[cfg(not(feature = "fixed-point"))]
+const fn glog(x: f32) -> CeltGlog {
+    x
+}
+#[cfg(feature = "fixed-point")]
+fn glog(x: f32) -> CeltGlog {
+    fx(x, 24, 1 << 30) as i32
+}
+/// A `Vec` of `n` build-typed values made by `f` from `rng`.
+fn gen_vals<T>(n: usize, rng: &mut Rng, mut f: impl FnMut(&mut Rng) -> T) -> Vec<T> {
+    (0..n).map(|_| f(rng)).collect()
+}
+
+/// Amplitude of the random normalised spectrum of the `celt_synthesis` tests.
+const XAMP: f32 = 1.0;
+/// Amplitude of the random band energies (log2 units) of the `celt_synthesis` tests.
+const EAMP: f32 = 12.0;
+
+/// Amplitude of the random de-emphasis memories for input amplitude `amp`: the fixed-point
+/// decoder's memory is `coef0*SATURATE(x+mem)`, well below `SIG_SAT`, so `x + mem` cannot
+/// overflow (100000 PCM units).
+#[cfg(feature = "fixed-point")]
+const fn mem_amp(amp: f32) -> f32 {
+    amp.min(100_000.0)
+}
+#[cfg(not(feature = "fixed-point"))]
+const fn mem_amp(amp: f32) -> f32 {
+    amp
+}
 
 // CELT encoder requests (celt/celt.h).
 const CELT_SET_PREDICTION_REQUEST: i32 = 10002;
@@ -64,27 +175,31 @@ fn rust_state(d: &CeltDecoder<'_>) -> CeltDecState {
         d.postfilter_tapset_old,
         d.prefilter_and_fold,
     ];
-    let mut floats = vec![
-        d.postfilter_gain,
-        d.postfilter_gain_old,
-        d.preemph_mem_d[0],
-        d.preemph_mem_d[1],
+    let mut vals: Vec<StateVal> = vec![
+        StateVal::from(d.postfilter_gain),
+        StateVal::from(d.postfilter_gain_old),
+        StateVal::from(d.preemph_mem_d[0]),
+        StateVal::from(d.preemph_mem_d[1]),
     ];
     #[cfg(feature = "qext")]
-    floats.extend_from_slice(&d.qext_old_band_e);
-    floats.extend_from_slice(&d.decode_mem);
-    floats.extend_from_slice(&d.old_ebands);
-    floats.extend_from_slice(&d.old_log_e);
-    floats.extend_from_slice(&d.old_log_e2);
-    floats.extend_from_slice(&d.background_log_e);
-    floats.extend_from_slice(&d.lpc);
-    CeltDecState { ints, floats }
+    vals.extend(d.qext_old_band_e.iter().map(|&v| StateVal::from(v)));
+    for a in [
+        &d.decode_mem,
+        &d.old_ebands,
+        &d.old_log_e,
+        &d.old_log_e2,
+        &d.background_log_e,
+    ] {
+        vals.extend(a.iter().map(|&v| StateVal::from(v)));
+    }
+    vals.extend(d.lpc.iter().map(|&v| StateVal::from(v)));
+    CeltDecState { ints, vals }
 }
 
 #[track_caller]
 fn assert_state_eq(ctx: &str, r: &CeltDecState, c: &CeltDecState) {
     assert_slice_eq(&format!("{ctx}: state ints"), &r.ints, &c.ints);
-    assert_bits_eq_f32(&format!("{ctx}: state floats"), &r.floats, &c.floats);
+    assert_v(&format!("{ctx}: state values"), &r.vals, &c.vals);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -157,10 +272,10 @@ impl Pair<'_> {
         ctx: &str,
     ) -> i32 {
         let n_out = frame_size.max(0) as usize * self.channels;
-        let mut pc = vec![0f32; n_out];
+        let mut pc = vec![Res::default(); n_out];
         if accum {
             for v in pc.iter_mut() {
-                *v = 0.5 * rng.f32_sym();
+                *v = res(0.5 * rng.f32_sym());
             }
         }
         let mut pr = pc.clone();
@@ -168,7 +283,7 @@ impl Pair<'_> {
         let rr = rs_decode(&mut self.r, data, len, &mut pr, frame_size, accum, qext);
         let ctx = format!("{ctx} frame {}", self.frames);
         assert_eq!(code(rr), rc, "{ctx}: return value");
-        assert_bits_eq_f32(&format!("{ctx}: pcm"), &pr, &pc);
+        assert_v(&format!("{ctx}: pcm"), &pr, &pc);
         assert_eq!(
             self.r.final_range(),
             self.c.ctl_get(sys::OPUS_GET_FINAL_RANGE_REQUEST).1 as u32,
@@ -183,10 +298,12 @@ impl Pair<'_> {
                 FRAME_PLC_PERIODIC => self.cov.plc_periodic += 1,
                 _ => {}
             }
-            if self.r.last_frame_type == FRAME_NORMAL && self.r.postfilter_gain != 0.0 {
+            if self.r.last_frame_type == FRAME_NORMAL
+                && self.r.postfilter_gain != OpusVal16::default()
+            {
                 self.cov.postfilter += 1;
             }
-            if pr.iter().any(|&v| v != 0.0) {
+            if pr.iter().any(|&v| v != Res::default()) {
                 self.cov.nonzero += 1;
             }
         }
@@ -206,7 +323,7 @@ fn rs_decode(
     d: &mut CeltDecoder<'_>,
     data: Option<&[u8]>,
     len: i32,
-    pcm: &mut [f32],
+    pcm: &mut [Res],
     frame_size: i32,
     accum: bool,
     qext: Option<&[u8]>,
@@ -560,7 +677,7 @@ fn error_returns() {
     p.decode(None, -1, 960, false, None, &mut rng, "NULL len -1");
     p.decode(None, 1276, 960, false, None, &mut rng, "NULL len 1276");
     // Rust-only guards.
-    let mut small = vec![0f32; 100];
+    let mut small = vec![Res::default(); 100];
     assert_eq!(
         p.r.celt_decode_with_ec(Some(data), data.len() as i32, &mut small, 960, None, false),
         Err(opusorus::Error::BadArg)
@@ -569,7 +686,7 @@ fn error_returns() {
         p.r.celt_decode_with_ec(
             Some(&data[..3]),
             10,
-            &mut vec![0f32; 1920],
+            &mut vec![Res::default(); 1920],
             960,
             None,
             false
@@ -619,7 +736,7 @@ fn tf_decode_random() {
     }
 }
 
-fn preemph_coefs() -> Vec<[f32; 4]> {
+fn preemph_coefs() -> Vec<[OpusVal16; 4]> {
     #[cfg_attr(
         not(any(feature = "qext", feature = "custom-modes")),
         expect(unused_mut, reason = "only extended with features")
@@ -629,10 +746,11 @@ fn preemph_coefs() -> Vec<[f32; 4]> {
     v.push(opus_custom_mode_create(96000, 1920).unwrap().preemph);
     #[cfg(feature = "custom-modes")]
     {
-        // Custom-mode pre-emphasis filters (coef[1] != 0 path).
-        v.push([0.3500061035, -0.1799926758, 0.2719968125, 3.6765136719]);
-        v.push([0.6000061035, -0.1799926758, 0.4424998650, 2.2598876953]);
-        v.push([0.7799987793, -0.1000061035, 0.6150000110, 1.6259765625]);
+        // Custom-mode pre-emphasis filters (coef[1] != 0 path): 8, 16 and 32 kHz modes.
+        use opusorus::celt::modes::opus_custom_mode_create_custom;
+        for (fs, frame) in [(8000, 160), (16000, 320), (32000, 640)] {
+            v.push(opus_custom_mode_create_custom(fs, frame).unwrap().preemph);
+        }
     }
     v
 }
@@ -649,15 +767,19 @@ fn deemphasis_random() {
         let accum = rng.range_i32(0, 2) == 0;
         let coef = coefs[rng.range_i32(0, coefs.len() as i32 - 1) as usize];
         let amp = [1.0f32, 3000.0, 32768.0, 1e6, 1e-30, 4e-29][rng.range_i32(0, 5) as usize];
-        let in0: Vec<f32> = (0..n).map(|_| amp * rng.f32_sym()).collect();
-        let in1: Vec<f32> = (0..n).map(|_| amp * rng.f32_sym()).collect();
-        let mut mem = [amp * rng.f32_sym(), amp * rng.f32_sym()];
-        let mut pcm: Vec<f32> = (0..n * c).map(|_| rng.f32_sym()).collect();
+        // The decoder's signals are saturated to SIG_SAT (`sig`), its memories smaller.
+        let in0: Vec<CeltSig> = gen_vals(n, &mut rng, |r| sig(amp * r.f32_sym()));
+        let in1: Vec<CeltSig> = gen_vals(n, &mut rng, |r| sig(amp * r.f32_sym()));
+        let mut mem = [
+            sig(mem_amp(amp) * rng.f32_sym()),
+            sig(mem_amp(amp) * rng.f32_sym()),
+        ];
+        let mut pcm: Vec<Res> = gen_vals(n * c, &mut rng, |r| res(r.f32_sym()));
         let mut mem_r = mem;
         let mut pcm_r = pcm.clone();
         c::deemphasis(&in0, &in1, &mut pcm, n, c, ds, &coef, &mut mem, accum);
-        let mut scratch = vec![0f32; n];
-        let ins: [&[f32]; 2] = [&in0, &in1];
+        let mut scratch = vec![CeltSig::default(); n];
+        let ins: [&[CeltSig]; 2] = [&in0, &in1];
         deemphasis(
             &ins[..c],
             &mut pcm_r,
@@ -670,8 +792,8 @@ fn deemphasis_random() {
             &mut scratch,
         );
         let ctx = format!("deemphasis iter {iter} n={n} c={c} ds={ds} accum={accum}");
-        assert_bits_eq_f32(&ctx, &pcm_r, &pcm);
-        assert_bits_eq_f32(&ctx, &mem_r, &mem);
+        assert_v(&ctx, &pcm_r, &pcm);
+        assert_v(&ctx, &mem_r, &mem);
     }
 }
 
@@ -701,13 +823,13 @@ fn celt_synthesis_random() {
         let eff_end = rng.range_i32(start + 1, mode.eff_ebands);
         let use_qext = cfg!(feature = "qext") && rng.range_i32(0, 1) == 1;
         let qext_end = if rng.range_i32(0, 1) == 1 { 14 } else { 2 };
-        let mut x: Vec<f32> = (0..2 * n).map(|_| rng.f32_sym()).collect();
-        let mut obe: Vec<f32> = (0..2 * nb).map(|_| 12.0 * rng.f32_sym()).collect();
-        let mut qble: Vec<f32> = (0..28).map(|_| 8.0 * rng.f32_sym()).collect();
+        let mut x: Vec<CeltNorm> = gen_vals(2 * n, &mut rng, |r| nrm(XAMP * r.f32_sym()));
+        let mut obe: Vec<CeltGlog> = gen_vals(2 * nb, &mut rng, |r| glog(EAMP * r.f32_sym()));
+        let mut qble: Vec<CeltGlog> = gen_vals(28, &mut rng, |r| glog(8.0 * r.f32_sym()));
         let off = 37;
         let blen = off + n + overlap;
-        let mut o0: Vec<f32> = (0..blen).map(|_| 1000.0 * rng.f32_sym()).collect();
-        let mut o1: Vec<f32> = (0..blen).map(|_| 1000.0 * rng.f32_sym()).collect();
+        let mut o0: Vec<CeltSig> = gen_vals(blen, &mut rng, |r| sig(1000.0 * r.f32_sym()));
+        let mut o1: Vec<CeltSig> = gen_vals(blen, &mut rng, |r| sig(1000.0 * r.f32_sym()));
         let (mut r0, mut r1) = (o0.clone(), o1.clone());
         let (xr, obr, qbr) = (x.clone(), obe.clone(), qble.clone());
         c::celt_synthesis(
@@ -731,9 +853,9 @@ fn celt_synthesis_random() {
         );
         #[cfg(feature = "qext")]
         let qm = opusorus::celt::modes::compute_qext_mode(mode);
-        let mut freq = vec![0f32; n];
+        let mut freq = vec![CeltSig::default(); n];
         {
-            let mut outs: [&mut [f32]; 2] = [&mut r0[off..], &mut r1[off..]];
+            let mut outs: [&mut [CeltSig]; 2] = [&mut r0[off..], &mut r1[off..]];
             celt_synthesis(
                 mode,
                 &xr,
@@ -762,9 +884,9 @@ fn celt_synthesis_random() {
             "synthesis iter {iter} fs={fs} lm={lm} C={c_} CC={cc} tr={tr} ds={ds} sil={silence} \
              start={start} end={eff_end} qext={use_qext}"
         );
-        assert_bits_eq_f32(&format!("{ctx}: out0"), &r0, &o0);
+        assert_v(&format!("{ctx}: out0"), &r0, &o0);
         if cc == 2 {
-            assert_bits_eq_f32(&format!("{ctx}: out1"), &r1, &o1);
+            assert_v(&format!("{ctx}: out1"), &r1, &o1);
         }
     }
 }
@@ -780,13 +902,18 @@ fn plc_pitch_search_random() {
         let fs = fss[iter % fss.len()];
         let dbs = if fs == 96000 { 4096 } else { 2048 };
         let c_ = rng.range_i32(1, 2);
-        let sig = [Sig::Speech, Sig::Tone, Sig::Music, Sig::Noise][iter % 4];
-        let s = gen_signal(sig, dbs, 2, fs as u32, iter as u64);
-        let mut m0: Vec<f32> = s.iter().step_by(2).map(|v| v * 32768.0).collect();
-        let mut m1: Vec<f32> = s.iter().skip(1).step_by(2).map(|v| v * 32768.0).collect();
+        let kind = [Sig::Speech, Sig::Tone, Sig::Music, Sig::Noise][iter % 4];
+        let s = gen_signal(kind, dbs, 2, fs as u32, iter as u64);
+        let mut m0: Vec<CeltSig> = s.iter().step_by(2).map(|v| sig(v * 32768.0)).collect();
+        let mut m1: Vec<CeltSig> = s
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|v| sig(v * 32768.0))
+            .collect();
         let rc = c::plc_pitch_search(fs, &mut m0, &mut m1, c_);
-        let mut lp = vec![0f32; 1024];
-        let chans: [&[f32]; 2] = [&m0, &m1];
+        let mut lp = vec![OpusVal16::default(); 1024];
+        let chans: [&[CeltSig]; 2] = [&m0, &m1];
         let qext_scale = if fs == 96000 { 2 } else { 1 };
         let rr = celt_plc_pitch_search(&chans[..c_ as usize], c_ as usize, qext_scale, &mut lp);
         assert_eq!(rr, rc, "pitch search iter {iter} fs={fs} C={c_}");
@@ -1019,7 +1146,7 @@ fn streams_hybrid_shared_range_decoder() {
                         continue;
                     }
                     let accum = rng.range_i32(0, 3) == 0;
-                    let mut pc: Vec<f32> = (0..fsu).map(|_| rng.f32_sym()).collect();
+                    let mut pc: Vec<Res> = gen_vals(fsu, &mut rng, |r| res(r.f32_sym()));
                     let mut pr = pc.clone();
                     let (rc, vc, ecc) = p.c.decode_shared(data, &mut pc, fsz, accum, &fts);
                     assert_eq!(vc, vals, "{ctx}: SILK symbols");
@@ -1035,7 +1162,7 @@ fn streams_hybrid_shared_range_decoder() {
                         accum,
                     );
                     assert_eq!(code(rr), rc, "{ctx}: ret");
-                    assert_bits_eq_f32(&ctx, &pr, &pc);
+                    assert_v(&ctx, &pr, &pc);
                     assert_eq!(
                         [d.rng, d.tell() as u32, d.tell_frac(), d.error as u32],
                         ecc,
@@ -1573,7 +1700,7 @@ fn perf_vs_c() {
     r.set_signalling(0);
     let mut cd = c::CeltDec::new(48000, 2).unwrap();
     cd.ctl_set(CELT_SET_SIGNALLING_REQUEST, 0);
-    let mut pcm = vec![0f32; 1920];
+    let mut pcm = vec![Res::default(); 1920];
     for _ in 0..3 {
         let t = Instant::now();
         for (m, _) in &pkts {

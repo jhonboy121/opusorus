@@ -8,7 +8,6 @@ pub mod arch;
 pub mod bands;
 #[allow(clippy::module_inception, reason = "mirrors libopus celt/celt.c")]
 pub mod celt;
-#[cfg(not(feature = "fixed-point"))]
 pub mod celt_decoder;
 pub mod celt_encoder;
 pub mod celt_lpc;
