@@ -54,6 +54,9 @@ int celt_decode_with_ec(CELTDecoder *st, const unsigned char *data, int len, opu
 #ifdef ENABLE_QEXT
 int celt_decode_with_ec_dred(CELTDecoder *st, const unsigned char *data, int len,
                              opus_res *pcm, int frame_size, ec_dec *dec, int accum,
+#ifdef ENABLE_DEEP_PLC
+                             struct LPCNetPLCState *lpcnet,
+#endif
                              const unsigned char *qext_payload, int qext_payload_len);
 #endif
 int opus_custom_decoder_ctl(CELTDecoder *st, int request, ...);
@@ -168,8 +171,11 @@ int oracle_cd_decode(void *p, const unsigned char *data, int len, float *pcm, in
                      int accum, const unsigned char *qext, int qext_len) {
   oracle_cd *h = (oracle_cd *)p;
 #ifdef ENABLE_QEXT
-  return celt_decode_with_ec_dred(h->st, data, len, pcm, frame_size, NULL, accum, qext,
-                                  qext_len);
+  return celt_decode_with_ec_dred(h->st, data, len, pcm, frame_size, NULL, accum,
+#ifdef ENABLE_DEEP_PLC
+                                  NULL,
+#endif
+                                  qext, qext_len);
 #else
   (void)qext;
   (void)qext_len;

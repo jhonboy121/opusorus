@@ -581,7 +581,12 @@ fn decoder_size_and_init() {
     h.check_state("re-init");
     h.reset();
     let mut d = SilkDecoder::new();
+    // Without OSCE there is nothing to load. With OSCE, `None` means "compiled-in weights" in C;
+    // the Rust port has none (weights come from a runtime blob, PLAN D-015), so it reports -1.
+    #[cfg(not(feature = "osce"))]
     assert_eq!(d.load_osce_models(None), 0);
+    #[cfg(feature = "osce")]
+    assert_eq!(d.load_osce_models(None), -1);
 }
 
 #[test]
