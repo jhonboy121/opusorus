@@ -1,20 +1,30 @@
 # Status
 
-_Last updated: 2026-09-26_
+_Last updated: 2026-09-26 (after layer D)_
 
 ## Summary
-Foundation, layer A (leaf DSP) and layer B (CELT bands, SILK decoder, SILK encoder common, analysis) complete and bit-exact. Layer C (CELT decoder/encoder, SILK FLP encoder, DNN core) in progress.
+The complete float codec is ported and verified bit-exact against libopus 1.6.1: CELT, SILK, hybrid,
+Opus encoder/decoder, multistream, projection (ambisonics), repacketizer, extensions, analysis,
+QEXT (Opus HD, 96 kHz) and custom modes. DNN modules (deep PLC/FARGAN, DRED, OSCE/BWE) are ported
+and bit-exact standalone; wiring them into the codec is in progress. The RFC 8251 and Opus HD
+conformance vectors decode bit-identically to C and pass opus_compare/qext_compare.
+
+Hardening phase (C ABI + upstream C test suite, Rust port of libopus tests, fuzzing, benchmarks,
+opus_demo, DNN integration) in progress. Remaining after that: fixed-point build, performance pass.
 
 | Area | State |
 |---|---|
 | Foundation (range coder, mathops, SILK macros, constants) | ✅ bit-exact vs libopus 1.6.1 |
-| CELT | 🟨 FFT/MDCT/modes/rate/cwrs/laplace/pitch/lpc/bands/vq/energy ✅; decoder/encoder in progress |
-| SILK | 🟨 tables/sigproc/NLSF/resampler/decoder/NSQ/VAD ✅; FLP encoder in progress |
-| Opus layer | 🟨 packet/extensions/repacketizer/mapping matrix/MLP/analysis ✅; decoder/encoder pending |
-| Optional: QEXT / custom modes / fixed-point / DNN | ⬜ |
-| Conformance vectors | ⬜ |
+| CELT (encoder, decoder, PLC, custom modes, QEXT) | ✅ bit-exact |
+| SILK (FLP encoder, decoder, PLC, CNG, LBRR, resampler) | ✅ bit-exact |
+| Opus layer (encoder, decoder, multistream, surround, projection, repacketizer, extensions, analysis) | ✅ bit-exact |
+| QEXT (Opus HD) | ✅ bit-exact, Opus HD vectors pass |
+| Custom modes | ✅ bit-exact |
+| DNN: deep PLC / DRED / OSCE+BWE | 🟨 modules bit-exact; codec integration in progress |
+| Fixed-point build | ⬜ planned (phase F) |
+| Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |
 | Fuzzing | ⬜ |
-| Benchmarks | ⬜ (not yet measurable) |
+| Benchmarks | 🟨 early: decoder ≈0.86–0.94× C (scalar) time; full suite in progress |
 | Shared library size | ⬜ |
 | Cross-platform build (wasm32 ×2, Android ×3, iOS ×3, linux x86_64/aarch64, thumbv7em no_std) | ✅ |
 | wasm32-wasip1 tests under wasmtime | ✅ |
