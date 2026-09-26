@@ -75,9 +75,9 @@ use opusorus::encoder::request::{
     OPUS_SET_LSB_DEPTH_REQUEST, OPUS_SET_PACKET_LOSS_PERC_REQUEST, OPUS_SET_VBR_CONSTRAINT_REQUEST,
     OPUS_SET_VBR_REQUEST,
 };
+use opusorus::glibc_rand::{self, GlibcRand};
 #[cfg(feature = "lossgen")]
 use opusorus::lossgen::{LossGenState, sample_loss};
-use opusorus::glibc_rand::{self, GlibcRand};
 use opusorus::packet::{
     MODE_CELT_ONLY, MODE_SILK_ONLY, get_nb_frames, get_samples_per_frame, has_lbrr,
 };
