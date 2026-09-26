@@ -35,6 +35,13 @@ resolution, with and without QEXT and custom modes; its decoder passes the RFC 8
 | wasm32-wasip1 tests under wasmtime | ✅ |
 | clippy `-D warnings`, rustfmt, rustdoc `-D warnings` | ✅ |
 
+## Verification run (2026-09-26, after FX5)
+
+`just clippy`, `just doc`, `just test` (float default + all float features incl. DNN; fixed-point
+16/24-bit × QEXT/custom-modes incl. the C-ABI upstream C suite and bench parity), `just cross`,
+`just cross-capi`, `just test-wasm` (float + fixed), `just test-dnn`, `just vectors` (float + fixed):
+all pass.
+
 ## Environment
 Host: aarch64 Linux, rustc 1.98.1, clang 21 / gcc (oracle via `cc`).
 
