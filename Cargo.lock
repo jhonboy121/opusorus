@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "opusorus",
  "opusorus-oracle",
+ "opusorus-tools",
 ]
 
 [[package]]
@@ -44,6 +45,13 @@ name = "opusorus-oracle"
 version = "0.1.0"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "opusorus-tools"
+version = "0.1.0"
+dependencies = [
+ "opusorus",
 ]
 
 [[package]]

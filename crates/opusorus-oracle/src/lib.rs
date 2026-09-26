@@ -27,3 +27,4 @@ pub mod silk_decoder;
 pub mod silk_encoder_common;
 pub mod silk_encoder_flp;
 pub mod silk_resampler;
+pub mod tools_compare;
