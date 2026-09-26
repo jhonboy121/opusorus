@@ -43,7 +43,6 @@ use crate::mlp::{
     LAYER0, LAYER1, LAYER2, MAX_NEURONS, analysis_compute_dense, analysis_compute_gru,
 };
 
-#[cfg(not(feature = "fixed-point"))]
 pub use crate::celt::celt::LEAK_BANDS;
 
 /// `NB_FRAMES`.
@@ -66,38 +65,7 @@ const LEAKAGE_OFFSET: f32 = 2.5;
 /// `LEAKAGE_SLOPE`.
 const LEAKAGE_SLOPE: f32 = 2.0;
 
-#[cfg(not(feature = "fixed-point"))]
 pub use crate::celt::celt::AnalysisInfo;
-
-/// `LEAK_BANDS` (celt/celt.h).
-///
-/// Fixed-point builds: private copy while `celt/celt.rs` is not converted yet (the float build
-/// re-exports `crate::celt::celt::LEAK_BANDS`); to be replaced by that re-export once it is.
-#[cfg(feature = "fixed-point")]
-pub const LEAK_BANDS: usize = 19;
-
-/// Port of celt/celt.h:AnalysisInfo: tonality analysis results passed from the Opus encoder to
-/// CELT.
-///
-/// Fixed-point builds: private copy while `celt/celt.rs` is not converted yet (the float build
-/// re-exports `crate::celt::celt::AnalysisInfo`); to be replaced by that re-export once it is.
-#[cfg(feature = "fixed-point")]
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct AnalysisInfo {
-    pub valid: i32,
-    pub tonality: f32,
-    pub tonality_slope: f32,
-    pub noisiness: f32,
-    pub activity: f32,
-    pub music_prob: f32,
-    pub music_prob_min: f32,
-    pub music_prob_max: f32,
-    pub bandwidth: i32,
-    pub activity_probability: f32,
-    pub max_pitch_ratio: f32,
-    /// Store as Q6 char to save space.
-    pub leak_boost: [u8; LEAK_BANDS],
-}
 
 /// `ABS16` on a float in a fixed-point build: the `fixed_generic.h` ternary
 /// `((x) < 0 ? (-(x)) : (x))` (keeps the sign of `-0.0`, unlike `fabsf`).
