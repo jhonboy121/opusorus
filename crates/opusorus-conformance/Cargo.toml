@@ -10,6 +10,9 @@ publish = false
 [features]
 qext = ["opusorus/qext", "opusorus-oracle/qext", "opusorus-tools/qext"]
 custom-modes = ["opusorus/custom-modes", "opusorus-oracle/custom-modes"]
+deep-plc = ["opusorus/deep-plc", "opusorus-oracle/deep-plc"]
+dred = ["opusorus/dred", "opusorus-oracle/dred", "deep-plc"]
+osce = ["opusorus/osce", "opusorus-oracle/osce"]
 
 [dependencies]
 opusorus = { workspace = true, features = ["internals", "std"] }

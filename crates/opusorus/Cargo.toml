@@ -19,6 +19,13 @@ std = []
 qext = []
 # Opus Custom modes (libopus `--enable-custom-modes`).
 custom-modes = []
+# Deep packet-loss concealment (libopus `--enable-deep-plc`). Weights are loaded at runtime from
+# a libopus weight blob (`Decoder::set_dnn_blob`), mirroring upstream `USE_WEIGHTS_FILE`.
+deep-plc = []
+# Deep REDundancy (libopus `--enable-dred`); implies deep PLC as upstream does.
+dred = ["deep-plc"]
+# SILK speech enhancement + bandwidth extension (libopus `--enable-osce`).
+osce = []
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

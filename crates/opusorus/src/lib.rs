@@ -50,6 +50,12 @@ pub mod silk;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod silk;
 
+#[cfg(all(feature = "internals", any(feature = "deep-plc", feature = "dred", feature = "osce")))]
+#[doc(hidden)]
+pub mod dnn;
+#[cfg(all(not(feature = "internals"), any(feature = "deep-plc", feature = "dred", feature = "osce")))]
+pub(crate) mod dnn;
+
 // ---- Opus layer (src/*.c) ----
 #[cfg(feature = "internals")]
 #[doc(hidden)]

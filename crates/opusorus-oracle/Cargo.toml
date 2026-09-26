@@ -14,6 +14,11 @@ links = "opus"
 qext = []
 # NOTE: a `fixed-point` oracle build is added in the fixed-point phase (docs/PLAN.md D-011).
 custom-modes = []
+# DNN features: build libopus with the matching --enable-* defines and the model data from
+# scripts/fetch_dnn_models.sh.
+deep-plc = []
+dred = ["deep-plc"]
+osce = []
 
 [build-dependencies]
 cc = "1"
