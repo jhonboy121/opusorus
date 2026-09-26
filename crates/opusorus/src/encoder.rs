@@ -30,12 +30,12 @@
 //! * Rust-only argument checks: a PCM slice shorter than `frame_size * channels` returns
 //!   [`Error::BadArg`] (C reads out of bounds).
 //!
-//! DRED (feature `dred`, C `ENABLE_DRED`): with [`Encoder::set_dred_duration`] > 0 the encoder
+//! DRED (feature `dred`, C `ENABLE_DRED`): with `Encoder::set_dred_duration` > 0 the encoder
 //! reserves part of the bitrate for Deep REDundancy and appends a DRED extension (RDOVAE latents
 //! of up to `duration * 10 ms` of past audio) to the first non-DTX frame of each packet. The
 //! RDOVAE encoder model is not compiled in (upstream `USE_WEIGHTS_FILE`, PLAN D-015) unless the
 //! `dnn-weights-embedded` feature embeds a blob (bound by [`Encoder::new`]): load it
-//! with [`Encoder::set_dnn_blob`]. As in upstream builds without loaded weights, the DRED
+//! with `Encoder::set_dnn_blob`. As in upstream builds without loaded weights, the DRED
 //! bitrate is still reserved when no model is loaded, but no DRED data is produced. The loaded
 //! model survives [`Encoder::reset`] and [`Encoder::init`].
 
@@ -4209,7 +4209,7 @@ impl Encoder {
 
     /// `OPUS_SET_DRED_DURATION`: the amount of Deep REDundancy to send, in 10 ms units
     /// (0 = off, up to 104 = 1.04 s). DRED also needs the RDOVAE encoder model
-    /// ([`Encoder::set_dnn_blob`]) and a packet loss percentage
+    /// (`Encoder::set_dnn_blob`) and a packet loss percentage
     /// ([`Encoder::set_packet_loss_perc`]) to get a share of the bitrate.
     ///
     /// # Errors

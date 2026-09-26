@@ -655,13 +655,10 @@ fn rust_encode(
     })
 }
 
-/// Whether `OPUS_SET_LFE(1)` may be used on an encoder with `ch` channels. In the fixed-point
-/// build, CELT's LFE band-energy clamp on a *stereo* stream (a configuration the multistream
-/// encoder never creates) makes the normalized bands overflow 32 bits in `stereo_itheta`:
-/// undefined behaviour in C (it wraps in practice, and the port matches it bit for bit when
-/// built without overflow checks), a panic in debug builds of the port.
-const fn lfe_allowed(ch: i32) -> bool {
-    !cfg!(feature = "fixed-point") || ch == 1
+/// Whether `OPUS_SET_LFE(1)` may be used on an encoder with `ch` channels: always. (Stereo LFE in
+/// fixed-point builds overflows in C; the port wraps those operations exactly like C does.)
+const fn lfe_allowed(_ch: i32) -> bool {
+    true
 }
 
 /// A random CTL (mostly valid values, some invalid) for an encoder with `ch` channels.

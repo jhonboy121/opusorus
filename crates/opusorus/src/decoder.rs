@@ -66,16 +66,16 @@
 //!   the SILK and CELT decoders update on good frames and use to conceal lost frames at
 //!   complexity >= 5 ([`Decoder::set_complexity`]).
 //! * `osce` (C `ENABLE_OSCE` + `ENABLE_OSCE_BWE`): SILK speech enhancement (LACE at complexity
-//!   6, NoLACE at >= 7) and, with [`Decoder::set_osce_bwe`], the wideband → fullband extension
+//!   6, NoLACE at >= 7) and, with `Decoder::set_osce_bwe`, the wideband → fullband extension
 //!   of 16 kHz SILK at 48 kHz output (complexity >= 4).
-//! * `dred` (C `ENABLE_DRED`): [`Decoder::dred_decode`] / [`Decoder::dred_decode24`] /
-//!   [`Decoder::dred_decode_float`] conceal with the features of a [`crate::dred::Dred`]
+//! * `dred` (C `ENABLE_DRED`): `Decoder::dred_decode` / `Decoder::dred_decode24` /
+//!   `Decoder::dred_decode_float` conceal with the features of a `crate::dred::Dred`
 //!   (`opus_decoder_dred_decode*`).
 //!
 //! The model weights are not compiled in (upstream `USE_WEIGHTS_FILE` semantics, PLAN D-015)
 //! unless the `dnn-weights-embedded` feature embeds a blob, which [`Decoder::new`] then binds
 //! like upstream's compiled-in tables. Otherwise load a libopus weight blob with
-//! [`Decoder::set_dnn_blob`] (`OPUS_SET_DNN_BLOB`). Until then
+//! `Decoder::set_dnn_blob` (`OPUS_SET_DNN_BLOB`). Until then
 //! the DNN paths stay off exactly as in an upstream build without loaded weights, except that
 //! the OSCE bandwidth extension is only selected with a loaded model (a `USE_WEIGHTS_FILE`
 //! build would run BBWENet without weights). Upstream's default build has the weights compiled
@@ -1126,7 +1126,7 @@ impl Decoder {
     ///   ignored in fixed-point builds, which have no soft clipper).
     ///
     /// The C `dred` / `dred_offset` arguments are `NULL` / 0 here; see
-    /// [`Decoder::dred_decode_float`].
+    /// `Decoder::dred_decode_float`.
     ///
     /// Returns the number of decoded samples per channel.
     ///
@@ -1784,7 +1784,7 @@ impl Decoder {
     /// Numeric `opus_decoder_ctl` for requests taking an `opus_int32` value (SET requests and
     /// `OPUS_RESET_STATE`, whose value is ignored). GET requests return [`Error::BadArg`];
     /// unknown requests return [`Error::Unimplemented`], like C. The pointer-taking
-    /// `OPUS_SET_DNN_BLOB` is not available numerically (use [`Decoder::set_dnn_blob`]) and
+    /// `OPUS_SET_DNN_BLOB` is not available numerically (use `Decoder::set_dnn_blob`) and
     /// returns [`Error::Unimplemented`], as the C library built with compiled-in weights does.
     ///
     /// # Errors
@@ -1896,10 +1896,10 @@ impl Decoder {
     }
 
     /// Port of `src/opus_decoder.c:opus_decoder_dred_decode_float` with C argument types (for
-    /// the C ABI). See [`Decoder::dred_decode_float`].
+    /// the C ABI). See `Decoder::dred_decode_float`.
     ///
     /// # Errors
-    /// As [`Decoder::dred_decode_float`].
+    /// As `Decoder::dred_decode_float`.
     #[cfg(feature = "dred")]
     #[doc(hidden)]
     pub fn opus_decoder_dred_decode_float(
@@ -1971,10 +1971,10 @@ impl Decoder {
     }
 
     /// Port of `src/opus_decoder.c:opus_decoder_dred_decode` with C argument types (for the C
-    /// ABI). See [`Decoder::dred_decode`].
+    /// ABI). See `Decoder::dred_decode`.
     ///
     /// # Errors
-    /// As [`Decoder::dred_decode`].
+    /// As `Decoder::dred_decode`.
     #[cfg(feature = "dred")]
     #[doc(hidden)]
     pub fn opus_decoder_dred_decode(
@@ -1998,10 +1998,10 @@ impl Decoder {
     }
 
     /// Port of `src/opus_decoder.c:opus_decoder_dred_decode24` with C argument types (for the C
-    /// ABI). See [`Decoder::dred_decode24`].
+    /// ABI). See `Decoder::dred_decode24`.
     ///
     /// # Errors
-    /// As [`Decoder::dred_decode24`].
+    /// As `Decoder::dred_decode24`.
     #[cfg(feature = "dred")]
     #[doc(hidden)]
     pub fn opus_decoder_dred_decode24(
@@ -2027,13 +2027,13 @@ impl Decoder {
     }
 
     /// Conceals `frame_size` samples per channel using the redundancy of a processed
-    /// [`crate::dred::Dred`] (port of `opus_decoder_dred_decode`; int16 output with soft
+    /// `crate::dred::Dred` (port of `opus_decoder_dred_decode`; int16 output with soft
     /// clipping).
     ///
     /// `dred_offset` is the position, in samples before the end of the DRED data's newest
     /// frame, of the first concealed sample (as returned by
     /// [`crate::dred::DredDecoder::parse`]). Without a processed `dred` (or without a deep PLC
-    /// model, see [`Decoder::set_dnn_blob`]) this is ordinary packet-loss concealment.
+    /// model, see `Decoder::set_dnn_blob`) this is ordinary packet-loss concealment.
     /// `frame_size` must be a multiple of 2.5 ms and `pcm` must hold `frame_size * channels`
     /// samples.
     ///
@@ -2052,11 +2052,11 @@ impl Decoder {
             .map(|n| n as usize)
     }
 
-    /// [`Decoder::dred_decode`] with 24-bit output in `i32` (port of
+    /// `Decoder::dred_decode` with 24-bit output in `i32` (port of
     /// `opus_decoder_dred_decode24`; no soft clipping).
     ///
     /// # Errors
-    /// As [`Decoder::dred_decode`].
+    /// As `Decoder::dred_decode`.
     #[cfg(feature = "dred")]
     pub fn dred_decode24(
         &mut self,
@@ -2070,11 +2070,11 @@ impl Decoder {
             .map(|n| n as usize)
     }
 
-    /// [`Decoder::dred_decode`] with float output (port of `opus_decoder_dred_decode_float`;
+    /// `Decoder::dred_decode` with float output (port of `opus_decoder_dred_decode_float`;
     /// no soft clipping).
     ///
     /// # Errors
-    /// As [`Decoder::dred_decode`].
+    /// As `Decoder::dred_decode`.
     #[cfg(feature = "dred")]
     pub fn dred_decode_float(
         &mut self,

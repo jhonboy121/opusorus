@@ -1719,21 +1719,6 @@ fn run_streams(seed: u64, nstreams: usize, rates: &[i32], frames: usize) {
         let mut p = Pair::new(fs, channels, &what);
         #[allow(unused_mut, reason = "only changed with qext")]
         let mut nb = random_stream(&mut p, &mut rng, fs, frame_size);
-        // Fixed point: with up-sampled input and bands above the input bandwidth coded (silent,
-        // log energies near -14), the spectral tilt sum of alloc_trim_analysis overflows its
-        // `opus_val32` (undefined behaviour in C, a panic in the port's overflow-checked
-        // builds). Limit the end band to the input bandwidth, as the Opus encoder does.
-        #[cfg(feature = "fixed-point")]
-        if ups > 1 {
-            let lim = match fs {
-                8000 => 13,
-                12000 | 16000 => 17,
-                _ => 19,
-            };
-            if p.r.end > lim {
-                p.ctl(CELT_SET_END_BAND, lim);
-            }
-        }
         // With QEXT the encoder writes the TOC byte before the payload (C `compressed[-1]`),
         // so such streams go through a range coder with a TOC slot, as in the Opus encoder.
         #[allow(unused_mut, reason = "only changed with qext")]

@@ -22,6 +22,12 @@ check: dnn-blob
     cargo check --workspace --all-targets --features {{float_all}}
     cargo check --workspace --all-targets --features {{fixed_all}}
 
+# Rustdoc with warnings as errors, float/DNN/fixed configurations.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features qext,custom-modes,deep-plc,dred,osce
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes
+
 # Format check.
 fmt:
     cargo fmt --all -- --check
@@ -149,4 +155,4 @@ fuzz-all:
     fuzz/run_all.sh
 
 # Everything CI runs.
-ci: fmt clippy test cross cross-capi test-wasm
+ci: fmt clippy doc test cross cross-capi test-wasm
