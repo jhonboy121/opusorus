@@ -204,7 +204,7 @@ fn c_sub(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
 fn kf_bfly2<B: CpxBuf + ?Sized>(fout: &mut B, m: i32, n: i32) {
     #[cfg(feature = "custom-modes")]
     if m == 1 {
-        debug_assert!(m == 1);
+        celt_assert!(m == 1);
         for i in 0..n as usize {
             let f = 2 * i;
             let t = fout.ld(f + 1);
@@ -220,7 +220,7 @@ fn kf_bfly2<B: CpxBuf + ?Sized>(fout: &mut B, m: i32, n: i32) {
     #[cfg(not(feature = "fixed-point"))]
     let tw: KissTwiddleScalar = 0.7071067812f32;
     // We know that m==4 here because the radix-2 is just after a radix-4.
-    debug_assert!(m == 4);
+    celt_assert!(m == 4);
     for i in 0..n as usize {
         let f = 8 * i;
         let f2 = f + 4;

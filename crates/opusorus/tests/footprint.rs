@@ -182,8 +182,11 @@ fn measure<T>(mut make: impl FnMut() -> T) -> usize {
 #[test]
 fn decoder_footprint_matches_get_size() {
     let packets = packets();
-    // Without every DNN state allocated `get_size` is only an upper bound.
-    let exact = !cfg!(any(feature = "deep-plc", feature = "osce")) || dnn_loaded();
+    // Without every DNN state allocated `get_size` is only an upper bound. Likewise with the
+    // fuzzing encoder (feature `fuzzing`), whose random mode decisions change the packet mix
+    // and so which of the lazily grown buffers get allocated.
+    let exact = (!cfg!(any(feature = "deep-plc", feature = "osce")) || dnn_loaded())
+        && !cfg!(feature = "fuzzing");
     // `get_size` covers the 96 kHz buffers of QEXT and the OSCE BWE state together, but the
     // BWE only runs at 48 kHz: at 96 kHz its two states (~35 KB) are not allocated.
     let slack = |m: usize| {

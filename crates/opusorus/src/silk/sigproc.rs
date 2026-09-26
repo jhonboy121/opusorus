@@ -122,9 +122,9 @@ pub const fn silk_sigm_q15(mut in_q5: i32) -> i32 {
 /// indices to `idx[..k]`. Only the `k` first values are guaranteed correct.
 pub fn silk_insertion_sort_increasing(a: &mut [i32], idx: &mut [i32], l: usize, k: usize) {
     // Safety checks
-    debug_assert!(k > 0);
-    debug_assert!(l > 0);
-    debug_assert!(l >= k);
+    celt_assert!(k > 0);
+    celt_assert!(l > 0);
+    celt_assert!(l >= k);
 
     // Write start indices in index vector
     for i in 0..k {
@@ -170,9 +170,9 @@ pub fn silk_insertion_sort_increasing(a: &mut [i32], idx: &mut [i32], l: usize, 
 #[cfg(feature = "fixed-point")]
 pub fn silk_insertion_sort_decreasing_int16(a: &mut [i16], idx: &mut [i32], l: usize, k: usize) {
     // Safety checks
-    debug_assert!(k > 0);
-    debug_assert!(l > 0);
-    debug_assert!(l >= k);
+    celt_assert!(k > 0);
+    celt_assert!(l > 0);
+    celt_assert!(l >= k);
 
     // Write start indices in index vector
     for i in 0..k {
@@ -213,7 +213,7 @@ pub fn silk_insertion_sort_decreasing_int16(a: &mut [i16], idx: &mut [i32], l: u
 /// Port of silk/sort.c:silk_insertion_sort_increasing_all_values_int16.
 pub fn silk_insertion_sort_increasing_all_values_int16(a: &mut [i16], l: usize) {
     // Safety checks
-    debug_assert!(l > 0);
+    celt_assert!(l > 0);
 
     // Sort vector elements by value, increasing order
     for i in 1..l {
@@ -324,7 +324,7 @@ pub fn silk_sum_sqr_shift(x: &[i16], len: usize) -> (i32, i32) {
         let nrg_tmp = silk_smulbb(x[i] as i32, x[i] as i32) as u32;
         nrg = add_rshift_uint(nrg, nrg_tmp, shft);
     }
-    debug_assert!(nrg >= 0);
+    silk_assert!(nrg >= 0);
     // Make sure the result will fit in a 32-bit signed integer with two bits of headroom.
     shft = silk_max_32(0, shft + 3 - silk_clz32(nrg));
     nrg = 0;
@@ -340,7 +340,7 @@ pub fn silk_sum_sqr_shift(x: &[i16], len: usize) -> (i32, i32) {
         let nrg_tmp = silk_smulbb(x[i] as i32, x[i] as i32) as u32;
         nrg = add_rshift_uint(nrg, nrg_tmp, shft);
     }
-    debug_assert!(nrg >= 0);
+    silk_assert!(nrg >= 0);
 
     // Output arguments
     (nrg, shft)
@@ -352,8 +352,8 @@ pub fn silk_sum_sqr_shift(x: &[i16], len: usize) -> (i32, i32) {
 
 /// Port of silk/interpolate.c:silk_interpolate — interpolate two vectors.
 pub fn silk_interpolate(xi: &mut [i16], x0: &[i16], x1: &[i16], ifact_q2: i32, d: usize) {
-    debug_assert!(ifact_q2 >= 0);
-    debug_assert!(ifact_q2 <= 4);
+    celt_assert!(ifact_q2 >= 0);
+    celt_assert!(ifact_q2 <= 4);
 
     for i in 0..d {
         xi[i] = silk_add_rshift(
@@ -507,7 +507,7 @@ fn silk_lp_interpolate_filter_taps(
                 }
             } else {
                 // ( fac_Q16 - ( 1 << 16 ) ) is in range of a 16-bit int
-                debug_assert!(fac_q16 - (1 << 16) == silk_sat16(fac_q16 - (1 << 16)));
+                silk_assert!(fac_q16 - (1 << 16) == silk_sat16(fac_q16 - (1 << 16)));
                 // Piece-wise linear interpolation of B and A
                 for nb in 0..TRANSITION_NB as usize {
                     b_q28[nb] = silk_smlawb(
@@ -543,7 +543,7 @@ pub fn silk_lp_variable_cutoff(ps_lp: &mut SilkLpState, frame: &mut [i16], frame
     let mut b_q28 = [0i32; TRANSITION_NB as usize];
     let mut a_q28 = [0i32; TRANSITION_NA as usize];
 
-    debug_assert!(ps_lp.transition_frame_no >= 0 && ps_lp.transition_frame_no <= TRANSITION_FRAMES);
+    silk_assert!(ps_lp.transition_frame_no >= 0 && ps_lp.transition_frame_no <= TRANSITION_FRAMES);
 
     // Run filter if needed
     if ps_lp.mode != 0 {
@@ -553,8 +553,8 @@ pub fn silk_lp_variable_cutoff(ps_lp: &mut SilkLpState, frame: &mut [i16], frame
         let ind = silk_rshift(fac_q16, 16);
         fac_q16 -= silk_lshift(ind, 16);
 
-        debug_assert!(ind >= 0);
-        debug_assert!(ind < TRANSITION_INT_NUM);
+        silk_assert!(ind >= 0);
+        silk_assert!(ind < TRANSITION_INT_NUM);
 
         // Interpolate filter coefficients
         silk_lp_interpolate_filter_taps(&mut b_q28, &mut a_q28, ind as usize, fac_q16);
@@ -659,14 +659,14 @@ fn lpc_inverse_pred_gain_qa_c(a_qa: &mut [i32; SILK_MAX_ORDER_LPC], order: usize
 
         // rc_mult1_Q30 range: [ 1 : 2^30 ]
         let rc_mult1_q30 = silk_sub32(silk_fix_const(1.0, 30), silk_smmul(rc_q31, rc_q31));
-        debug_assert!(rc_mult1_q30 > (1 << 15)); // reduce A_LIMIT if fails
-        debug_assert!(rc_mult1_q30 <= (1 << 30));
+        silk_assert!(rc_mult1_q30 > (1 << 15)); // reduce A_LIMIT if fails
+        silk_assert!(rc_mult1_q30 <= (1 << 30));
 
         // Update inverse gain
         // invGain_Q30 range: [ 0 : 2^30 ]
         inv_gain_q30 = silk_lshift(silk_smmul(inv_gain_q30, rc_mult1_q30), 2);
-        debug_assert!(inv_gain_q30 >= 0);
-        debug_assert!(inv_gain_q30 <= (1 << 30));
+        silk_assert!(inv_gain_q30 >= 0);
+        silk_assert!(inv_gain_q30 <= (1 << 30));
         if inv_gain_q30 < INV_MAX_PRED_GAIN_Q30 {
             return 0;
         }
@@ -719,8 +719,8 @@ fn lpc_inverse_pred_gain_qa_c(a_qa: &mut [i32; SILK_MAX_ORDER_LPC], order: usize
     // Update inverse gain
     // Range: [ 0 : 2^30 ]
     inv_gain_q30 = silk_lshift(silk_smmul(inv_gain_q30, rc_mult1_q30), 2);
-    debug_assert!(inv_gain_q30 >= 0);
-    debug_assert!(inv_gain_q30 <= (1 << 30));
+    silk_assert!(inv_gain_q30 >= 0);
+    silk_assert!(inv_gain_q30 <= (1 << 30));
     if inv_gain_q30 < INV_MAX_PRED_GAIN_Q30 {
         return 0;
     }
@@ -809,9 +809,9 @@ pub fn silk_lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: i32, qin: i32, 
 /// error filter. The filter always starts with zero state; the first `d` output samples are
 /// set to zero.
 pub fn silk_lpc_analysis_filter(out: &mut [i16], input: &[i16], b: &[i16], len: usize, d: usize) {
-    debug_assert!(d >= 6);
-    debug_assert!((d & 1) == 0);
-    debug_assert!(d <= len);
+    celt_assert!(d >= 6);
+    celt_assert!((d & 1) == 0);
+    celt_assert!(d <= len);
     // (FIXED_POINT && USE_CELT_FIR) branch not ported: USE_CELT_FIR is 0.
 
     let (out, input, b) = (&mut out[..len], &input[..len], &b[..d]);

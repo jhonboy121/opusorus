@@ -1282,6 +1282,17 @@ fn check_control_input_random() {
             complexity: pick(&[0, 3, 5, 10], &mut rng),
             ..SilkEncControlStruct::default()
         };
+        if cfg!(feature = "assertions") {
+            // ENABLE_ASSERTIONS: every error path is a `celt_assert( 0 )`, a panic in the port.
+            let want = c::check_control_input(&ctl_to_c(&ctl));
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let r = std::panic::catch_unwind(|| check_control_input(&ctl));
+            std::panic::set_hook(hook);
+            assert_eq!(r.is_err(), want != 0, "it {it}: {ctl:?}");
+            seen.insert(want);
+            continue;
+        }
         let r = check_control_input(&ctl);
         assert_eq!(
             r,

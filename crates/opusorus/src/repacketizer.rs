@@ -334,7 +334,7 @@ impl<'a> Repacketizer<'a> {
                 count as i32,
                 false,
             );
-            debug_assert!(ret == Ok(ext_len));
+            celt_assert!(ret == Ok(ext_len));
         }
         for i in ones_begin..ones_end {
             data[i as usize] = 0x01;
@@ -434,7 +434,7 @@ pub fn packet_unpad(data: &mut [u8]) -> Result<usize> {
         false,
         &[],
     )?;
-    debug_assert!(ret > 0 && ret <= len);
+    celt_assert!(ret > 0 && ret <= len);
     Ok(ret as usize)
 }
 

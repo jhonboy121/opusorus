@@ -145,7 +145,7 @@ impl<'a> ExtensionIterator<'a> {
     /// `data` (a packet's padding) for a packet of `nb_frames` frames (0..=48).
     #[must_use]
     pub const fn new(data: &'a [u8], nb_frames: i32) -> Self {
-        debug_assert!(nb_frames >= 0 && nb_frames <= 48);
+        celt_assert!(nb_frames >= 0 && nb_frames <= 48);
         let len = len_i32(data.len());
         Self {
             data,
@@ -190,14 +190,14 @@ impl<'a> ExtensionIterator<'a> {
     fn next_repeat(&mut self) -> Result<Option<Extension<'a>>> {
         let data: &'a [u8] = self.data;
         let mut header_size: i32 = 0;
-        debug_assert!(self.repeat_frame > 0);
+        celt_assert!(self.repeat_frame > 0);
         while self.repeat_frame < self.nb_frames {
             while self.src_len > 0 {
                 let mut repeat_id_byte = data[self.src_data] as i32;
                 self.src_len =
                     skip_extension(data, &mut self.src_data, self.src_len, &mut header_size);
                 // We skipped this extension earlier, so it should not fail now.
-                debug_assert!(self.src_len >= 0);
+                celt_assert!(self.src_len >= 0);
                 // Don't repeat padding or frame separators with a 0 increment.
                 if repeat_id_byte <= 3 {
                     continue;
@@ -223,7 +223,7 @@ impl<'a> ExtensionIterator<'a> {
                 if self.curr_len < 0 {
                     return Err(Error::InvalidPacket);
                 }
-                debug_assert!(self.curr_data as i32 == self.len - self.curr_len);
+                celt_assert!(self.curr_data as i32 == self.len - self.curr_len);
                 // If we were asked to stop at frame_max, skip extensions for later
                 // frames.
                 if self.repeat_frame >= self.frame_max {
@@ -288,7 +288,7 @@ impl<'a> ExtensionIterator<'a> {
             if self.curr_len < 0 {
                 return Err(Error::InvalidPacket);
             }
-            debug_assert!(self.curr_data as i32 == self.len - self.curr_len);
+            celt_assert!(self.curr_data as i32 == self.len - self.curr_len);
             if id == 1 {
                 if l == 0 {
                     self.curr_frame += 1;
@@ -459,7 +459,7 @@ pub fn parse_ext<'a>(
         if idx >= nb_extensions {
             return Err(Error::BufferTooSmall);
         }
-        debug_assert!(idx < nb_frames_cum[f + 1]);
+        celt_assert!(idx < nb_frames_cum[f + 1]);
         let Ok(idx) = usize::try_from(idx) else {
             return Err(Error::BadArg);
         };
@@ -489,7 +489,7 @@ fn write_extension_payload(
     ext: &Extension<'_>,
     last: bool,
 ) -> Result<i32> {
-    debug_assert!(ext.id >= 3 && ext.id <= 127);
+    celt_assert!(ext.id >= 3 && ext.id <= 127);
     let ext_len = ext.len();
     if ext.id < 32 {
         if !(0..=1).contains(&ext_len) {
@@ -538,7 +538,7 @@ fn write_extension(
     if len - pos < 1 {
         return Err(Error::BufferTooSmall);
     }
-    debug_assert!(ext.id >= 3 && ext.id <= 127);
+    celt_assert!(ext.id >= 3 && ext.id <= 127);
     let flag = if ext.id < 32 {
         ext.len()
     } else {
@@ -577,7 +577,7 @@ pub fn generate_impl(
     let mut written: i32 = 0;
     let nb_extensions = len_i32(extensions.len());
 
-    debug_assert!(len >= 0);
+    celt_assert!(len >= 0);
     if let Some(d) = &data
         && (d.len() as u64) < len.max(0) as u64
     {
@@ -625,7 +625,7 @@ pub fn generate_impl(
                             break;
                         }
                         let rep = ext(frame_repeat_idx[gu]);
-                        debug_assert!(rep.frame == g);
+                        celt_assert!(rep.frame == g);
                         if rep.id != ext(i).id {
                             break;
                         }
@@ -721,7 +721,7 @@ pub fn generate_impl(
             }
         }
     }
-    debug_assert!(written == nb_extensions);
+    celt_assert!(written == nb_extensions);
     // If we need to pad, just prepend 0x01 bytes. Even better would be to fill the
     // end with zeros, but that requires checking that turning the last extension into
     // an L=1 case still fits.

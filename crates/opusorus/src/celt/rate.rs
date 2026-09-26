@@ -247,7 +247,7 @@ pub fn compute_pulse_cache(m: &mut CeltMode, lm: i32) {
                         let num = 459 * ((2 * n - 1) * offset + max_bits);
                         let den = ((2 * n - 1) << 9) - 459;
                         let qb = imin((num + (den >> 1)) / den, 57);
-                        debug_assert!(qb >= 0);
+                        celt_assert!(qb >= 0);
                         max_bits += qb;
                         n <<= 1;
                     }
@@ -266,7 +266,7 @@ pub fn compute_pulse_cache(m: &mut CeltMode, lm: i32) {
                         let num = if n == 2 { 512 } else { 487 } * (max_bits + ndof * offset);
                         let den = (ndof << 9) - if n == 2 { 512 } else { 487 };
                         let qb = imin((num + (den >> 1)) / den, if n == 2 { 64 } else { 61 });
-                        debug_assert!(qb >= 0);
+                        celt_assert!(qb >= 0);
                         max_bits += qb;
                     }
                     // Add the fine bits we'll use.
@@ -284,13 +284,13 @@ pub fn compute_pulse_cache(m: &mut CeltMode, lm: i32) {
                     let num = max_bits + ndof * offset;
                     let den = (ndof - 1) << BITRES;
                     let qb = imin((num + (den >> 1)) / den, MAX_FINE_BITS);
-                    debug_assert!(qb >= 0);
+                    celt_assert!(qb >= 0);
                     max_bits += c * qb << BITRES;
                 }
                 let width = i32::from(e_bands[(j + 1) as usize]) - i32::from(e_bands[j as usize]);
                 max_bits = (4 * max_bits / (c * (width << i))) - 64;
-                debug_assert!(max_bits >= 0);
-                debug_assert!(max_bits < 256);
+                celt_assert!(max_bits >= 0);
+                celt_assert!(max_bits < 256);
                 caps.push(max_bits as u8);
             }
         }
@@ -422,11 +422,17 @@ fn interp_bits2pulses(
                     } else {
                         0
                     };
-                    // FUZZING: the random skip decision of fuzzing builds is not ported.
-                    if coded_bands <= start + 2
+                    #[cfg(not(feature = "fuzzing"))]
+                    let skip = coded_bands <= start + 2
                         || (band_bits > (depth_threshold * band_width << lm << BITRES) >> 4
-                            && j <= signal_bandwidth)
-                    {
+                            && j <= signal_bandwidth);
+                    // FUZZING: a random skip decision.
+                    #[cfg(feature = "fuzzing")]
+                    let skip = {
+                        let _ = (signal_bandwidth, depth_threshold);
+                        (crate::glibc_rand::rand() & 0x1) == 0
+                    };
+                    if skip {
                         enc.enc_bit_logp(true, 1);
                         break;
                     }
@@ -459,7 +465,7 @@ fn interp_bits2pulses(
         coded_bands -= 1;
     }
 
-    debug_assert!(coded_bands > start);
+    celt_assert!(coded_bands > start);
     // Code the intensity and dual stereo parameters.
     if intensity_rsv > 0 {
         match ec {
@@ -507,7 +513,7 @@ fn interp_bits2pulses(
     let mut j = start;
     while j < coded_bands {
         let ju = j as usize;
-        debug_assert!(bits[ju] >= 0);
+        celt_assert!(bits[ju] >= 0);
         let n0 = eb(j + 1) - eb(j);
         let n = n0 << lm;
         let bit = bits[ju] + balance;
@@ -575,8 +581,8 @@ fn interp_bits2pulses(
         }
         balance = excess;
 
-        debug_assert!(bits[ju] >= 0);
-        debug_assert!(ebits[ju] >= 0);
+        celt_assert!(bits[ju] >= 0);
+        celt_assert!(ebits[ju] >= 0);
         j += 1;
     }
     // Save any remaining bits over the cap for the rebalancing in quant_all_bands().
@@ -586,7 +592,7 @@ fn interp_bits2pulses(
     while j < end {
         let ju = j as usize;
         ebits[ju] = bits[ju] >> stereo >> BITRES;
-        debug_assert!(c * ebits[ju] << BITRES == bits[ju]);
+        celt_assert!(c * ebits[ju] << BITRES == bits[ju]);
         bits[ju] = 0;
         fine_priority[ju] = i32::from(ebits[ju] < 1);
         j += 1;
@@ -765,6 +771,15 @@ static LAST_OTHER: [u8; 4] = [120, 112, 70, 0];
 #[cfg(feature = "qext")]
 use crate::celt::quant_bands::E_MEANS;
 
+/// `FUZZING` (celt/rate.c:clt_compute_extra_allocation): a random depth,
+/// `(int)-depth_std*log(1e-8+(float)rand()/(float)RAND_MAX)`, i.e. `(int)(-depth_std)` times the
+/// double logarithm, truncated.
+#[cfg(all(feature = "fuzzing", feature = "qext"))]
+fn fuzzing_depth(depth_std: f32) -> i32 {
+    let u = crate::glibc_rand::rand() as f32 / crate::glibc_rand::RAND_MAX as f32;
+    (f64::from((-depth_std) as i32) * crate::math::log(1e-8 + f64::from(u))) as i32
+}
+
 /// Port of celt/rate.c:ec_enc_depth.
 #[cfg(feature = "qext")]
 fn ec_enc_depth(enc: &mut crate::celt::entenc::EcEnc<'_>, depth: i32, cap: i32, last: &mut i32) {
@@ -884,16 +899,29 @@ pub fn clt_compute_extra_allocation(
     toneishness: OpusVal32,
 ) {
     use crate::celt::modes::NB_QEXT_BANDS;
-    #[cfg(not(feature = "fixed-point"))]
+    #[cfg(any(not(feature = "fixed-point"), feature = "fuzzing"))]
     use crate::math;
 
     let eb = |i: i32| i32::from(m.e_bands[i as usize]);
     let mut last: i32 = 0;
     let tot_bands: i32;
     let tot_samples: i32;
-    // FUZZING: the random depth of fuzzing builds is not ported.
+    // FUZZING: the standard deviation of the random depths, drawn on every call (the decoder's
+    // too, which advances the shared generator like C).
+    #[cfg(feature = "fuzzing")]
+    let depth_std: f32 = {
+        let d = (-10.0f32 as f64
+            * math::log(
+                1e-8 + f64::from(
+                    crate::glibc_rand::rand() as f32 / crate::glibc_rand::RAND_MAX as f32,
+                ),
+            )) as f32;
+        // FMAX(0, FMIN(48, depth_std))
+        let d = if 48.0 < d { 48.0 } else { d };
+        if 0.0 > d { 0.0 } else { d }
+    };
     if let Some(q) = qext_mode {
-        debug_assert!(end == m.nb_ebands);
+        celt_assert!(end == m.nb_ebands);
         tot_bands = end + qext_end;
         tot_samples = i32::from(q.e_bands[qext_end as usize]) * c << lm;
     } else {
@@ -1047,6 +1075,11 @@ pub fn clt_compute_extra_allocation(
                         4.0f32 * min32(cap[iu] as f32, max32(min[iu], flat_e[iu] - fill)),
                     ),
                 ) as i32;
+                #[cfg(feature = "fuzzing")]
+                {
+                    depth[iu] = fuzzing_depth(depth_std);
+                    depth[iu] = imax(0, imin(cap[iu] << 2, depth[iu]));
+                }
                 if enc.tell_frac() + 80 < enc.storage * 8 << BITRES {
                     ec_enc_depth(enc, depth[iu], 4 * cap[iu], &mut last);
                 } else {
@@ -1205,6 +1238,11 @@ pub fn clt_compute_extra_allocation(
             for i in start..tot_bands {
                 let iu = i as usize;
                 depth[iu] = pshr32(level(iu, fill), 10 - 2);
+                #[cfg(feature = "fuzzing")]
+                {
+                    depth[iu] = fuzzing_depth(depth_std);
+                    depth[iu] = imax(0, imin(cap[iu] << 2, depth[iu]));
+                }
                 if enc.tell_frac() + 80 < enc.storage * 8 << BITRES {
                     ec_enc_depth(enc, depth[iu], 4 * cap[iu], &mut last);
                 } else {

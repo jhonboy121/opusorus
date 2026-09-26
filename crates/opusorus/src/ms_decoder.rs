@@ -278,7 +278,9 @@ impl MsDecoder {
         self.layout.nb_coupled_streams as usize
     }
 
-    /// Port of `validate_ms_decoder` (assertions only).
+    /// Port of `validate_ms_decoder` (`ENABLE_HARDENING` / `ENABLE_ASSERTIONS` builds). C calls
+    /// `validate_layout` and ignores its result, so this is a Rust-side `debug_assert!`, not a
+    /// libopus assertion (it stays a debug check with the `assertions` feature).
     fn validate(&self) {
         debug_assert!(validate_layout(&self.layout));
     }

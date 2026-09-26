@@ -314,8 +314,9 @@ const fn dec_out_rate_ok(fs: i32) -> bool {
 /// (8/12/16 kHz → API rate). Returns `0` on success and `-1` on an unsupported rate pair
 /// (as C; the state may be partially written in that case, exactly as in C).
 ///
-/// The C code executes `celt_assert( 0 )` before returning `-1`; that assertion is not
-/// reproduced so the `-1` path (what a C build without assertions does) stays reachable.
+/// The C code executes `celt_assert( 0 )` before returning `-1`; that assertion is only a
+/// hard check with the feature `assertions`, so the `-1` path (what a C build without
+/// assertions does) stays reachable otherwise.
 pub fn silk_resampler_init(
     s: &mut SilkResamplerState,
     fs_hz_in: i32,
@@ -328,11 +329,13 @@ pub fn silk_resampler_init(
     // Input checking
     if for_enc != 0 {
         if !enc_in_rate_ok(fs_hz_in) || !matches!(fs_hz_out, 8000 | 12000 | 16000) {
+            assertion_failure!("0");
             return -1;
         }
         s.input_delay = DELAY_MATRIX_ENC[rate_id(fs_hz_in)][rate_id(fs_hz_out)] as i32;
     } else {
         if !matches!(fs_hz_in, 8000 | 12000 | 16000) || !dec_out_rate_ok(fs_hz_out) {
+            assertion_failure!("0");
             return -1;
         }
         s.input_delay = DELAY_MATRIX_DEC[rate_id(fs_hz_in)][rate_id(fs_hz_out)] as i32;
@@ -391,6 +394,7 @@ pub fn silk_resampler_init(
             s.coefs = &SILK_RESAMPLER_1_6_COEFS;
         } else {
             // None available (C: celt_assert( 0 ), see the doc comment)
+            assertion_failure!("0");
             return -1;
         }
     } else {
@@ -420,9 +424,9 @@ pub fn silk_resampler(
     in_len: i32,
 ) -> i32 {
     // Need at least 1 ms of input data
-    debug_assert!(in_len >= s.fs_in_khz);
+    celt_assert!(in_len >= s.fs_in_khz);
     // Delay can't exceed the 1 ms of buffering
-    debug_assert!(s.input_delay <= s.fs_in_khz);
+    celt_assert!(s.input_delay <= s.fs_in_khz);
 
     let fs_in = s.fs_in_khz as usize;
     let fs_out = s.fs_out_khz as usize;
@@ -922,7 +926,7 @@ pub fn silk_resampler_private_down_fir_interpol(
                 index_q16 += index_increment_q16;
             }
         }
-        _ => debug_assert!(false, "invalid FIR_Order {fir_order}"),
+        _ => celt_assert!(false, "invalid FIR_Order {fir_order}"),
     }
     n_out
 }

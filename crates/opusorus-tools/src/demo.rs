@@ -17,7 +17,8 @@
 //! Faithfulness notes:
 //! * Packet loss simulation (`-loss`), `-random_framesize` and `-random_fec` draw from C `rand()`
 //!   without seeding it; [`GlibcRand`] reproduces the glibc generator, so on glibc hosts the
-//!   losses (and therefore the output files) are identical to the C tool's.
+//!   losses (and therefore the output files) are identical to the C tool's. In a fuzzing build
+//!   (`opusorus/fuzzing`) the tool shares the encoder's process-wide generator, as in C.
 //! * The C quirks are kept: the input sample buffer is refilled from its start even when encoded
 //!   samples are carried over (`-delayed-decision`), stale bytes of the shared file buffer are
 //!   converted after a short read, errors from `opus_*_ctl` calls are ignored, the process exit
@@ -76,6 +77,7 @@ use opusorus::encoder::request::{
 };
 #[cfg(feature = "lossgen")]
 use opusorus::lossgen::{LossGenState, sample_loss};
+use opusorus::glibc_rand::{self, GlibcRand};
 use opusorus::packet::{
     MODE_CELT_ONLY, MODE_SILK_ONLY, get_nb_frames, get_samples_per_frame, has_lbrr,
 };
@@ -262,57 +264,30 @@ static CELT_HQ_TEST: [ModeEntry; 4] = [
     [CELT, FB, 960, 2],
 ];
 
-/// The glibc `rand()` generator (`random_r` with the default `TYPE_3` state: an additive lagged
-/// Fibonacci generator `r[i] = r[i-3] + r[i-31]`, outputs `r >> 1`), in the state an unseeded
-/// program starts with (`srand(1)`).
+/// C `rand()` as `opus_demo` sees it (the generator is glibc's, [`GlibcRand`]).
 ///
-/// `opus_demo` never seeds `rand()`, so this reproduces the C tool's packet loss pattern and
-/// random frame size / FEC switching on glibc hosts.
-#[derive(Debug, Clone)]
-pub struct GlibcRand {
-    r: [u32; 31],
-    f: usize,
-    b: usize,
-}
+/// `opus_demo` never seeds `rand()`, so the losses and the random frame size / FEC switching
+/// match the C tool's on glibc hosts. In a fuzzing build (`opusorus` feature `fuzzing`, libopus
+/// `FUZZING`) the encoder draws from the same process-wide generator as the tool, so the tool
+/// then uses that one ([`opusorus::glibc_rand::rand`]), which [`opus_demo_main`] resets to the
+/// state a new process starts with.
+#[derive(Debug)]
+struct DemoRand(GlibcRand);
 
-impl GlibcRand {
-    /// `srand(seed)` (glibc maps seed 0 to 1).
-    #[must_use]
-    pub fn new(seed: u32) -> Self {
-        let mut r = [0u32; 31];
-        let seed = if seed == 0 { 1 } else { seed };
-        // glibc keeps the state as int32_t and the seed as a (possibly negative) int32_t.
-        let mut word = i64::from(seed as i32);
-        r[0] = seed;
-        for v in r.iter_mut().skip(1) {
-            let hi = word / 127_773;
-            let lo = word % 127_773;
-            word = 16807 * lo - 2836 * hi;
-            if word < 0 {
-                word += 2_147_483_647;
-            }
-            *v = word as u32;
+impl DemoRand {
+    fn new() -> Self {
+        if glibc_rand::FUZZING {
+            glibc_rand::srand(1);
         }
-        let mut s = Self { r, f: 3, b: 0 };
-        for _ in 0..310 {
-            s.next_value();
-        }
-        s
+        Self(GlibcRand::default())
     }
 
-    /// `rand()`: the next value in `0..=RAND_MAX` (`RAND_MAX` = 2^31 - 1).
-    pub const fn next_value(&mut self) -> i32 {
-        let val = self.r[self.f].wrapping_add(self.r[self.b]);
-        self.r[self.f] = val;
-        self.f = if self.f == 30 { 0 } else { self.f + 1 };
-        self.b = if self.b == 30 { 0 } else { self.b + 1 };
-        (val >> 1) as i32
-    }
-}
-
-impl Default for GlibcRand {
-    fn default() -> Self {
-        Self::new(1)
+    fn next_value(&mut self) -> i32 {
+        if glibc_rand::FUZZING {
+            glibc_rand::rand()
+        } else {
+            self.0.next_value()
+        }
     }
 }
 
@@ -1213,6 +1188,7 @@ fn run(
     if reseed_rand {
         rng = GlibcRand::new(0);
     }
+    let mut rng = DemoRand::new();
     let mut stop = false;
     let mut count = 0i32;
     let mut count_act = 0i32;
@@ -1635,22 +1611,6 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn glibc_rand_sequence() {
-        // First outputs of glibc rand() in an unseeded program.
-        let mut r = GlibcRand::default();
-        let v: Vec<i32> = (0..5).map(|_| r.next_value()).collect();
-        assert_eq!(
-            v,
-            [1804289383, 846930886, 1681692777, 1714636915, 1957747793]
-        );
-        // srand(0) is srand(1).
-        let mut z = GlibcRand::new(0);
-        assert_eq!(z.next_value(), 1804289383);
-        let mut s = GlibcRand::new(42);
-        assert_eq!(s.next_value(), 71876166);
-    }
 
     #[test]
     fn loss_file_scanf() {

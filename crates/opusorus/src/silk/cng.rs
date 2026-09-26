@@ -28,7 +28,7 @@ fn silk_cng_exc(exc_q14: &mut [i32], exc_buf_q14: &[i32], length: usize, rand_se
     for e in &mut exc_q14[..length] {
         seed = silk_rand(seed);
         let idx = (silk_rshift(seed, 24) & exc_mask) as usize;
-        debug_assert!(idx <= CNG_BUF_MASK_MAX as usize);
+        silk_assert!(idx <= CNG_BUF_MASK_MAX as usize);
         *e = exc_buf_q14[idx];
     }
     *rand_seed = seed;
@@ -150,7 +150,7 @@ pub fn silk_cng(
 
         // Generate CNG signal, by synthesis filtering
         cng_sig_q14[..MLPC].copy_from_slice(&ps_cng.cng_synth_state);
-        debug_assert!(lpc_order == 10 || lpc_order == 16);
+        celt_assert!(lpc_order == 10 || lpc_order == 16);
         for i in 0..length {
             // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf.
             // Perf: `silk_smlawb_chain` is the C chain `silk_SMLAWB( lpc_pred_Q10,

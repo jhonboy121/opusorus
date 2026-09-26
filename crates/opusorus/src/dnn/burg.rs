@@ -32,7 +32,7 @@ pub fn silk_energy_flp(data: &[f32], data_size: usize) -> f64 {
         result += d * d;
         i += 1;
     }
-    debug_assert!(result >= 0.0);
+    silk_assert!(result >= 0.0);
     result
 }
 
@@ -76,8 +76,8 @@ pub fn silk_burg_analysis(
     let min_inv_gain_d = min_inv_gain as f64;
     let cond_fac = FIND_LPC_COND_FAC as f64;
 
-    debug_assert!(subfr_length * nb_subfr <= MAX_FRAME_SIZE);
-    debug_assert!(d <= SILK_MAX_ORDER_LPC);
+    celt_assert!(subfr_length * nb_subfr <= MAX_FRAME_SIZE);
+    celt_assert!(d <= SILK_MAX_ORDER_LPC);
     let x = &x[..nb_subfr * subfr_length];
 
     // Compute autocorrelations, added over subframes.
@@ -135,12 +135,12 @@ pub fn silk_burg_analysis(
             nrg_b += cab[k + 1] * atmp;
             nrg_f += caf[k + 1] * atmp;
         }
-        debug_assert!(nrg_f > 0.0);
-        debug_assert!(nrg_b > 0.0);
+        silk_assert!(nrg_f > 0.0);
+        silk_assert!(nrg_b > 0.0);
 
         // Next order reflection (parcor) coefficient.
         let mut rc = -2.0 * num / (nrg_f + nrg_b);
-        debug_assert!(rc > -1.0 && rc < 1.0);
+        silk_assert!(rc > -1.0 && rc < 1.0);
 
         // Update inverse prediction gain.
         let t = inv_gain * (1.0 - rc * rc);

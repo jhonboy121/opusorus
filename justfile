@@ -15,6 +15,8 @@ export OPUSORUS_DNN_DEBUG_FLOAT_BLOB := env_var_or_default("OPUSORUS_DNN_DEBUG_F
 # `Decoder::get_size` exceed the 256 KiB bound upstream's test_opus_api checks).
 float_all := "opusorus/internals,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-tools/dred,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/dred,opusorus-capi/osce,opusorus-capi/internal-api,opusorus-bench/qext"
 fixed_all := "opusorus/internals,opusorus-conformance/fixed-res24,opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-capi/fixed-res24,opusorus-capi/qext,opusorus-capi/custom-modes,opusorus-capi/internal-api,opusorus-bench/fixed-res24,opusorus-bench/qext,opusorus-tools/qext"
+# The upstream build options (docs/FEATURES.md O7-O10), each forwarded to the oracle.
+options_all := "opusorus-conformance/float-approx,opusorus-conformance/assertions,opusorus-conformance/fuzzing,opusorus-conformance/disable-rfc8251"
 
 # The fixed-point build without the float API (`disable-float-api`, libopus DISABLE_FLOAT_API)
 # and with the checking fixed-point macros (`fixed-point-debug`, libopus FIXED_DEBUG), with
@@ -37,6 +39,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features osce-training-data,dnn-debug-float,lossgen
     RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features fixed-res24,qext,custom-modes,disable-float-api,fixed-point-debug
+    RUSTDOCFLAGS="-D warnings" cargo doc -p opusorus --no-deps --features float-approx,assertions,fuzzing,disable-rfc8251
 
 # Format check.
 fmt:
@@ -55,6 +58,10 @@ clippy: dnn-blob
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi --all-targets --features {{nofloat_all}} -- -D warnings
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi --all-targets --features {{fixeddebug_all}} -- -D warnings
     cargo clippy -p opusorus --no-default-features --features fixed-point-debug,disable-float-api -- -D warnings
+    # Upstream build options (not in float_all/fixed_all: `fuzzing` changes every encoder output).
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi -p opusorus-bench --all-targets --features {{options_all}},opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-capi/float-approx,opusorus-capi/assertions,opusorus-capi/fuzzing,opusorus-capi/disable-rfc8251,opusorus-bench/float-approx -- -D warnings
+    cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features {{options_all}},opusorus-conformance/fixed-res24,opusorus-conformance/qext -- -D warnings
+    cargo clippy -p opusorus --no-default-features --features float-approx,assertions,fuzzing,disable-rfc8251 -- -D warnings
 
 # All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
 # loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds: the full
@@ -82,7 +89,7 @@ test: dnn-blob
 # the public-API tests and the upstream C suite through the C ABI, 16- and 24-bit + QEXT +
 # custom modes) and `fixed-point-debug` (FIXED_DEBUG; the checking macros one by one, then the
 # fixed differential suites, 16-bit and 24-bit + QEXT + custom modes).
-test-options:
+test-options-fixed:
     #!/usr/bin/env bash
     set -euxo pipefail
     cargo test -p opusorus -p opusorus-tools -p opusorus-conformance --features opusorus-conformance/fixed-point,opusorus-conformance/disable-float-api
@@ -128,6 +135,38 @@ test-dnn-extras: dnn-blob dnn-blob-debug-float
     OPUSORUS_DNN_BLOB="$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" cargo test -p opusorus-conformance --features qext,dred,osce,dnn-debug-float,opusorus-tools/dred,opusorus-tools/dnn-weights-embedded --test vectors
     cargo test -p opusorus-conformance --features osce-training-data --test osce_training_data
     cargo test -p opusorus-conformance --features osce-training-data,dred,qext --test osce_training_data
+# Upstream build options vs the oracle built with the same defines: float-approx (FLOAT_APPROX)
+# and disable-rfc8251 (DISABLE_UPDATE_DRAFT, RFC 6716 vectors) over the whole differential
+# suite, float/fixed-point/QEXT/custom modes (float-approx also with the DNN features);
+# assertions (ENABLE_ASSERTIONS) likewise, plus the hard-check tests in release (no debug
+# assertions); fuzzing (FUZZING) over its seeded suite and the decoder / opus_demo comparisons
+# (the other encoder suites would race on the process-wide rand() state); the library tests,
+# the bench parity (float-approx) and the C ABI harness.
+test-options-float: dnn-blob
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    ./scripts/fetch_vectors.sh
+    c=opusorus-conformance
+    for f in float-approx float-approx,qext,custom-modes disable-rfc8251 disable-rfc8251,qext,custom-modes fixed-point,disable-rfc8251 fixed-res24,qext,disable-rfc8251 assertions assertions,qext,custom-modes fixed-point,custom-modes,assertions fixed-res24,qext,assertions; do
+        cargo test -p $c --features "$f"
+    done
+    cargo test -p $c --features float-approx,qext,deep-plc,dred,osce,opusorus-tools/dred
+    cargo test -p $c --features assertions,qext,deep-plc,dred,osce,opusorus-tools/dred
+    cargo test --release -p $c --features assertions --test assertions
+    cargo test --release -p $c --features fixed-point,assertions --test assertions
+    for f in fuzzing fuzzing,qext fixed-point,fuzzing,custom-modes fixed-res24,qext,fuzzing; do
+        cargo test -p $c --features "$f" --test fuzzing --test vectors --test opus_decoder --test celt_decoder
+    done
+    cargo test -p opusorus --features float-approx,assertions,fuzzing,disable-rfc8251,qext,custom-modes
+    cargo test -p opusorus --features fixed-res24,assertions,fuzzing,disable-rfc8251
+    cargo test -p opusorus --release --features assertions
+    cargo test -p opusorus-tools --features opusorus/fuzzing
+    cargo test -p opusorus-bench --features float-approx --test parity
+    cargo test -p opusorus-capi --features float-approx,assertions,fuzzing
+    cargo test -p opusorus-capi --features disable-rfc8251
+
+# Every optional upstream build option (phase G) against the oracle built with the same defines.
+test-options: test-options-float test-options-fixed test-dnn-extras
 
 # Extract the DNN model data (vendor/libopus/dnn/*_data.c, gitignored) if missing.
 dnn-models:
@@ -183,7 +222,8 @@ test-wasm:
 # RFC 6716/8251 through the Rust opus_demo/opus_compare, the Opus HD (QEXT) vectors with
 # qext_compare, the C opus_demo comparison (against the matching float or fixed-point C
 # opus_demo), for the float and the fixed-point (16-bit, 24-bit, with QEXT) decoders, and the
-# RFC 8251 vectors through upstream's C opus_demo linked to the C ABI library.
+# RFC 8251 vectors through upstream's C opus_demo linked to the C ABI library; the RFC 6716
+# vectors with the pre-RFC 8251 decoder (`disable-rfc8251`).
 # Official decoder test vectors (fetched if missing) and the opus_demo comparisons.
 vectors:
     ./scripts/fetch_vectors.sh
@@ -192,6 +232,7 @@ vectors:
     cargo test -p opusorus-conformance --features fixed-point --test vectors -- --nocapture
     cargo test -p opusorus-conformance --features fixed-res24,qext --test vectors -- --nocapture
     cargo test -p opusorus-conformance --features fixed-point,qext --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --features disable-rfc8251 --test vectors -- --nocapture
     cargo test -p opusorus-capi --test c_suite rfc8251_vectors -- --nocapture
 
 # Benchmarks (Rust vs C oracle).

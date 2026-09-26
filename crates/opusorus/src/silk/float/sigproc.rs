@@ -164,8 +164,8 @@ pub fn silk_autocorrelation_flp(
 /// Window types: 1 → sine window from 0 to pi/2, 2 → sine window from pi/2 to pi. `length`
 /// must be a multiple of 4.
 pub fn silk_apply_sine_window_flp(px_win: &mut [f32], px: &[f32], win_type: i32, length: usize) {
-    debug_assert!(win_type == 1 || win_type == 2);
-    debug_assert!(length & 3 == 0);
+    celt_assert!(win_type == 1 || win_type == 2);
+    celt_assert!(length & 3 == 0);
     let px_win = &mut px_win[..length];
     let px = &px[..length];
 
@@ -231,8 +231,8 @@ pub fn silk_burg_modified_flp(
     let mut af = [0f64; SMO];
     let sl = subfr_length;
 
-    debug_assert!(subfr_length * nb_subfr <= BURG_MAX_FRAME_SIZE);
-    debug_assert!(d <= SMO);
+    celt_assert!(subfr_length * nb_subfr <= BURG_MAX_FRAME_SIZE);
+    celt_assert!(d <= SMO);
     let x = &x[..nb_subfr * sl];
 
     // Compute autocorrelations, added over subframes
@@ -504,7 +504,7 @@ pub fn silk_lpc_analysis_filter_flp(
     length: usize,
     order: usize,
 ) {
-    debug_assert!(order <= length);
+    celt_assert!(order <= length);
     match order {
         6 => lpc_analysis_filter_n::<6>(r_lpc, pred_coef, s, length),
         8 => lpc_analysis_filter_n::<8>(r_lpc, pred_coef, s, length),
@@ -512,7 +512,7 @@ pub fn silk_lpc_analysis_filter_flp(
         12 => lpc_analysis_filter_n::<12>(r_lpc, pred_coef, s, length),
         16 => lpc_analysis_filter_n::<16>(r_lpc, pred_coef, s, length),
         // C: celt_assert( 0 ) (only the memset below runs in a build without assertions).
-        _ => debug_assert!(false, "unsupported LPC order {order}"),
+        _ => celt_assert!(false, "unsupported LPC order {order}"),
     }
     // Set first Order output samples to zero
     for v in &mut r_lpc[..order] {
@@ -668,6 +668,11 @@ pub fn silk_residual_energy_covar_flp(
         k += 1;
     }
     if k == MAX_ITERATIONS_RESIDUAL_NRG {
+        // C: silk_assert( nrg == 0 ): a hard check only with the feature `assertions` (the unit
+        // tests drive non-converging inputs).
+        if nrg != 0.0 {
+            assertion_failure!("nrg == 0");
+        }
         nrg = 1.0f32;
     }
     nrg
@@ -735,7 +740,7 @@ pub fn silk_scale_vector_flp(data1: &mut [f32], gain: f32, size: usize) {
 /// Port of `silk/float/schur_FLP.c:silk_schur_FLP`. Returns the residual energy.
 pub fn silk_schur_flp(refl_coef: &mut [f32], auto_corr: &[f32], order: usize) -> f32 {
     let mut c = [[0f64; 2]; SILK_MAX_ORDER_LPC + 1];
-    debug_assert!(order <= SILK_MAX_ORDER_LPC);
+    celt_assert!(order <= SILK_MAX_ORDER_LPC);
 
     // Copy correlations
     for k in 0..=order {
@@ -776,9 +781,9 @@ pub fn silk_schur_flp(refl_coef: &mut [f32], auto_corr: &[f32], order: usize) ->
 /// sort: the first `k` of `l` values end up sorted in decreasing order, with their original
 /// indices in `idx`.
 pub fn silk_insertion_sort_decreasing_flp(a: &mut [f32], idx: &mut [i32], l: usize, k: usize) {
-    debug_assert!(k > 0);
-    debug_assert!(l > 0);
-    debug_assert!(l >= k);
+    celt_assert!(k > 0);
+    celt_assert!(l > 0);
+    celt_assert!(l >= k);
     let a = &mut a[..l];
     let idx = &mut idx[..k];
 
@@ -838,8 +843,8 @@ pub fn silk_warped_autocorrelation_flp(
     let w = warping as f64;
 
     // Order must be even
-    debug_assert!(order & 1 == 0);
-    debug_assert!(order <= MSO);
+    celt_assert!(order & 1 == 0);
+    celt_assert!(order <= MSO);
     let input = &input[..length];
 
     // Perf: the C loop runs the allpass sections of one sample after the other, a serial

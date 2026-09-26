@@ -86,8 +86,8 @@ pub fn silk_encode_indices(
 
     // Encode signal type and quantizer offset
     let type_offset = 2 * ps_indices.signal_type as i32 + ps_indices.quant_offset_type as i32;
-    debug_assert!((0..6).contains(&type_offset));
-    debug_assert!(encode_lbrr == 0 || type_offset >= 2);
+    celt_assert!((0..6).contains(&type_offset));
+    celt_assert!(encode_lbrr == 0 || type_offset >= 2);
     if encode_lbrr != 0 || type_offset >= 2 {
         ps_range_enc.enc_icdf((type_offset - 2) as usize, &SILK_TYPE_OFFSET_VAD_ICDF, 8);
     } else {
@@ -98,7 +98,7 @@ pub fn silk_encode_indices(
     // first subframe
     if cond_coding == CODE_CONDITIONALLY {
         // conditional coding
-        debug_assert!(
+        silk_assert!(
             ps_indices.gains_indices[0] >= 0
                 && (ps_indices.gains_indices[0] as i32)
                     < MAX_DELTA_GAIN_QUANT - MIN_DELTA_GAIN_QUANT + 1
@@ -110,7 +110,7 @@ pub fn silk_encode_indices(
         );
     } else {
         // independent coding, in two stages: MSB bits followed by 3 LSBs
-        debug_assert!(
+        silk_assert!(
             ps_indices.gains_indices[0] >= 0
                 && (ps_indices.gains_indices[0] as i32) < N_LEVELS_QGAIN
         );
@@ -128,7 +128,7 @@ pub fn silk_encode_indices(
 
     // remaining subframes
     for i in 1..ps_enc_c.nb_subfr as usize {
-        debug_assert!(
+        silk_assert!(
             ps_indices.gains_indices[i] >= 0
                 && (ps_indices.gains_indices[i] as i32)
                     < MAX_DELTA_GAIN_QUANT - MIN_DELTA_GAIN_QUANT + 1
@@ -152,7 +152,7 @@ pub fn silk_encode_indices(
         cb,
         ps_indices.nlsf_indices[0] as i32,
     );
-    debug_assert!(cb.order as i32 == ps_enc_c.predict_lpc_order);
+    celt_assert!(cb.order as i32 == ps_enc_c.predict_lpc_order);
     for i in 0..cb.order as usize {
         let idx = ps_indices.nlsf_indices[i + 1] as i32;
         let icdf = &cb.ec_icdf[ec_ix[i] as usize..];
@@ -177,7 +177,7 @@ pub fn silk_encode_indices(
 
     // Encode NLSF interpolation factor
     if ps_enc_c.nb_subfr == MAX_NB_SUBFR {
-        debug_assert!(ps_indices.nlsf_interp_coef_q2 >= 0 && ps_indices.nlsf_interp_coef_q2 < 5);
+        silk_assert!(ps_indices.nlsf_interp_coef_q2 >= 0 && ps_indices.nlsf_interp_coef_q2 < 5);
         ps_range_enc.enc_icdf(
             ps_indices.nlsf_interp_coef_q2 as usize,
             &SILK_NLSF_INTERPOLATION_FACTOR_ICDF,
@@ -199,7 +199,7 @@ pub fn silk_encode_indices(
                 delta_lag_index += 9;
                 encode_absolute_lag_index = false; // Only use delta
             }
-            debug_assert!((0..21).contains(&delta_lag_index));
+            celt_assert!((0..21).contains(&delta_lag_index));
             ps_range_enc.enc_icdf(delta_lag_index as usize, &SILK_PITCH_DELTA_ICDF, 8);
         }
         if encode_absolute_lag_index {
@@ -208,16 +208,16 @@ pub fn silk_encode_indices(
                 silk_div32_16(ps_indices.lag_index as i32, silk_rshift(ps_enc_c.fs_khz, 1));
             let pitch_low_bits = ps_indices.lag_index as i32
                 - silk_smulbb(pitch_high_bits, silk_rshift(ps_enc_c.fs_khz, 1));
-            debug_assert!(pitch_low_bits < ps_enc_c.fs_khz / 2);
-            debug_assert!(pitch_high_bits < 32);
+            silk_assert!(pitch_low_bits < ps_enc_c.fs_khz / 2);
+            silk_assert!(pitch_high_bits < 32);
             ps_range_enc.enc_icdf(pitch_high_bits as usize, &SILK_PITCH_LAG_ICDF, 8);
             ps_range_enc.enc_icdf(pitch_low_bits as usize, ps_enc_c.pitch_lag_low_bits_icdf, 8);
         }
         ps_enc_c.ec_prev_lag_index = ps_indices.lag_index;
 
         // Contour index
-        debug_assert!(ps_indices.contour_index >= 0);
-        debug_assert!(
+        silk_assert!(ps_indices.contour_index >= 0);
+        silk_assert!(
             (ps_indices.contour_index < 34 && ps_enc_c.fs_khz > 8 && ps_enc_c.nb_subfr == 4)
                 || (ps_indices.contour_index < 11
                     && ps_enc_c.fs_khz == 8
@@ -233,12 +233,12 @@ pub fn silk_encode_indices(
 
         // Encode LTP gains
         // PERIndex value
-        debug_assert!(ps_indices.per_index >= 0 && ps_indices.per_index < 3);
+        silk_assert!(ps_indices.per_index >= 0 && ps_indices.per_index < 3);
         ps_range_enc.enc_icdf(ps_indices.per_index as usize, &SILK_LTP_PER_INDEX_ICDF, 8);
 
         // Codebook Indices
         for k in 0..ps_enc_c.nb_subfr as usize {
-            debug_assert!(
+            silk_assert!(
                 ps_indices.ltp_index[k] >= 0
                     && (ps_indices.ltp_index[k] as i32) < (8 << ps_indices.per_index)
             );
@@ -251,16 +251,16 @@ pub fn silk_encode_indices(
 
         // Encode LTP scaling
         if cond_coding == CODE_INDEPENDENTLY {
-            debug_assert!(ps_indices.ltp_scale_index >= 0 && ps_indices.ltp_scale_index < 3);
+            silk_assert!(ps_indices.ltp_scale_index >= 0 && ps_indices.ltp_scale_index < 3);
             ps_range_enc.enc_icdf(ps_indices.ltp_scale_index as usize, &SILK_LTPSCALE_ICDF, 8);
         }
-        debug_assert!(cond_coding == 0 || ps_indices.ltp_scale_index == 0);
+        silk_assert!(cond_coding == 0 || ps_indices.ltp_scale_index == 0);
     }
 
     ps_enc_c.ec_prev_signal_type = ps_indices.signal_type as i32;
 
     // Encode seed
-    debug_assert!(ps_indices.seed >= 0 && ps_indices.seed < 4);
+    silk_assert!(ps_indices.seed >= 0 && ps_indices.seed < 4);
     ps_range_enc.enc_icdf(ps_indices.seed as usize, &SILK_UNIFORM4_ICDF, 8);
 }
 
@@ -284,9 +284,9 @@ pub fn silk_process_nlsfs(
     let mut p_nlsfw0_temp_qw = [0i16; MLPC];
     let order = ps_enc_c.predict_lpc_order as usize;
 
-    debug_assert!(ps_enc_c.speech_activity_q8 >= 0);
-    debug_assert!(ps_enc_c.speech_activity_q8 <= silk_fix_const(1.0, 8));
-    debug_assert!(
+    silk_assert!(ps_enc_c.speech_activity_q8 >= 0);
+    silk_assert!(ps_enc_c.speech_activity_q8 <= silk_fix_const(1.0, 8));
+    celt_assert!(
         ps_enc_c.use_interpolated_nlsfs == 1 || ps_enc_c.indices.nlsf_interp_coef_q2 == (1 << 2)
     );
 
@@ -302,8 +302,8 @@ pub fn silk_process_nlsfs(
         nlsf_mu_q20 = silk_add_rshift(nlsf_mu_q20, nlsf_mu_q20, 1);
     }
 
-    debug_assert!(nlsf_mu_q20 > 0);
-    debug_assert!(nlsf_mu_q20 <= silk_fix_const(0.005, 20));
+    celt_assert!(nlsf_mu_q20 > 0);
+    silk_assert!(nlsf_mu_q20 <= silk_fix_const(0.005, 20));
 
     // Calculate NLSF weights
     silk_nlsf_vq_weights_laroia(&mut p_nlsfw_qw, p_nlsf_q15, order);
@@ -333,7 +333,7 @@ pub fn silk_process_nlsfs(
                     silk_smulbb(p_nlsfw0_temp_qw[i] as i32, i_sqr_q15 as i32),
                     16,
                 )) as i16;
-            debug_assert!(p_nlsfw_qw[i] >= 1);
+            silk_assert!(p_nlsfw_qw[i] >= 1);
         }
     }
 
@@ -365,7 +365,7 @@ pub fn silk_process_nlsfs(
         silk_nlsf2a(&mut pred_coef_q12[0], &p_nlsf0_temp_q15, order);
     } else {
         // Copy LPC coefficients for first half from second half
-        debug_assert!(order <= MLPC);
+        celt_assert!(order <= MLPC);
         let (first, second) = pred_coef_q12.split_at_mut(1);
         first[0][..order].copy_from_slice(&second[0][..order]);
     }
@@ -689,7 +689,7 @@ pub fn silk_stereo_lr_to_ms(
         total_rate_bps = 1;
     }
     let min_mid_rate_bps = silk_smlabb(2000, fs_khz, 600);
-    debug_assert!(min_mid_rate_bps < 32767);
+    silk_assert!(min_mid_rate_bps < 32767);
     // Default bitrate distribution: 8 parts for Mid and (5+3*frac) parts for Side. so:
     // mid_rate = ( 8 / ( 13 + 3 * frac ) ) * total_ rate
     let frac_3_q16 = silk_mul(3, frac_q16);
@@ -876,7 +876,7 @@ pub fn silk_stereo_find_predictor(
     smooth_coef_q16 = silk_max_int(smooth_coef_q16, silk_abs(pred2_q10));
 
     // Smoothed mid and residual norms
-    debug_assert!(smooth_coef_q16 < 32768);
+    silk_assert!(smooth_coef_q16 < 32768);
     scale = silk_rshift(scale, 1);
     mid_res_amp_q0[0] = silk_smlawb(
         mid_res_amp_q0[0],
@@ -1178,8 +1178,9 @@ pub const fn silk_control_audio_bandwidth(
 /// Port of silk/check_control_input.c:check_control_input — check encoder control struct.
 ///
 /// Returns `SILK_NO_ERROR` or the first error code found. The C code executes
-/// `celt_assert( 0 )` before each error return; that assertion is not reproduced so invalid
-/// user settings are reported as errors (what a C build without assertions does).
+/// `celt_assert( 0 )` before each error return; that assertion is a hard check only with the
+/// feature `assertions`, so invalid user settings are reported as errors otherwise (what a C
+/// build without assertions does).
 #[must_use]
 pub const fn check_control_input(enc_control: &SilkEncControlStruct) -> i32 {
     let api_ok = matches!(
@@ -1194,6 +1195,7 @@ pub const fn check_control_input(enc_control: &SilkEncControlStruct) -> i32 {
         || enc_control.max_internal_sample_rate < enc_control.desired_internal_sample_rate
         || enc_control.min_internal_sample_rate > enc_control.max_internal_sample_rate
     {
+        assertion_failure!("0");
         return SILK_ENC_FS_NOT_SUPPORTED;
     }
     if enc_control.payload_size_ms != 10
@@ -1201,31 +1203,40 @@ pub const fn check_control_input(enc_control: &SilkEncControlStruct) -> i32 {
         && enc_control.payload_size_ms != 40
         && enc_control.payload_size_ms != 60
     {
+        assertion_failure!("0");
         return SILK_ENC_PACKET_SIZE_NOT_SUPPORTED;
     }
     if enc_control.packet_loss_percentage < 0 || enc_control.packet_loss_percentage > 100 {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_LOSS_RATE;
     }
     if enc_control.use_dtx < 0 || enc_control.use_dtx > 1 {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_DTX_SETTING;
     }
     if enc_control.use_cbr < 0 || enc_control.use_cbr > 1 {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_CBR_SETTING;
     }
     if enc_control.use_in_band_fec < 0 || enc_control.use_in_band_fec > 1 {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_INBAND_FEC_SETTING;
     }
     if enc_control.n_channels_api < 1 || enc_control.n_channels_api > ENCODER_NUM_CHANNELS {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_NUMBER_OF_CHANNELS_ERROR;
     }
     if enc_control.n_channels_internal < 1 || enc_control.n_channels_internal > ENCODER_NUM_CHANNELS
     {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_NUMBER_OF_CHANNELS_ERROR;
     }
     if enc_control.n_channels_internal > enc_control.n_channels_api {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_NUMBER_OF_CHANNELS_ERROR;
     }
     if enc_control.complexity < 0 || enc_control.complexity > 10 {
+        assertion_failure!("0");
         return SILK_ENC_INVALID_COMPLEXITY_SETTING;
     }
 

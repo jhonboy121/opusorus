@@ -165,6 +165,15 @@ fn mode_create_static_lookup() {
     for &fs in &RATES {
         for frame_size in -4..=2100 {
             let r = modes::opus_custom_mode_create(fs, frame_size);
+            // With `assertions` (ENABLE_ASSERTIONS) the band layout checks of compute_ebands
+            // are hard checks: both sides reject e.g. 12000 Hz / 52 samples (the C oracle aborts,
+            // as it does in its hardened default build).
+            #[cfg(all(feature = "custom-modes", feature = "assertions"))]
+            if r.is_err()
+                && std::panic::catch_unwind(|| rust_custom_create(fs, frame_size).is_ok()).is_err()
+            {
+                continue;
+            }
             #[cfg(feature = "custom-modes")]
             if r.is_err()
                 && rust_custom_create(fs, frame_size).err() == Some(opusorus::Error::AllocFail)

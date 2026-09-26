@@ -44,7 +44,7 @@ pub const fn ec_ilog(v: u32) -> i32 {
 #[inline(always)]
 #[must_use]
 pub const fn celt_udiv(n: u32, d: u32) -> u32 {
-    debug_assert!(d > 0);
+    celt_sig_assert!(d > 0);
     n / d
 }
 
@@ -52,7 +52,7 @@ pub const fn celt_udiv(n: u32, d: u32) -> u32 {
 #[inline(always)]
 #[must_use]
 pub const fn celt_sudiv(n: i32, d: i32) -> i32 {
-    debug_assert!(d > 0);
+    celt_sig_assert!(d > 0);
     n / d
 }
 

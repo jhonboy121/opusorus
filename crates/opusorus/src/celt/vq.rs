@@ -139,7 +139,7 @@ const fn v64(x: i32) -> OpusVal64 {
 /// Port of celt/vq.c:norm_scaleup (fixed-point build; a no-op macro in the float build).
 #[cfg(feature = "fixed-point")]
 pub fn norm_scaleup(x: &mut [CeltNorm], n: i32, shift: i32) {
-    debug_assert!(shift >= 0);
+    celt_assert!(shift >= 0);
     if shift <= 0 {
         return;
     }
@@ -155,7 +155,7 @@ pub const fn norm_scaleup(_x: &mut [CeltNorm], _n: i32, _shift: i32) {}
 /// Port of celt/vq.c:norm_scaledown (fixed-point build; a no-op macro in the float build).
 #[cfg(feature = "fixed-point")]
 pub fn norm_scaledown(x: &mut [CeltNorm], n: i32, shift: i32) {
-    debug_assert!(shift >= 0);
+    celt_assert!(shift >= 0);
     if shift <= 0 {
         return;
     }
@@ -362,7 +362,12 @@ pub fn op_pvq_search_c(x: &mut [CeltNorm], iy: &mut [i32], k: i32, n: i32) -> Op
     let signx = signx_buf.get(nu);
     #[cfg(feature = "fixed-point")]
     {
-        let mut shift = (celt_ilog2(1 + celt_inner_prod_norm_shift(x, x, nu)) + 1) / 2;
+        // The energy wraps negative in the C-UB case of `celt_ilog2_release` (release-libopus
+        // semantics unless `assertions`).
+        let mut shift =
+            (crate::celt::mathops::celt_ilog2_release(1 + celt_inner_prod_norm_shift(x, x, nu))
+                + 1)
+                / 2;
         shift = imax(0, shift + (NORM_SHIFT - 14) - 14);
         norm_scaledown(x, n, shift);
     }
@@ -425,7 +430,7 @@ pub fn op_pvq_search_c(x: &mut [CeltNorm], iy: &mut [i32], k: i32, n: i32) -> Op
             pulses_left -= iy[j];
         }
     }
-    debug_assert!(pulses_left >= 0);
+    celt_sig_assert!(pulses_left >= 0);
 
     // This should never happen, but just in case it does (e.g. on silence) we fill the first
     // bin with pulses.
@@ -807,8 +812,8 @@ pub fn alg_quant(
     #[cfg(feature = "qext")] ext_enc: &mut EcEnc<'_>,
     #[cfg(feature = "qext")] extra_bits: i32,
 ) -> u32 {
-    debug_assert!(k > 0, "alg_quant() needs at least one pulse");
-    debug_assert!(n > 1, "alg_quant() needs at least two dimensions");
+    celt_assert!(k > 0, "alg_quant() needs at least one pulse");
+    celt_assert!(n > 1, "alg_quant() needs at least two dimensions");
     let nu = n as usize;
 
     // Covers vectorization by up to 4.
@@ -889,8 +894,8 @@ pub fn alg_unquant(
     #[cfg(feature = "qext")] ext_dec: &mut EcDec<'_>,
     #[cfg(feature = "qext")] extra_bits: i32,
 ) -> u32 {
-    debug_assert!(k > 0, "alg_unquant() needs at least one pulse");
-    debug_assert!(n > 1, "alg_unquant() needs at least two dimensions");
+    celt_assert!(k > 0, "alg_unquant() needs at least one pulse");
+    celt_assert!(n > 1, "alg_unquant() needs at least two dimensions");
     let nu = n as usize;
     let mut iy_buf = Scratch::<i32, MAX_BAND_SIZE>::new();
     let iy = iy_buf.get(nu);

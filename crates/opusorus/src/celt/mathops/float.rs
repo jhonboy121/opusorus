@@ -60,7 +60,7 @@ pub const fn celt_atan_norm(x: f32) -> f32 {
 #[inline]
 #[must_use]
 pub const fn celt_atan2p_norm(y: f32, x: f32) -> f32 {
-    debug_assert!(x >= 0.0 && y >= 0.0);
+    celt_sig_assert!(x >= 0.0 && y >= 0.0);
     // For very small values, we don't care about the answer.
     if (x * x + y * y) < 1e-18 {
         return 0.0;
@@ -133,16 +133,96 @@ pub const fn frac_div32_q29(a: f32, b: f32) -> f32 {
     a / b
 }
 /// `celt_log2(x)` = `(float)(1.442695040888963387*log(x))` (non-`FLOAT_APPROX` build).
+#[cfg(not(feature = "float-approx"))]
 #[inline(always)]
 #[must_use]
 pub fn celt_log2(x: f32) -> f32 {
     (1.442695040888963387_f64 * math::log(x as f64)) as f32
 }
-/// `celt_exp2(x)` = `(float)exp(0.6931471805599453094*(x))`.
+/// `celt_exp2(x)` = `(float)exp(0.6931471805599453094*(x))` (non-`FLOAT_APPROX` build).
+#[cfg(not(feature = "float-approx"))]
 #[inline(always)]
 #[must_use]
 pub fn celt_exp2(x: f32) -> f32 {
     math::exp(0.6931471805599453094_f64 * x as f64) as f32
+}
+
+/// `log2_x_norm_coeff` (`FLOAT_APPROX`): `1 / (1 + 0.125 * index)` in single precision.
+#[cfg(feature = "float-approx")]
+const LOG2_X_NORM_COEFF: [f32; 8] = [
+    1.000000000000000000000000000,
+    8.88888895511627197265625e-01,
+    8.00000000000000000000000e-01,
+    7.27272748947143554687500e-01,
+    6.66666686534881591796875e-01,
+    6.15384638309478759765625e-01,
+    5.71428596973419189453125e-01,
+    5.33333361148834228515625e-01,
+];
+
+/// `log2_y_norm_coeff` (`FLOAT_APPROX`): `log2(1 + 0.125 * index)` in single precision.
+#[cfg(feature = "float-approx")]
+const LOG2_Y_NORM_COEFF: [f32; 8] = [
+    0.0000000000000000000000000000,
+    1.699250042438507080078125e-01,
+    3.219280838966369628906250e-01,
+    4.594316184520721435546875e-01,
+    5.849624872207641601562500e-01,
+    7.004396915435791015625000e-01,
+    8.073549270629882812500000e-01,
+    9.068905711174011230468750e-01,
+];
+
+/// Port of the `FLOAT_APPROX` `celt_log2` (celt/mathops.h): base-2 logarithm from the IEEE 754
+/// exponent plus a degree-4 polynomial of the mantissa normalized to `[1, 1.125]`. As in C,
+/// zero, denormals, infinities, NaN and negative inputs are not special-cased (the bit
+/// manipulation produces the same garbage as the C code; the integer steps wrap like the C
+/// casts do on two's complement targets).
+#[cfg(feature = "float-approx")]
+#[inline]
+#[must_use]
+pub fn celt_log2(x: f32) -> f32 {
+    const A0: f32 = 8.74628424644470214843750000e-02;
+    const A1: f32 = 1.357829570770263671875000000000;
+    const A2: f32 = -6.3897705078125000000000000e-01;
+    const A3: f32 = 4.01971250772476196289062500e-01;
+    const A4: f32 = -2.8415444493293762207031250e-01;
+    let mut i = x.to_bits();
+    // integer = (opus_int32)(in.i>>23)-127;
+    let integer = (i >> 23) as i32 - 127;
+    // in.i = (opus_int32)in.i - (opus_int32)((opus_uint32)integer<<23);
+    i = (i as i32).wrapping_sub(((integer as u32) << 23) as i32) as u32;
+    // Normalize the mantissa range from [1, 2] to [1,1.125], and then shift x by 1.0625 to
+    // [-0.0625, 0.0625].
+    let range_idx = ((i >> 20) & 0x7) as usize;
+    let f = f32::from_bits(i) * LOG2_X_NORM_COEFF[range_idx] - 1.0625;
+    let f = A0 + f * (A1 + f * (A2 + f * (A3 + f * A4)));
+    integer as f32 + f + LOG2_Y_NORM_COEFF[range_idx]
+}
+
+/// Port of the `FLOAT_APPROX` `celt_exp2` (celt/mathops.h): `2^x` as `2^floor(x)` (added to the
+/// exponent bits) times a degree-5 polynomial of the fraction; 0 below `2^-50`.
+#[cfg(feature = "float-approx")]
+#[inline]
+#[must_use]
+pub fn celt_exp2(x: f32) -> f32 {
+    const A0: f32 = 9.999999403953552246093750000000e-01;
+    const A1: f32 = 6.931530833244323730468750000000e-01;
+    const A2: f32 = 2.401536107063293457031250000000e-01;
+    const A3: f32 = 5.582631751894950866699218750000e-02;
+    const A4: f32 = 8.989339694380760192871093750000e-03;
+    const A5: f32 = 1.877576694823801517486572265625e-03;
+    // integer = (int)floor(x); (floor of the double-promoted argument)
+    let integer = math::floor(x as f64) as i32;
+    if integer < -50 {
+        return 0.0;
+    }
+    let frac = x - integer as f32;
+    let res = A0 + frac * (A1 + frac * (A2 + frac * (A3 + frac * (A4 + frac * A5))));
+    // res.i = (opus_uint32)((opus_int32)res.i + (opus_int32)((opus_uint32)integer<<23)) & 0x7fffffff;
+    f32::from_bits(
+        ((res.to_bits() as i32).wrapping_add(((integer as u32) << 23) as i32) as u32) & 0x7fff_ffff,
+    )
 }
 /// `celt_exp2_db` (float alias).
 #[inline(always)]

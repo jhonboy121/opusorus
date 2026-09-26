@@ -322,7 +322,7 @@ fn silk_plc_conceal(
 
     // Rewhiten LTP state
     let idx = ps_dec.ltp_mem_length - lag - ps_dec.lpc_order - LTP_ORDER / 2;
-    debug_assert!(idx > 0);
+    celt_assert!(idx > 0);
     let idx = idx as usize;
     silk_lpc_analysis_filter(
         &mut s_ltp[idx..],
@@ -387,7 +387,7 @@ fn silk_plc_conceal(
     // Copy LPC state
     s_lpc_q14[..MLPC].copy_from_slice(&ps_dec.s_lpc_q14_buf);
 
-    debug_assert!(lpc_order >= 10); // check that unrolling works
+    celt_assert!(lpc_order >= 10); // check that unrolling works
     for i in 0..frame_length {
         // partly unrolled
         // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf

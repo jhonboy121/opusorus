@@ -11,7 +11,8 @@
 //!
 //! With the `fixed-point` feature both are fixed-point builds (CMake `OPUS_FIXED_POINT=ON`; the
 //! oracle's `FIXED_POINT` sources and defines), with `fixed-res24` also `ENABLE_RES24`. On
-//! AArch64 the fixed CMake build needs one workaround (see `build_optimized`).
+//! AArch64 the fixed CMake build needs one workaround (see `build_optimized`). With
+//! `float-approx` both define `FLOAT_APPROX` (CMake `OPUS_FLOAT_APPROX=ON`).
 //!
 //! Each library and its shim objects are archived together, then every defined global symbol
 //! is renamed `<prefix><name>` with `objcopy --redefine-syms`, so both link next to the
@@ -147,6 +148,7 @@ struct Config {
     qext: bool,
     fixed: bool,
     res24: bool,
+    float_approx: bool,
 }
 
 fn build_optimized(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
@@ -164,6 +166,10 @@ fn build_optimized(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
         .arg(format!(
             "-DOPUS_FIXED_POINT={}",
             if cfg.fixed { "ON" } else { "OFF" }
+        ))
+        .arg(format!(
+            "-DOPUS_FLOAT_APPROX={}",
+            if cfg.float_approx { "ON" } else { "OFF" }
         ));
     // Upstream CMake has no QEXT or RES24 option; configure's --enable-qext only defines
     // ENABLE_QEXT, and ENABLE_RES24 is a plain define too.
@@ -266,6 +272,9 @@ fn build_scalar(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
     if cfg.res24 {
         b.define("ENABLE_RES24", None);
     }
+    if cfg.float_approx {
+        b.define("FLOAT_APPROX", None);
+    }
     let objs = b.compile_intermediates();
     archive_prefixed(out, "opus_scalar", None, &objs, "scalopus_");
 }
@@ -283,6 +292,7 @@ fn main() {
         qext: feature("QEXT"),
         fixed: feature("FIXED_POINT"),
         res24: feature("FIXED_RES24"),
+        float_approx: feature("FLOAT_APPROX"),
     };
 
     build_optimized(&root, &out, &csrc, cfg);

@@ -265,7 +265,7 @@ pub fn celt_iir_inplace(
     mem: &mut [OpusVal16],
 ) {
     // SMALL_FOOTPRINT variant: not ported (not enabled in the oracle / default build).
-    debug_assert!((ord & 3) == 0);
+    celt_assert!((ord & 3) == 0);
     let mut rs = Scratch::<OpusVal16, ORD_MAX>::new();
     let mut ys = Scratch::<OpusVal16, IIR_Y_MAX>::new();
     let rden = rs.get(ord);
@@ -341,7 +341,7 @@ pub fn _celt_autocorr(
     lag: usize,
     n: usize,
 ) -> i32 {
-    debug_assert!(n > 0);
+    celt_assert!(n > 0);
     let fast_n = n - lag;
     let mut xxs = Scratch::<OpusVal16, AC_XX_MAX>::new();
     let x = &x[..n];

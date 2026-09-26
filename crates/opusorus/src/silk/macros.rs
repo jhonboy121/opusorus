@@ -849,8 +849,8 @@ const_unless_fixed_debug! {
 #[inline]
 #[must_use]
 pub const fn silk_div32_varq(a32: i32, b32: i32, qres: i32) -> i32 {
-    debug_assert!(b32 != 0);
-    debug_assert!(qres >= 0);
+    silk_assert!(b32 != 0);
+    silk_assert!(qres >= 0);
     // Compute number of bits head room and normalize inputs.
     let a_headrm = silk_clz32(silk_abs(a32)) - 1;
     let mut a32_nrm = silk_lshift(a32, a_headrm); // Q: a_headrm
@@ -883,8 +883,8 @@ const_unless_fixed_debug! {
 #[inline]
 #[must_use]
 pub const fn silk_inverse32_varq(b32: i32, qres: i32) -> i32 {
-    debug_assert!(b32 != 0);
-    debug_assert!(qres > 0);
+    silk_assert!(b32 != 0);
+    silk_assert!(qres > 0);
     // Compute number of bits head room and normalize input.
     let b_headrm = silk_clz32(silk_abs(b32)) - 1;
     let b32_nrm = silk_lshift(b32, b_headrm); // Q: b_headrm

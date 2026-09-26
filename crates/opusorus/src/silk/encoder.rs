@@ -162,7 +162,7 @@ impl SilkEncoder {
         }
         for n in 0..channels as usize {
             ret += silk_init_encoder(&mut self.state_fxx[n]);
-            debug_assert!(ret == 0);
+            celt_assert!(ret == 0);
         }
 
         self.n_channels_api = 1;
@@ -170,7 +170,7 @@ impl SilkEncoder {
 
         // Read control structure
         ret += self.query_encoder(enc_status);
-        debug_assert!(ret == 0);
+        celt_assert!(ret == 0);
 
         ret
     }
@@ -232,7 +232,7 @@ impl SilkEncoder {
         let mut buf = [0i16; ENC_BUF_MAX];
         let mut samples_off = 0usize;
 
-        debug_assert!(
+        celt_assert!(
             enc_control.n_channels_api >= enc_control.n_channels_internal
                 && enc_control.n_channels_api >= self.n_channels_internal
         );
@@ -247,7 +247,9 @@ impl SilkEncoder {
         // Check values in encoder control structure
         ret = check_control_input(enc_control);
         if ret != 0 {
-            // C: celt_assert( 0 ) (aborts in a hardened build; the error return is kept)
+            // C: celt_assert( 0 ) (aborts in a hardened build; the error return is kept, the
+            // check is hard only with the feature `assertions`)
+            assertion_failure!("0");
             return ret;
         }
 
@@ -287,6 +289,7 @@ impl SilkEncoder {
             // Only accept input length of 10 ms
             if n_blocks_of_10ms != 1 {
                 // C: celt_assert( 0 )
+                assertion_failure!("0");
                 return SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES;
             }
             let mut save_lp = self.state_fxx[0].s_cmn.s_lp;
@@ -302,7 +305,7 @@ impl SilkEncoder {
                 if prefill_flag == 2 {
                     self.state_fxx[n].s_cmn.s_lp = save_lp;
                 }
-                debug_assert!(ret == 0);
+                celt_assert!(ret == 0);
             }
             tmp_payload_size_ms = enc_control.payload_size_ms;
             enc_control.payload_size_ms = 10;
@@ -318,11 +321,13 @@ impl SilkEncoder {
                 || n_samples_in < 0
             {
                 // C: celt_assert( 0 )
+                assertion_failure!("0");
                 return SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES;
             }
             // Make sure no more than one packet can be produced
             if 1000 * n_samples_in > enc_control.payload_size_ms * enc_control.api_sample_rate {
                 // C: celt_assert( 0 )
+                assertion_failure!("0");
                 return SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES;
             }
         }
@@ -351,7 +356,7 @@ impl SilkEncoder {
             }
             self.state_fxx[n].s_cmn.in_dtx = self.state_fxx[n].s_cmn.use_dtx;
         }
-        debug_assert!(
+        celt_assert!(
             enc_control.n_channels_internal == 1
                 || self.state_fxx[0].s_cmn.fs_khz == self.state_fxx[1].s_cmn.fs_khz
         );
@@ -442,7 +447,7 @@ impl SilkEncoder {
                     }
                     s0.s_cmn.input_buf_ix += n_samples_to_buffer;
                 } else {
-                    debug_assert!(n_ch_api == 1 && n_ch_int == 1);
+                    celt_assert!(n_ch_api == 1 && n_ch_int == 1);
                     for n in 0..nfi {
                         buf[n] = res2int16(input[n]);
                     }
@@ -466,10 +471,10 @@ impl SilkEncoder {
             // Silk encoder
             if self.state_fxx[0].s_cmn.input_buf_ix >= self.state_fxx[0].s_cmn.frame_length {
                 // Enough data in input buffer, so encode
-                debug_assert!(
+                celt_assert!(
                     self.state_fxx[0].s_cmn.input_buf_ix == self.state_fxx[0].s_cmn.frame_length
                 );
-                debug_assert!(
+                celt_assert!(
                     n_ch_int == 1
                         || self.state_fxx[1].s_cmn.input_buf_ix
                             == self.state_fxx[1].s_cmn.frame_length
@@ -708,7 +713,7 @@ impl SilkEncoder {
                             max_bits,
                             use_cbr,
                         );
-                        debug_assert!(ret == 0);
+                        celt_assert!(ret == 0);
                     }
                     let s = &mut self.state_fxx[n].s_cmn;
                     s.controlled_since_last_payload = 0;
@@ -1068,8 +1073,8 @@ pub fn silk_setup_fs(ps_enc: &mut SilkEncoderStateFxx, fs_khz: i32, packet_size_
     }
 
     // Set internal sampling frequency
-    debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
-    debug_assert!(s.nb_subfr == 2 || s.nb_subfr == 4);
+    celt_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
+    celt_assert!(s.nb_subfr == 2 || s.nb_subfr == 4);
     if s.fs_khz != fs_khz {
         // reset part of the state
         ps_enc.s_shape = SilkShapeStateFxx::default();
@@ -1129,7 +1134,7 @@ pub fn silk_setup_fs(ps_enc: &mut SilkEncoderStateFxx, fs_khz: i32, packet_size_
     }
 
     // Check that settings are valid
-    debug_assert!(ps_enc.s_cmn.subfr_length * ps_enc.s_cmn.nb_subfr == ps_enc.s_cmn.frame_length);
+    celt_assert!(ps_enc.s_cmn.subfr_length * ps_enc.s_cmn.nb_subfr == ps_enc.s_cmn.frame_length);
 
     ret
 }
@@ -1143,7 +1148,7 @@ pub fn silk_setup_complexity(
     let warping = silk_fix_const(WARPING_MULTIPLIER as f64, 16);
 
     // Set encoding complexity
-    debug_assert!((0..=10).contains(&complexity));
+    celt_assert!((0..=10).contains(&complexity));
     let s = ps_enc_c;
     if complexity < 1 {
         s.pitch_estimation_complexity = SILK_PE_MIN_COMPLEX;
@@ -1222,12 +1227,12 @@ pub fn silk_setup_complexity(
     s.shape_win_length = SUB_FRAME_LENGTH_MS * s.fs_khz + 2 * s.la_shape;
     s.complexity = complexity;
 
-    debug_assert!(s.pitch_estimation_lpc_order <= MAX_FIND_PITCH_LPC_ORDER);
-    debug_assert!(s.shaping_lpc_order <= MAX_SHAPE_LPC_ORDER);
-    debug_assert!(s.n_states_delayed_decision <= MAX_DEL_DEC_STATES);
-    debug_assert!(s.warping_q16 <= 32767);
-    debug_assert!(s.la_shape <= LA_SHAPE_MAX);
-    debug_assert!(s.shape_win_length <= SHAPE_LPC_WIN_MAX);
+    celt_assert!(s.pitch_estimation_lpc_order <= MAX_FIND_PITCH_LPC_ORDER);
+    celt_assert!(s.shaping_lpc_order <= MAX_SHAPE_LPC_ORDER);
+    celt_assert!(s.n_states_delayed_decision <= MAX_DEL_DEC_STATES);
+    celt_assert!(s.warping_q16 <= 32767);
+    celt_assert!(s.la_shape <= LA_SHAPE_MAX);
+    celt_assert!(s.shape_win_length <= SHAPE_LPC_WIN_MAX);
 
     ret
 }

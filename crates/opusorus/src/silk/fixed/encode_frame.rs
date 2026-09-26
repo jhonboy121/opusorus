@@ -344,7 +344,7 @@ pub fn silk_encode_frame_fix(
                     // budget
                     ps_range_enc.restore(&s_range_enc_copy2);
                     let offs = ps_range_enc.offs as usize; // sRangeEnc_copy2.offs
-                    debug_assert!(offs <= EC_BUF_COPY_LEN);
+                    celt_assert!(offs <= EC_BUF_COPY_LEN);
                     ps_range_enc.buf[..offs].copy_from_slice(&ec_buf_copy[..offs]);
                     s_cmn.s_nsq.clone_from(&s_nsq_copy[1]);
                     s_shape.last_gain_index = last_gain_index_copy2;
@@ -375,7 +375,7 @@ pub fn silk_encode_frame_fix(
                     // Copy part of the output state
                     s_range_enc_copy2 = ps_range_enc.snapshot();
                     let offs = ps_range_enc.offs as usize;
-                    debug_assert!(offs <= EC_BUF_COPY_LEN);
+                    celt_assert!(offs <= EC_BUF_COPY_LEN);
                     ec_buf_copy[..offs].copy_from_slice(&ps_range_enc.buf[..offs]);
                     s_nsq_copy[1].clone_from(&s_cmn.s_nsq);
                     last_gain_index_copy2 = s_shape.last_gain_index;

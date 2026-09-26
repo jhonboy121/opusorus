@@ -70,21 +70,21 @@ const FREQ_TABLE_Q16: [i16; 27] = [
 /// Port of `silk/fixed/apply_sine_window_FIX.c:silk_apply_sine_window` — apply a sine window
 /// (type 1: 0 to pi/2, type 2: pi/2 to pi) of `length` samples (16..=120, multiple of 4).
 pub fn silk_apply_sine_window(px_win: &mut [i16], px: &[i16], win_type: i32, length: usize) {
-    debug_assert!(win_type == 1 || win_type == 2);
+    celt_assert!(win_type == 1 || win_type == 2);
     // Length must be in a range from 16 to 120 and a multiple of 4
-    debug_assert!((16..=120).contains(&length));
-    debug_assert!(length & 3 == 0);
+    celt_assert!((16..=120).contains(&length));
+    celt_assert!(length & 3 == 0);
     let px_win = &mut px_win[..length];
     let px = &px[..length];
 
     // Frequency
     let k = (length >> 2) - 4;
-    debug_assert!(k <= 26);
+    celt_assert!(k <= 26);
     let f_q16 = FREQ_TABLE_Q16[k] as i32;
 
     // Factor used for cosine approximation
     let c_q16 = silk_smulwb(f_q16, -f_q16);
-    debug_assert!(c_q16 >= -32768);
+    silk_assert!(c_q16 >= -32768);
 
     let length_i = length as i32;
     let (mut s0_q16, mut s1_q16);
@@ -179,8 +179,8 @@ pub fn silk_burg_modified(
     let mut cab = [0i32; SMO + 1];
     let mut xcorr = [0i32; SMO];
 
-    debug_assert!(subfr_length * nb_subfr <= BURG_MAX_FRAME_SIZE);
-    debug_assert!(d <= SMO);
+    celt_assert!(subfr_length * nb_subfr <= BURG_MAX_FRAME_SIZE);
+    celt_assert!(d <= SMO);
     let x = &x[..subfr_length * nb_subfr];
     let cond_fac_q32 = silk_fix_const(FIND_LPC_COND_FAC as f64, 32);
 
@@ -463,7 +463,7 @@ pub fn silk_k2a_q16(a_q24: &mut [i32], rc_q16: &[i32], order: usize) {
 /// `c[..=order]`; returns the residual energy.
 pub fn silk_schur(rc_q15: &mut [i16], c: &[i32], order: usize) -> i32 {
     let mut cc = [[0i32; 2]; SILK_MAX_ORDER_LPC + 1];
-    debug_assert!(order <= SILK_MAX_ORDER_LPC);
+    celt_assert!(order <= SILK_MAX_ORDER_LPC);
 
     // Get number of leading zeros
     let mut lz = silk_clz32(c[0]);
@@ -536,7 +536,7 @@ pub fn silk_schur(rc_q15: &mut [i16], c: &[i32], order: usize) -> i32 {
 /// `c[..=order]`; returns the residual energy.
 pub fn silk_schur64(rc_q16: &mut [i32], c: &[i32], order: usize) -> i32 {
     let mut cc = [[0i32; 2]; SILK_MAX_ORDER_LPC + 1];
-    debug_assert!(order <= SILK_MAX_ORDER_LPC);
+    celt_assert!(order <= SILK_MAX_ORDER_LPC);
 
     // Check for invalid input
     if c[0] <= 0 {
@@ -618,7 +618,7 @@ pub fn silk_corr_vector_fix(
             xt[lag] = inner_prod; // X[:,lag]'*t
         }
     } else {
-        debug_assert!(rshifts == 0);
+        silk_assert!(rshifts == 0);
         for lag in 0..order {
             xt[lag] = silk_inner_prod_aligned(&x[order - 1 - lag..], t, l); // X[:,lag]'*t
         }
@@ -645,7 +645,7 @@ pub fn silk_corr_matrix_fix(x: &[i16], l: usize, order: usize, xx: &mut [i32]) -
     // Calculate energy of remaining columns of X: X[:,j]'*X[:,j]
     // Fill out the diagonal of the correlation matrix
     xx[0] = energy;
-    debug_assert!(energy >= 0);
+    silk_assert!(energy >= 0);
     let p1 = order - 1; // First sample of column 0 of X
     for j in 1..order {
         energy = silk_sub32(
@@ -660,7 +660,7 @@ pub fn silk_corr_matrix_fix(x: &[i16], l: usize, order: usize, xx: &mut [i32]) -
             silk_rshift32(silk_smulbb(x[p1 - j] as i32, x[p1 - j] as i32), rshifts),
         );
         xx[j * order + j] = energy;
-        debug_assert!(energy >= 0);
+        silk_assert!(energy >= 0);
     }
 
     // C: ptr2 = &x[ order - 2 ] (first sample of column 1 of X), decremented after each lag:
@@ -735,9 +735,9 @@ pub fn silk_residual_energy16_covar_fix(
     let mut cn = [0i32; MMS];
 
     // Safety checks
-    debug_assert!(d <= 16);
-    debug_assert!(c_q > 0);
-    debug_assert!(c_q < 16);
+    celt_assert!(d <= 16);
+    celt_assert!(c_q > 0);
+    celt_assert!(c_q < 16);
 
     let mut lshifts = 16 - c_q;
     let mut qxtra = lshifts;
@@ -757,7 +757,7 @@ pub fn silk_residual_energy16_covar_fix(
     for i in 0..d {
         cn[i] = silk_lshift(c[i] as i32, qxtra);
         // Check that silk_SMLAWB can be used
-        debug_assert!(silk_abs(cn[i]) <= i16::MAX as i32 + 1);
+        silk_assert!(silk_abs(cn[i]) <= i16::MAX as i32 + 1);
     }
     lshifts -= qxtra;
 
@@ -813,7 +813,7 @@ pub fn silk_residual_energy_fix(
 
     // Filter input to create the LPC residual for each frame half, and measure subframe
     // energies
-    debug_assert!((nb_subfr >> 1) * HALF == nb_subfr);
+    celt_assert!((nb_subfr >> 1) * HALF == nb_subfr);
     let mut x_ptr = 0;
     for i in 0..nb_subfr >> 1 {
         // Calculate half frame LPC residual signal including preceding samples
@@ -890,8 +890,8 @@ pub fn silk_warped_autocorrelation_fix(
     let mut corr_qc = [0i64; MSO + 1];
 
     // Order must be even
-    debug_assert!(order & 1 == 0);
-    debug_assert!(order <= MSO);
+    celt_assert!(order & 1 == 0);
+    celt_assert!(order <= MSO);
 
     // Loop over samples
     for &inp in &input[..length] {
@@ -916,7 +916,7 @@ pub fn silk_warped_autocorrelation_fix(
     let mut lsh = silk_clz64(corr_qc[0]) - 35;
     lsh = silk_limit(lsh, -12 - QC, 30 - QC);
     let scale = -(QC + lsh);
-    debug_assert!((-30..=12).contains(&scale));
+    celt_assert!((-30..=12).contains(&scale));
     if lsh >= 0 {
         for i in 0..order + 1 {
             corr[i] = silk_lshift64(corr_qc[i], lsh) as i32;
@@ -926,7 +926,7 @@ pub fn silk_warped_autocorrelation_fix(
             corr[i] = silk_rshift64(corr_qc[i], -lsh) as i32;
         }
     }
-    debug_assert!(corr_qc[0] >= 0); // If breaking, decrease QC
+    silk_assert!(corr_qc[0] >= 0); // If breaking, decrease QC
     scale
 }
 

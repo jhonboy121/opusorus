@@ -304,7 +304,7 @@ impl<'a> EcEnc<'a> {
     /// Port of `ec_enc_uint`: encodes a raw unsigned integer `fl` in `[0, ft)`; `ft > 1`.
     pub fn enc_uint(&mut self, fl: u32, ft: u32) {
         // In order to optimize EC_ILOG(), it is undefined for the value 0.
-        debug_assert!(ft > 1);
+        celt_assert!(ft > 1);
         let ft = ft - 1;
         let mut ftb = ec_ilog(ft);
         if ftb > EC_UINT_BITS {
@@ -322,7 +322,7 @@ impl<'a> EcEnc<'a> {
     pub fn enc_bits(&mut self, fl: u32, bits: u32) {
         let mut window = self.end_window;
         let mut used = self.nend_bits;
-        debug_assert!(bits > 0);
+        celt_assert!(bits > 0);
         if used + bits as i32 > EC_WINDOW_SIZE {
             loop {
                 self.error |= self.write_byte_at_end(window & EC_SYM_MAX);
@@ -343,7 +343,7 @@ impl<'a> EcEnc<'a> {
     /// Port of `ec_enc_patch_initial_bits`: overwrites a few bits at the very start of an
     /// existing stream.
     pub fn patch_initial_bits(&mut self, val: u32, nbits: u32) {
-        debug_assert!(nbits <= EC_SYM_BITS as u32);
+        celt_assert!(nbits <= EC_SYM_BITS as u32);
         let shift = EC_SYM_BITS as u32 - nbits;
         let mask: u32 = ((1u32 << nbits) - 1) << shift;
         if self.offs > 0 {
@@ -364,7 +364,7 @@ impl<'a> EcEnc<'a> {
 
     /// Port of `ec_enc_shrink`: compacts the data to fit in the target size.
     pub fn shrink(&mut self, size: u32) {
-        debug_assert!(self.offs + self.end_offs <= size);
+        celt_assert!(self.offs + self.end_offs <= size);
         let src = (self.storage - self.end_offs) as usize;
         let dst = (size - self.end_offs) as usize;
         self.buf.copy_within(src..src + self.end_offs as usize, dst);

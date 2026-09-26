@@ -109,7 +109,7 @@ pub const fn qext_mode_supported(m: &CeltMode) -> bool {
 #[cfg(feature = "qext")]
 #[must_use]
 pub fn compute_qext_mode(m: &CeltMode) -> CeltMode {
-    debug_assert!(
+    celt_assert!(
         qext_mode_supported(m),
         "compute_qext_mode: unsupported mode"
     );
@@ -241,11 +241,19 @@ pub fn compute_ebands(fs: i32, frame_size: i32, res: i32) -> (Vec<i16>, i32) {
     }
     nb = j;
 
-    // C then checks, with `celt_assert` (only in ENABLE_ASSERTIONS builds), that every band is
-    // no wider than the last one and at most twice as wide as the previous one. Those checks
-    // are not ported: they fail for some modes that default libopus builds accept, e.g.
-    // `opus_custom_mode_create(12000, 208)` (bands `..., 16, 20, 22`), where a debug assertion
-    // would turn a valid call into a panic.
+    // C then checks, with `celt_assert`, that every band is no wider than the last one and at
+    // most twice as wide as the previous one. Those checks fail for some modes that the port
+    // accepts, e.g. `opus_custom_mode_create(12000, 208)` (bands `..., 16, 20, 22`), so they are
+    // only compiled with the `assertions` feature (libopus `ENABLE_ASSERTIONS`), where they are
+    // hard checks like in C, and not as debug assertions.
+    #[cfg(feature = "assertions")]
+    for i in 1..nb as usize {
+        let n = nb as usize;
+        // Every band must be smaller than the last band.
+        celt_assert!(e[i] - e[i - 1] <= e[n] - e[n - 1]);
+        // Each band must be no larger than twice the size of the previous one.
+        celt_assert!(i32::from(e[i + 1] - e[i]) <= 2 * i32::from(e[i] - e[i - 1]));
+    }
 
     (e, nb)
 }

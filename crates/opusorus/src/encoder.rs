@@ -595,12 +595,12 @@ pub fn hp_cutoff(
     channels: i32,
     fs: i32,
 ) {
+    silk_assert!(cutoff_hz <= i32::MAX / silk_fix_const(1.5 * 3.14159 / 1000.0, 19));
     let fc_q19 = silk_div32_16(
         silk_smulbb(silk_fix_const(1.5 * 3.14159 / 1000.0, 19), cutoff_hz),
         fs / 1000,
     );
-    // C: silk_assert( Fc_Q19 > 0 && Fc_Q19 < 32768 ) (a no-op in libopus builds; it holds
-    // for the cutoffs the encoder produces).
+    silk_assert!(fc_q19 > 0 && fc_q19 < 32768);
 
     let r_q28 = silk_fix_const(1.0, 28) - silk_mul(silk_fix_const(0.92, 9), fc_q19);
 
@@ -2293,8 +2293,16 @@ impl Encoder {
         if self.force_channels != OPUS_AUTO && ch == 2 {
             self.stream_channels = self.force_channels;
         } else {
-            // FUZZING: random mono/stereo decision not ported.
+            // FUZZING: random mono/stereo decision.
+            #[cfg(feature = "fuzzing")]
+            {
+                let _ = (STEREO_MUSIC_THRESHOLD, STEREO_VOICE_THRESHOLD, equiv_rate);
+                if ch == 2 && (crate::glibc_rand::rand() & 0x1F) == 0 {
+                    self.stream_channels = 3 - self.stream_channels;
+                }
+            }
             // Rate-dependent mono-stereo decision
+            #[cfg(not(feature = "fuzzing"))]
             if ch == 2 {
                 let mut stereo_threshold = STEREO_MUSIC_THRESHOLD
                     + ((voice_est * voice_est * (STEREO_VOICE_THRESHOLD - STEREO_MUSIC_THRESHOLD))
@@ -2340,59 +2348,80 @@ impl Encoder {
         {
             self.mode = MODE_CELT_ONLY;
         } else if self.user_forced_mode == OPUS_AUTO {
-            // FUZZING: random mode switching not ported.
-            // Interpolate based on stereo width
-            #[cfg(feature = "fixed-point")]
-            let (mode_voice, mode_music) = {
-                let inv = i32::from(Q15ONE) - i32::from(stereo_width);
-                (
-                    mult16_32_q15(inv, MODE_THRESHOLDS[0][0])
-                        + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][0]),
-                    // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
-                    mult16_32_q15(inv, MODE_THRESHOLDS[1][1])
-                        + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][1]),
-                )
-            };
-            #[cfg(not(feature = "fixed-point"))]
-            let mode_voice = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[0][0] as f32
-                + stereo_width * MODE_THRESHOLDS[1][0] as f32) as i32;
-            // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
-            #[cfg(not(feature = "fixed-point"))]
-            let mode_music = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[1][1] as f32
-                + stereo_width * MODE_THRESHOLDS[1][1] as f32) as i32;
-            // Interpolate based on speech/music probability
-            let mut threshold =
-                mode_music + ((voice_est * voice_est * (mode_voice - mode_music)) >> 14);
-            // Bias towards SILK for VoIP because of some useful features
-            if self.application == OPUS_APPLICATION_VOIP {
-                threshold += 8000;
-            }
-
-            // Hysteresis
-            if self.prev_mode == MODE_CELT_ONLY {
-                threshold -= 4000;
-            } else if self.prev_mode > 0 {
-                threshold += 4000;
-            }
-
-            self.mode = if equiv_rate >= threshold {
-                MODE_CELT_ONLY
-            } else {
-                MODE_SILK_ONLY
-            };
-
-            // When FEC is enabled and there's enough packet loss, use SILK. Unless the FEC is
-            // set to 2, in which case we don't switch to SILK if we're confident we have music.
-            if self.silk_mode.use_in_band_fec != 0
-                && self.silk_mode.packet_loss_percentage > (128 - voice_est) >> 4
-                && (self.fec_config != 2 || voice_est > 25)
+            // FUZZING: random mode switching.
+            #[cfg(feature = "fuzzing")]
             {
-                self.mode = MODE_SILK_ONLY;
+                use crate::glibc_rand::rand;
+                let _ = (stereo_width, &MODE_THRESHOLDS, equiv_rate);
+                if (rand() & 0xF) == 0 {
+                    self.mode = if (rand() & 0x1) == 0 {
+                        MODE_CELT_ONLY
+                    } else {
+                        MODE_SILK_ONLY
+                    };
+                } else if self.prev_mode == MODE_CELT_ONLY {
+                    self.mode = MODE_CELT_ONLY;
+                } else {
+                    self.mode = MODE_SILK_ONLY;
+                }
             }
-            // When encoding voice and DTX is enabled but the generalized DTX cannot be used,
-            // use SILK in order to make use of its DTX.
-            if self.silk_mode.use_dtx != 0 && voice_est > 100 {
-                self.mode = MODE_SILK_ONLY;
+            #[cfg(not(feature = "fuzzing"))]
+            {
+                // Interpolate based on stereo width
+                #[cfg(feature = "fixed-point")]
+                let (mode_voice, mode_music) = {
+                    let inv = i32::from(Q15ONE) - i32::from(stereo_width);
+                    (
+                        mult16_32_q15(inv, MODE_THRESHOLDS[0][0])
+                            + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][0]),
+                        // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
+                        mult16_32_q15(inv, MODE_THRESHOLDS[1][1])
+                            + mult16_32_q15(stereo_width, MODE_THRESHOLDS[1][1]),
+                    )
+                };
+                #[cfg(not(feature = "fixed-point"))]
+                let mode_voice = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[0][0] as f32
+                    + stereo_width * MODE_THRESHOLDS[1][0] as f32)
+                    as i32;
+                // C quirk: MODE_THRESHOLDS[1][1] is used for both terms.
+                #[cfg(not(feature = "fixed-point"))]
+                let mode_music = ((Q15ONE - stereo_width) * MODE_THRESHOLDS[1][1] as f32
+                    + stereo_width * MODE_THRESHOLDS[1][1] as f32)
+                    as i32;
+                // Interpolate based on speech/music probability
+                let mut threshold =
+                    mode_music + ((voice_est * voice_est * (mode_voice - mode_music)) >> 14);
+                // Bias towards SILK for VoIP because of some useful features
+                if self.application == OPUS_APPLICATION_VOIP {
+                    threshold += 8000;
+                }
+
+                // Hysteresis
+                if self.prev_mode == MODE_CELT_ONLY {
+                    threshold -= 4000;
+                } else if self.prev_mode > 0 {
+                    threshold += 4000;
+                }
+
+                self.mode = if equiv_rate >= threshold {
+                    MODE_CELT_ONLY
+                } else {
+                    MODE_SILK_ONLY
+                };
+
+                // When FEC is enabled and there's enough packet loss, use SILK. Unless the FEC is
+                // set to 2, in which case we don't switch to SILK if we're confident we have music.
+                if self.silk_mode.use_in_band_fec != 0
+                    && self.silk_mode.packet_loss_percentage > (128 - voice_est) >> 4
+                    && (self.fec_config != 2 || voice_est > 25)
+                {
+                    self.mode = MODE_SILK_ONLY;
+                }
+                // When encoding voice and DTX is enabled but the generalized DTX cannot be used,
+                // use SILK in order to make use of its DTX.
+                if self.silk_mode.use_dtx != 0 && voice_est > 100 {
+                    self.mode = MODE_SILK_ONLY;
+                }
             }
 
             // If max_data_bytes represents less than 6 kb/s, switch to CELT-only mode
@@ -2411,7 +2440,7 @@ impl Encoder {
 
         // Override the chosen mode to make sure we meet the requested frame size
         if self.mode != MODE_CELT_ONLY && frame_size < self.fs / 100 {
-            debug_assert!(self.application != OPUS_APPLICATION_RESTRICTED_SILK);
+            celt_assert!(self.application != OPUS_APPLICATION_RESTRICTED_SILK);
             self.mode = MODE_CELT_ONLY;
         }
         if self.lfe != 0 && self.application != OPUS_APPLICATION_RESTRICTED_SILK {
@@ -2672,7 +2701,7 @@ impl Encoder {
             {
                 out_data_bytes
             } else {
-                debug_assert!(cbr_bytes >= 0);
+                celt_assert!(cbr_bytes >= 0);
                 imin(cbr_bytes, out_data_bytes)
             };
             let max_len_sum = nb_frames + repacketize_len - max_header_bytes;
@@ -3265,9 +3294,7 @@ impl Encoder {
             } else if curr_bandwidth == OPUS_BANDWIDTH_MEDIUMBAND {
                 self.silk_mode.desired_internal_sample_rate = 12000;
             } else {
-                debug_assert!(
-                    self.mode == MODE_HYBRID || curr_bandwidth == OPUS_BANDWIDTH_WIDEBAND
-                );
+                celt_assert!(self.mode == MODE_HYBRID || curr_bandwidth == OPUS_BANDWIDTH_WIDEBAND);
                 self.silk_mode.desired_internal_sample_rate = 16000;
             }
             if self.mode == MODE_HYBRID {
@@ -3416,7 +3443,7 @@ impl Encoder {
                     curr_bandwidth = OPUS_BANDWIDTH_WIDEBAND;
                 }
             } else {
-                debug_assert!(self.silk_mode.internal_sample_rate == 16000);
+                celt_assert!(self.silk_mode.internal_sample_rate == 16000);
             }
 
             self.silk_mode.opus_can_switch =
@@ -3614,7 +3641,7 @@ impl Encoder {
             nb_compr_bytes = (max_data_bytes - 1) - redundancy_bytes;
             #[cfg(feature = "qext")]
             if self.mode == MODE_CELT_ONLY && self.enable_qext != 0 {
-                debug_assert!(redundancy_bytes == 0);
+                celt_assert!(redundancy_bytes == 0);
                 nb_compr_bytes = orig_max_data_bytes - 1;
             }
             #[cfg(feature = "dred")]
@@ -3900,7 +3927,7 @@ impl Encoder {
                 );
                 if dred_bytes > 0 {
                     dred_bytes += DRED_EXPERIMENTAL_BYTES;
-                    debug_assert!(dred_bytes <= dred_bytes_left);
+                    celt_assert!(dred_bytes <= dred_bytes_left);
                     let extension = Extension {
                         id: DRED_EXTENSION_ID,
                         frame: 0,

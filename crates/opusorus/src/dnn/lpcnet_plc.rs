@@ -386,7 +386,7 @@ pub fn lpcnet_plc_fec_add(st: &mut LpcnetPlcState, features: Option<&[f32]>) {
         st.fec_skip += 1;
         return;
     };
-    debug_assert!((st.fec_fill_pos as usize) < PLC_MAX_FEC);
+    celt_assert!((st.fec_fill_pos as usize) < PLC_MAX_FEC);
     if let Some(slot) = st.fec.get_mut(st.fec_fill_pos as usize) {
         slot.copy_from_slice(&features[..NB_FEATURES]);
         st.fec_fill_pos += 1;
@@ -550,7 +550,7 @@ const ATT_TABLE: [f32; 10] = [
 /// The model must be loaded (C asserts `st->loaded`; callers check it). Without a model this
 /// writes silence and leaves the state unchanged (C would dereference NULL layers).
 pub fn lpcnet_plc_conceal(st: &mut LpcnetPlcState, pcm: &mut [i16]) {
-    debug_assert!(st.loaded);
+    celt_assert!(st.loaded);
     let LpcnetPlcState {
         dnn: Some(dnn),
         fec,
@@ -581,7 +581,7 @@ pub fn lpcnet_plc_conceal(st: &mut LpcnetPlcState, pcm: &mut [i16]) {
         while *analysis_pos + FRAME_SIZE as i32 <= PLC_BUF_SIZE as i32 {
             let mut x = [0f32; FRAME_SIZE];
             let mut plc_features = [0f32; PLC_INPUT_SIZE];
-            debug_assert!(*analysis_pos >= 0);
+            celt_assert!(*analysis_pos >= 0);
             let apos = *analysis_pos as usize;
             for (xi, &p) in x.iter_mut().zip(&buf[apos..apos + FRAME_SIZE]) {
                 *xi = 32768.0f32 * p;

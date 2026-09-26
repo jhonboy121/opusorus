@@ -370,9 +370,9 @@ pub fn compute_fargan_cond(st: &mut FarganState, cond: &mut [f32], features: &[f
     let mut conv1_in = [0f32; COND_NET_FCONV1_IN_SIZE];
     let mut fdense2_in = [0f32; COND_NET_FCONV1_OUT_SIZE];
     let model = &st.model;
-    debug_assert!(FARGAN_FEATURES + COND_NET_PEMBED_OUT_SIZE == model.cond_net_fdense1.nb_inputs);
-    debug_assert!(COND_NET_FCONV1_IN_SIZE == model.cond_net_fdense1.nb_outputs);
-    debug_assert!(COND_NET_FCONV1_OUT_SIZE == model.cond_net_fconv1.nb_outputs);
+    celt_assert!(FARGAN_FEATURES + COND_NET_PEMBED_OUT_SIZE == model.cond_net_fdense1.nb_inputs);
+    celt_assert!(COND_NET_FCONV1_IN_SIZE == model.cond_net_fdense1.nb_outputs);
+    celt_assert!(COND_NET_FCONV1_OUT_SIZE == model.cond_net_fconv1.nb_outputs);
     let row = imax(0, imin(period - 32, 223)) as usize;
     // C dereferences the float weights unconditionally (crashes without a model); an unloaded
     // model contributes zeros here, like every unbound layer in `compute_linear`.
@@ -438,7 +438,7 @@ pub fn run_fargan_subframe(st: &mut FarganState, pcm: &mut [f32], cond: &[f32], 
     let mut skip_out = [0f32; SIG_NET_SKIP_DENSE_OUT_SIZE];
     let pcm = &mut pcm[..FARGAN_SUBFRAME_SIZE];
 
-    debug_assert!(st.cont_initialized);
+    celt_assert!(st.cont_initialized);
 
     compute_generic_dense(
         &st.model.sig_net_cond_gain_dense,
@@ -483,7 +483,7 @@ pub fn run_fargan_subframe(st: &mut FarganState, pcm: &mut [f32], cond: &[f32], 
         SIG_NET_INPUT_SIZE,
         ACTIVATION_TANH,
     );
-    debug_assert!(SIG_NET_FWC0_GLU_GATE_OUT_SIZE == model.sig_net_fwc0_glu_gate.nb_outputs);
+    celt_assert!(SIG_NET_FWC0_GLU_GATE_OUT_SIZE == model.sig_net_fwc0_glu_gate.nb_outputs);
     compute_glu_inplace(&model.sig_net_fwc0_glu_gate, &mut gru1_in);
 
     compute_generic_dense(
@@ -612,7 +612,7 @@ pub fn fargan_cont(st: &mut FarganState, pcm0: &[f32], features0: &[f32]) {
 /// Port of dnn/fargan.c:fargan_synthesize_impl (static).
 fn fargan_synthesize_impl(st: &mut FarganState, pcm: &mut [f32], features: &[f32]) {
     let mut cond = [0f32; COND_NET_FDENSE2_OUT_SIZE];
-    debug_assert!(st.cont_initialized);
+    celt_assert!(st.cont_initialized);
 
     let period = feature_period(features[NB_BANDS]);
     compute_fargan_cond(st, &mut cond, features, period);

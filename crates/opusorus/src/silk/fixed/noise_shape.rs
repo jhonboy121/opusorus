@@ -133,7 +133,8 @@ pub fn limit_warped_coefs(
             *c = silk_smulww(gain_q16, *c);
         }
     }
-    // C: silk_assert( 0 ) (debug builds only)
+    // C: silk_assert( 0 ): not reached for encoder input; the unit tests drive it.
+    assertion_failure!("0");
 }
 
 /// Port of `silk/fixed/noise_shape_analysis_FIX.c:silk_noise_shape_analysis_FIX` — compute
@@ -332,14 +333,14 @@ pub fn silk_noise_shape_analysis_fix(
 
         // Calculate the reflection coefficients using schur
         let mut nrg = silk_schur64(&mut refl_coef_q16, &auto_corr, shaping_lpc_order);
-        debug_assert!(nrg >= 0);
+        silk_assert!(nrg >= 0);
 
         // Convert reflection coefficients to prediction coefficients
         silk_k2a_q16(&mut ar_q24, &refl_coef_q16, shaping_lpc_order);
 
         let mut qnrg = -scale; // range: -12...30
-        debug_assert!(qnrg >= -12);
-        debug_assert!(qnrg <= 30);
+        silk_assert!(qnrg >= -12);
+        silk_assert!(qnrg <= 30);
 
         // Make sure that Qnrg is an even number
         if qnrg & 1 != 0 {
@@ -355,7 +356,7 @@ pub fn silk_noise_shape_analysis_fix(
         if s_cmn.warping_q16 > 0 {
             // Adjust gain for warping
             let gain_mult_q16 = warped_gain(&ar_q24, warping_q16, shaping_lpc_order);
-            debug_assert!(ps_enc_ctrl.gains_q16[k] > 0);
+            silk_assert!(ps_enc_ctrl.gains_q16[k] > 0);
             if ps_enc_ctrl.gains_q16[k] < silk_fix_const(0.25, 16) {
                 ps_enc_ctrl.gains_q16[k] = silk_smulww(ps_enc_ctrl.gains_q16[k], gain_mult_q16);
             } else {
@@ -369,7 +370,7 @@ pub fn silk_noise_shape_analysis_fix(
                     ps_enc_ctrl.gains_q16[k] = silk_lshift32(ps_enc_ctrl.gains_q16[k], 1);
                 }
             }
-            debug_assert!(ps_enc_ctrl.gains_q16[k] > 0);
+            silk_assert!(ps_enc_ctrl.gains_q16[k] > 0);
         }
 
         // Bandwidth expansion
@@ -408,10 +409,10 @@ pub fn silk_noise_shape_analysis_fix(
         silk_fix_const(MIN_QGAIN_DB as f64, 7),
         silk_fix_const(0.16, 16),
     ));
-    debug_assert!(gain_mult_q16 > 0);
+    silk_assert!(gain_mult_q16 > 0);
     for k in 0..s_cmn.nb_subfr as usize {
         ps_enc_ctrl.gains_q16[k] = silk_smulww(ps_enc_ctrl.gains_q16[k], gain_mult_q16);
-        debug_assert!(ps_enc_ctrl.gains_q16[k] >= 0);
+        silk_assert!(ps_enc_ctrl.gains_q16[k] >= 0);
         ps_enc_ctrl.gains_q16[k] = silk_add_pos_sat32(ps_enc_ctrl.gains_q16[k], gain_add_q16);
     }
 
@@ -443,7 +444,7 @@ pub fn silk_noise_shape_analysis_fix(
             ps_enc_ctrl.lf_shp_q14[k] |= (b_q14 - silk_fix_const(1.0, 14)) as u16 as i32;
         }
         // Guarantees that second argument to SMULWB() is within range of an opus_int16
-        debug_assert!(fc(HARM_HP_NOISE_COEF, 24) < silk_fix_const(0.5, 24));
+        silk_assert!(fc(HARM_HP_NOISE_COEF, 24) < silk_fix_const(0.5, 24));
         -fc(HP_NOISE_COEF, 16)
             - silk_smulwb(
                 silk_fix_const(1.0, 16) - fc(HP_NOISE_COEF, 16),
@@ -560,7 +561,7 @@ pub fn silk_process_gains_fix(
         if gain_squared < i16::MAX as i32 {
             // recalculate with higher precision
             gain_squared = silk_smlaww(silk_lshift(res_nrg_part, 16), gain, gain);
-            debug_assert!(gain_squared > 0);
+            silk_assert!(gain_squared > 0);
             gain = silk_sqrt_approx(gain_squared); // Q8
             gain = silk_min(gain, i32::MAX >> 8);
             ps_enc_ctrl.gains_q16[k] = silk_lshift_sat32(gain, 8); // Q16
@@ -612,6 +613,6 @@ pub fn silk_process_gains_fix(
         )
         + silk_smulwb(fc(LAMBDA_QUANT_OFFSET, 16), quant_offset_q10);
 
-    debug_assert!(ps_enc_ctrl.lambda_q10 > 0);
-    debug_assert!(ps_enc_ctrl.lambda_q10 < silk_fix_const(2.0, 10));
+    silk_assert!(ps_enc_ctrl.lambda_q10 > 0);
+    silk_assert!(ps_enc_ctrl.lambda_q10 < silk_fix_const(2.0, 10));
 }

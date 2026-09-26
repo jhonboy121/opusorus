@@ -19,7 +19,8 @@
 //! Deviations (Rust-only guards where C would read/write out of bounds): `pcm` shorter than the
 //! decoded frame, or `len` larger than the data slice, return [`Error::BadArg`]; a decoder with 0
 //! channels is rejected at init. C's `celt_assert`s (`validate_celt_decoder`) are
-//! `debug_assert!`s.
+//! `debug_assert!`s (`assert!`s with the feature `assertions`). `DISABLE_UPDATE_DRAFT` (feature
+//! `disable-rfc8251`): mono decoders start with phase inversion enabled (RFC 6716).
 //!
 //! Fixed point (`FIXED_POINT`): the code shared with the float build is written against the
 //! `celt::arch` macros (integer `celt_sig`/`celt_norm`/`celt_glog`, Q15 `opus_val16`); the
@@ -918,41 +919,40 @@ fn decode_qext_stereo_params(
 }
 
 /// `validate_celt_decoder` checks (hardened builds): basic checks on the CELT state to ensure
-/// we don't end up writing all over memory. These are `debug_assert!`s.
+/// we don't end up writing all over memory. These are `celt_assert!`s (the `arch` checks have no
+/// counterpart).
 pub fn validate_celt_decoder(st: &CeltDecoder<'_>) {
     #[cfg(not(any(feature = "custom-modes", feature = "qext")))]
     {
-        debug_assert!(opus_custom_mode_create(48000, 960).is_ok_and(|m| core::ptr::eq(m, st.mode)));
-        debug_assert!(st.overlap == 120);
-        debug_assert!(st.end <= 21);
+        celt_assert!(opus_custom_mode_create(48000, 960).is_ok_and(|m| core::ptr::eq(m, st.mode)));
+        celt_assert!(st.overlap == 120);
+        celt_assert!(st.end <= 21);
     }
     #[cfg(any(feature = "custom-modes", feature = "qext"))]
     {
         // From Section 4.3 in the spec: "The normal CELT layer uses 21 of those bands, though
         // Opus Custom (see Section 6.2) may use a different number of bands". Check if it's
         // within the maximum number of Bark frequency bands instead.
-        debug_assert!(st.end <= 25);
+        celt_assert!(st.end <= 25);
     }
-    debug_assert!(st.channels == 1 || st.channels == 2);
-    debug_assert!(st.stream_channels == 1 || st.stream_channels == 2);
-    debug_assert!(st.downsample > 0);
-    debug_assert!(st.start == 0 || st.start == 17);
-    debug_assert!(st.start < st.end);
+    celt_assert!(st.channels == 1 || st.channels == 2);
+    celt_assert!(st.stream_channels == 1 || st.stream_channels == 2);
+    celt_assert!(st.downsample > 0);
+    celt_assert!(st.start == 0 || st.start == 17);
+    celt_assert!(st.start < st.end);
     #[cfg(not(feature = "qext"))]
     {
-        debug_assert!(st.last_pitch_index <= PLC_PITCH_LAG_MAX);
-        debug_assert!(st.last_pitch_index >= PLC_PITCH_LAG_MIN || st.last_pitch_index == 0);
+        celt_assert!(st.last_pitch_index <= PLC_PITCH_LAG_MAX);
+        celt_assert!(st.last_pitch_index >= PLC_PITCH_LAG_MIN || st.last_pitch_index == 0);
     }
-    debug_assert!(st.postfilter_period < MAX_PERIOD);
-    debug_assert!(st.postfilter_period >= COMBFILTER_MINPERIOD || st.postfilter_period == 0);
-    debug_assert!(st.postfilter_period_old < MAX_PERIOD);
-    debug_assert!(
-        st.postfilter_period_old >= COMBFILTER_MINPERIOD || st.postfilter_period_old == 0
-    );
-    debug_assert!(st.postfilter_tapset <= 2);
-    debug_assert!(st.postfilter_tapset >= 0);
-    debug_assert!(st.postfilter_tapset_old <= 2);
-    debug_assert!(st.postfilter_tapset_old >= 0);
+    celt_assert!(st.postfilter_period < MAX_PERIOD);
+    celt_assert!(st.postfilter_period >= COMBFILTER_MINPERIOD || st.postfilter_period == 0);
+    celt_assert!(st.postfilter_period_old < MAX_PERIOD);
+    celt_assert!(st.postfilter_period_old >= COMBFILTER_MINPERIOD || st.postfilter_period_old == 0);
+    celt_assert!(st.postfilter_tapset <= 2);
+    celt_assert!(st.postfilter_tapset >= 0);
+    celt_assert!(st.postfilter_tapset_old <= 2);
+    celt_assert!(st.postfilter_tapset_old >= 0);
 }
 
 impl CeltDecoder<'static> {
@@ -1007,8 +1007,9 @@ impl<'m> CeltDecoder<'m> {
             start: 0,
             end: mode.eff_ebands,
             signalling: 1,
-            // DISABLE_UPDATE_DRAFT is not defined.
-            disable_inv: i32::from(channels == 1),
+            // Phase inversion is disabled for mono since RFC 8251; DISABLE_UPDATE_DRAFT
+            // (feature `disable-rfc8251`) keeps the RFC 6716 default (enabled).
+            disable_inv: i32::from(!cfg!(feature = "disable-rfc8251") && channels == 1),
             complexity: 0,
             #[cfg(feature = "qext")]
             qext_scale,
@@ -2869,7 +2870,7 @@ fn update_plc_state(
     }
     *plc_preemphasis_mem = buf48k[DBS - 1];
     let offset = DBS - SINC_ORDER - 1 - 3 * (PLC_UPDATE_SAMPLES - 1);
-    debug_assert!(3 * (PLC_UPDATE_SAMPLES - 1) + SINC_ORDER + offset == DBS - 1);
+    celt_assert!(3 * (PLC_UPDATE_SAMPLES - 1) + SINC_ORDER + offset == DBS - 1);
     for i in 0..PLC_UPDATE_SAMPLES {
         let mut sum: f32 = 0.0;
         for j in 0..SINC_ORDER + 1 {

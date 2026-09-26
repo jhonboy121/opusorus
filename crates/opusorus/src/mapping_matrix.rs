@@ -79,7 +79,7 @@ impl MappingMatrix {
     #[must_use]
     pub fn new(rows: i32, cols: i32, gain: i32, data: &[i16]) -> Self {
         let n = (rows * cols) as usize;
-        debug_assert!(align(len_bytes(data.len())) == align(rows * cols * 2));
+        celt_assert!(align(len_bytes(data.len())) == align(rows * cols * 2));
         Self {
             rows,
             cols,
@@ -114,7 +114,7 @@ pub fn mapping_matrix_multiply_channel_in_float(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
@@ -149,7 +149,7 @@ pub fn mapping_matrix_multiply_channel_out_float(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
@@ -179,7 +179,7 @@ pub fn mapping_matrix_multiply_channel_in_short(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
@@ -226,7 +226,7 @@ pub fn mapping_matrix_multiply_channel_out_short(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
@@ -252,7 +252,7 @@ pub fn mapping_matrix_multiply_channel_in_int24(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {
@@ -298,7 +298,7 @@ pub fn mapping_matrix_multiply_channel_out_int24(
     frame_size: usize,
 ) {
     // Matrix data is ordered col-wise.
-    debug_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
+    celt_assert!(input_rows as i32 <= matrix.cols && output_rows as i32 <= matrix.rows);
     let matrix_data = matrix.get_data();
     let rows = matrix.rows as usize;
     for i in 0..frame_size {

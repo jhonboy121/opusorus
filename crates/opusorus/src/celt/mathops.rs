@@ -105,7 +105,7 @@ pub fn celt_cos_norm2(mut x: f32) -> f32 {
 #[inline(always)]
 #[must_use]
 pub const fn celt_ilog2(x: i32) -> i32 {
-    debug_assert!(x > 0);
+    celt_sig_assert!(x > 0);
     ec_ilog(x as u32) - 1
 }
 /// `celt_zlog2`: integer log2, defined as 0 for `x <= 0`.

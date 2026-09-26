@@ -73,6 +73,29 @@ run upstream's scripts on the fixed-point tools; `--fixed` (all rates) and `--hd
 (all rates, then the 12 RFC vectors at 96 kHz) give the numbers above, the latter then stopping
 at the first `qext_vector` as with every libopus 1.6.1 build.
 
+### With the upstream options `assertions` and `fuzzing`
+
+`assertions` (`ENABLE_ASSERTIONS`) makes libopus' `celt_sig_assert`s hard checks, and several
+of them guard the fixed-point arithmetic that the C-UB overflow sites below feed: with it,
+libopus *aborts* on those inputs (verified on the oracle) and the port panics likewise. So in a
+fixed-point build with `assertions`:
+
+* `celt_sqrt32_release` / `celt_atan2p_norm_release` (and the new `celt_ilog2_release`) check
+  their preconditions again, so a stereo encoder with `OPUS_SET_LFE(1)` (or any stream whose
+  band energies wrap) panics; `api_overflow.rs` (`lfe_stereo_encoder_matches_c`,
+  `public_api_sweep`, `extreme_input_no_panic`), `crates/opusorus/tests/overflow.rs` and the
+  stereo-LFE draws of `opus_encoder.rs` (`lfe_allowed`) are skipped in that configuration.
+* The float build has no such checks (`celt_isnan`-based `celt_assert`s become trivially true
+  in fixed point, as `celt_isnan` is 0 there), and the fixed-only `celt_sig_assert`s
+  (`celt_rcp`, `celt_sqrt32`, `frac_div32`, `celt_ilog2`, `celt_maxabs16`, the Q30
+  `celt_cos_norm32`/`celt_atan2p_norm` range checks) and the `silk/fixed` `silk_assert`s are
+  only compiled in fixed-point builds, like upstream.
+
+`fuzzing` (`FUZZING`): the random decisions can put a band of the surround encoder's LFE stream
+far above unit energy, and the `opus_val32` energy of `celt/vq.rs:op_pvq_search_c` then wraps
+(C UB, the same LFE band-energy clamp as below); `celt_ilog2_release` computes what release
+libopus does there (checked with `assertions`, where C aborts).
+
 ### Overflow hardening
 
 A Rust library must not panic in debug builds on valid API input. Where libopus overflows

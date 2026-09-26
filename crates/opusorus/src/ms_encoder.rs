@@ -452,7 +452,7 @@ fn surround_analysis(
 
     for c in 0..channels as usize {
         let nb_frames = frame_size / freq_size;
-        debug_assert!(nb_frames * freq_size == frame_size);
+        celt_assert!(nb_frames * freq_size == frame_size);
         input[..ov].copy_from_slice(&mem[c * ov..(c + 1) * ov]);
         pcm.copy_channel_in(x, 1, channels as usize, c, len as usize, None);
         celt_preemphasis(

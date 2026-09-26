@@ -125,7 +125,7 @@ pub fn silk_find_lpc_flp(
         silk_a2nlsf_flp(nlsf_q15, &a, order);
     }
 
-    debug_assert!(
+    celt_assert!(
         ps_enc_c.indices.nlsf_interp_coef_q2 == 4
             || (ps_enc_c.use_interpolated_nlsfs != 0
                 && ps_enc_c.first_frame_after_reset == 0
@@ -204,7 +204,7 @@ pub fn silk_find_pitch_lags_flp(
     let buf_len = la_pitch + s_cmn.frame_length as usize + s_cmn.ltp_mem_length as usize;
 
     // Safety check
-    debug_assert!(buf_len >= win_len);
+    celt_assert!(buf_len >= win_len);
 
     let x_buf_start = x_off - s_cmn.ltp_mem_length as usize;
     let x_buf = &x_buf[x_buf_start..x_buf_start + buf_len];
@@ -359,7 +359,7 @@ pub fn silk_find_pred_coefs_flp(
 
     if s_cmn.indices.signal_type as i32 == TYPE_VOICED {
         // VOICED
-        debug_assert!(
+        celt_assert!(
             s_cmn.ltp_mem_length - s_cmn.predict_lpc_order
                 >= ps_enc_ctrl.pitch_l[0] + LTP_ORDER / 2
         );

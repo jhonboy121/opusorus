@@ -193,6 +193,17 @@ fn main() {
                 .expect("UTF-8 path"),
         );
     }
+    // --enable-float-approx, --enable-assertions, --enable-fuzzing, --disable-rfc8251.
+    for (feature, define) in [
+        ("CARGO_FEATURE_FLOAT_APPROX", "FLOAT_APPROX"),
+        ("CARGO_FEATURE_ASSERTIONS", "ENABLE_ASSERTIONS"),
+        ("CARGO_FEATURE_FUZZING", "FUZZING"),
+        ("CARGO_FEATURE_DISABLE_RFC8251", "DISABLE_UPDATE_DRAFT"),
+    ] {
+        if std::env::var_os(feature).is_some() {
+            b.define(define, None);
+        }
+    }
     if deep_plc {
         // Upstream also adds the source root (dnn/dred_*.c include "celt/entenc.h").
         b.include(&root)

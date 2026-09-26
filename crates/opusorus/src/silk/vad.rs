@@ -121,9 +121,9 @@ fn vad_get_sa_q8(
 
     // Safety checks
     const { assert!(VAD_N_BANDS == 4) };
-    debug_assert!(MAX_FRAME_LENGTH >= frame_length);
-    debug_assert!(frame_length <= 512);
-    debug_assert!(frame_length == 8 * silk_rshift(frame_length, 3));
+    celt_assert!(MAX_FRAME_LENGTH >= frame_length);
+    celt_assert!(frame_length <= 512);
+    celt_assert!(frame_length == 8 * silk_rshift(frame_length, 3));
 
     // Filter and Decimate
     let decimated_framelength1 = silk_rshift(frame_length, 1) as usize;
@@ -226,7 +226,7 @@ fn vad_get_sa_q8(
                 sum_squared = silk_smlabb(sum_squared, x_tmp, x_tmp);
 
                 // Safety check
-                debug_assert!(sum_squared >= 0);
+                silk_assert!(sum_squared >= 0);
             }
 
             // Add/saturate summed energy of current subframe
@@ -355,15 +355,15 @@ pub fn silk_vad_get_noise_levels(p_x: &[i32; NB], ps_silk_vad: &mut SilkVadState
     for k in 0..NB {
         // Get old noise level estimate for current band
         let mut nl = ps_silk_vad.nl[k];
-        debug_assert!(nl >= 0);
+        silk_assert!(nl >= 0);
 
         // Add bias
         let nrg = silk_add_pos_sat32(p_x[k], ps_silk_vad.noise_level_bias[k]);
-        debug_assert!(nrg > 0);
+        silk_assert!(nrg > 0);
 
         // Invert energies
         let inv_nrg = silk_div32(SILK_INT32_MAX, nrg);
-        debug_assert!(inv_nrg >= 0);
+        silk_assert!(inv_nrg >= 0);
 
         // Less update when subband energy is high
         let mut coef = if nrg > silk_lshift(nl, 3) {
@@ -383,11 +383,11 @@ pub fn silk_vad_get_noise_levels(p_x: &[i32; NB], ps_silk_vad: &mut SilkVadState
         // Smooth inverse energies
         ps_silk_vad.inv_nl[k] =
             silk_smlawb(ps_silk_vad.inv_nl[k], inv_nrg - ps_silk_vad.inv_nl[k], coef);
-        debug_assert!(ps_silk_vad.inv_nl[k] >= 0);
+        silk_assert!(ps_silk_vad.inv_nl[k] >= 0);
 
         // Compute noise level by inverting again
         nl = silk_div32(SILK_INT32_MAX, ps_silk_vad.inv_nl[k]);
-        debug_assert!(nl >= 0);
+        silk_assert!(nl >= 0);
 
         // Limit noise levels (guarantee 7 bits of head room)
         nl = silk_min(nl, 0x00FF_FFFF);

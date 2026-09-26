@@ -107,7 +107,7 @@ impl<T: Copy + Default, const N: usize> Scratch<T, N> {
 /// `x` needs `len` elements and `y` needs `len + 3` elements; `len >= 3`.
 #[inline(always)]
 pub fn xcorr_kernel(x: &[OpusVal16], y: &[OpusVal16], sum: &mut [OpusVal32; 4], len: usize) {
-    debug_assert!(len >= 3);
+    celt_assert!(len >= 3);
     let x = &x[..len];
     let y = &y[..len + 3];
     let mut xi = 0usize;
@@ -476,7 +476,7 @@ fn pitch_xcorr(
     len: usize,
     max_pitch: usize,
 ) -> OpusVal32 {
-    debug_assert!(max_pitch > 0);
+    celt_assert!(max_pitch > 0);
     #[cfg(feature = "fixed-point")]
     let mut maxcorr: OpusVal32 = 1;
     let xcorr = &mut xcorr[..max_pitch];
@@ -561,8 +561,8 @@ pub fn pitch_search(x_lp: &[OpusVal16], y: &[OpusVal16], len: usize, max_pitch: 
     let mut y4s = Scratch::<OpusVal16, PS_Y4_MAX>::new();
     let mut xcs = Scratch::<OpusVal32, PS_XCORR_MAX>::new();
 
-    debug_assert!(len > 0);
-    debug_assert!(max_pitch > 0);
+    celt_assert!(len > 0);
+    celt_assert!(max_pitch > 0);
     let lag = len + max_pitch;
 
     let x_lp4 = x4s.get(len >> 2);

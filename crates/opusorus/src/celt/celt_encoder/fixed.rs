@@ -119,8 +119,8 @@ pub fn transient_analysis(
         mean = mult16_16(celt_sqrt(mean), celt_sqrt(mult16_16(max_e, len2 >> 1)));
         // Inverse of the mean energy in Q15+6
         let norm: OpusVal32 = shl32(extend32(len2), 6 + 14) / add32(EPSILON, shr32(mean, 1));
-        debug_assert!(!celt_isnan(i32::from(tmp[0])));
-        debug_assert!(!celt_isnan(norm));
+        celt_assert!(!celt_isnan(i32::from(tmp[0])));
+        celt_assert!(!celt_isnan(norm));
         let mut i = 12usize;
         while (i as i32) < len2 - 5 {
             // Do not round to nearest
@@ -162,6 +162,11 @@ pub fn transient_analysis(
             14,
         ) - qconst32(0.139, 28),
     )) as i16;
+    #[cfg(feature = "fuzzing")]
+    let is_transient = {
+        let _ = is_transient;
+        crate::glibc_rand::rand() & 0x1 != 0
+    };
     is_transient
 }
 
@@ -447,7 +452,13 @@ pub fn alloc_trim_analysis(
     }
 
     let trim_index = pshr32(trim, 8);
-    imax(0, imin(10, trim_index))
+    let trim_index = imax(0, imin(10, trim_index));
+    #[cfg(feature = "fuzzing")]
+    let trim_index = {
+        let _ = trim_index;
+        crate::glibc_rand::rand() % 11
+    };
+    trim_index
 }
 
 /// Port of celt/celt_encoder.c:stereo_analysis (fixed-point build): whether dual (L/R) stereo
@@ -759,7 +770,7 @@ pub fn tone_lpc(x: &[OpusVal16], len: i32, delay: i32, lpc: &mut [OpusVal32; 2])
     let mut r00: OpusVal32 = 0;
     let mut r01: OpusVal32 = 0;
     let mut r02: OpusVal32 = 0;
-    debug_assert!(len > 2 * delay);
+    celt_assert!(len > 2 * delay);
     // Compute correlations as if using the forward prediction covariance method.
     for i in 0..lenu - 2 * d {
         r00 += mult16_16(x[i], x[i]);
@@ -1317,7 +1328,7 @@ pub(super) fn surround_masking_analysis(
             diff += mult16_16(mask16, 1 + 2 * i - mask_end);
         }
     }
-    debug_assert!(count > 0);
+    celt_assert!(count > 0);
     mask_avg = shl32(div32_16(mask_avg, count), DB_SHIFT - 10);
     mask_avg += gconst(0.2f32 as f64);
     diff = shl32(

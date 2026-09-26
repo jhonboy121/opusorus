@@ -61,13 +61,19 @@ The foundation (already done, reuse it):
   `reset()`/`Default`. C's "copy struct to save state" → `#[derive(Clone)]`.
 * VLAs/`ALLOC(...)` → fixed-size stack arrays sized by the C maximum when small (< ~8 KB),
   otherwise a scratch `Vec` owned by the state (allocate at init, not per call).
-* `celt_assert` → `debug_assert!`. `celt_sig_assert` → `debug_assert!`. Hardening checks that
-  return errors in C must return errors in Rust.
+* `celt_assert` / `celt_assert2` → `celt_assert!`, `celt_sig_assert` → `celt_sig_assert!`,
+  `silk_assert` → `silk_assert!` (crate macros in `src/assertions.rs`: `debug_assert!`s, hard
+  `assert!`s with the feature `assertions` = `ENABLE_ASSERTIONS`); a `celt_assert(0)` that the
+  port keeps reachable (C returns an error after it) → `assertion_failure!`. Rust-side
+  invariants that C does not assert stay `debug_assert!`. Hardening checks that return errors in
+  C must return errors in Rust.
 * `#ifdef ENABLE_QEXT` → `#[cfg(feature = "qext")]` (port these blocks in the same pass).
   `#ifdef CUSTOM_MODES` → `#[cfg(feature = "custom-modes")]`. `#ifdef FIXED_POINT` →
   `#[cfg(feature = "fixed-point")]` when a fixed-point unit converts the file (see
   `docs/FIXED_POINT.md` for the typing rules and gating); until then the branch keeps its
-  `// FIXED_POINT: not ported (float build)` marker. `ENABLE_DEEP_PLC`,
+  `// FIXED_POINT: not ported (float build)` marker. `FLOAT_APPROX` → `float-approx`,
+  `FUZZING` → `fuzzing` (random draws from `crate::glibc_rand`), `DISABLE_UPDATE_DRAFT` →
+  `disable-rfc8251`. `ENABLE_DEEP_PLC`,
   `ENABLE_DRED`, `ENABLE_OSCE`, `ENABLE_OSCE_BWE` → skip with `// DNN: <feature> not ported yet`
   marker (they are a later phase). `OPUS_ARM_*`, `OPUS_X86_*`, `arch` params → drop.
 * `arch` arguments disappear. `RESTORE_STACK`/`SAVE_STACK` disappear.

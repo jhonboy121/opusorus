@@ -37,6 +37,11 @@ osce-training-data = ["osce"]
 # The packet loss generator of `--enable-lossgen` (dnn/lossgen.c + lossgen_data.c, which upstream
 # links into opus_demo only), reached through the `csrc/dnn_lossgen.c` shim.
 lossgen = []
+# FLOAT_APPROX, ENABLE_ASSERTIONS, FUZZING, DISABLE_UPDATE_DRAFT.
+float-approx = []
+assertions = []
+fuzzing = []
+disable-rfc8251 = []
 
 [build-dependencies]
 cc = "1"

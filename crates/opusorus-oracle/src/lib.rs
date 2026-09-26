@@ -25,6 +25,7 @@ pub mod fixed_debug;
 // (`// oracle-requires: float-api`: not in a `DISABLE_FLOAT_API` oracle.)
 #[cfg(not(feature = "disable-float-api"))]
 pub mod analysis;
+pub mod build_options;
 pub mod celt_bands;
 pub mod celt_decoder;
 pub mod celt_encoder;

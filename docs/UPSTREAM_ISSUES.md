@@ -14,6 +14,7 @@ safe Rust: the port returns an error or behaves as documented instead).
 | fixed-point surround | `logSum` returns `opus_val16`, truncating its Q24 result; `surround_analysis` adds a Q10 `channel_offset` to Q24 masks without scaling. |
 | Static CELT FFT tables (Q15) | differ from runtime `celt_cos_norm` twiddles by up to 2 LSB (static tables are what the default modes use). |
 | `test_opus_custom.c` | `CUSTOM_MODEES` typo means the test only exercises 48/96 kHz custom modes. |
+| `CUSTOM_MODES` `compute_ebands` | the `celt_assert`s on the band layout fail for e.g. 12000 Hz / 52, 104, 208 samples, so `opus_custom_mode_create` aborts (hardened or assertion builds) instead of returning an error; the port checks them only with `assertions` (panic), otherwise it creates the mode. |
 
 ## Undefined behaviour in C (the port wraps like C in practice)
 
@@ -22,6 +23,8 @@ safe Rust: the port returns an error or behaves as documented instead).
 | fixed-point stereo `OPUS_SET_LFE(1)` | CELT LFE band-energy clamp makes `normalise_bands` `SHL32` wrap; `stereo_itheta` sums overflow `opus_val32`. |
 | fixed-point CELT `alloc_trim_analysis` | spectral-tilt sum overflows with up-sampled input + full end band (direct CELT use). |
 | `ENABLE_RES24` `OPUS_SET_GAIN` near +128 dB | `MULT32_32_Q16` exceeds 32 bits; the 32-bit multiply form (armv7/wasm32/x86) overflows its adds. |
+| fixed-point `FUZZING` surround (LFE stream) | the random allocation decisions put an LFE band far above unit energy; the `opus_val32` energy of `op_pvq_search_c` wraps and `celt_ilog2` gets a negative value (with `ENABLE_ASSERTIONS`: `celt_sig_assert(x>0)` aborts). |
+| fixed-point `ENABLE_ASSERTIONS` | the stereo-LFE wrap above fails `celt_sig_assert(x>0)` (`celt_ilog2` via `celt_sqrt32`): libopus aborts on that valid API input. |
 | fixed-point 24-bit input outside ±2^23 | `INT24TORES`/`INT24TOSIG`, `downmix_int24`, `silk_resampler_down2_hp` overflow (out-of-contract input; not hardened). |
 
 ## Memory-safety bugs (C only; unreachable through the Opus encoder/decoder API)

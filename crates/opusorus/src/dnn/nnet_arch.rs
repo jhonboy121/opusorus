@@ -26,7 +26,7 @@ pub const MAX_CONV2D_INPUTS: usize = 8192;
 /// element-wise, so computing them per element gives identical results without the
 /// `MAX_ACTIVATIONS` temporary.
 pub fn vec_swish(y: &mut [f32], x: &[f32], n: usize) {
-    debug_assert!(n <= MAX_ACTIVATIONS);
+    celt_assert!(n <= MAX_ACTIVATIONS);
     for (yi, &xi) in y[..n].iter_mut().zip(&x[..n]) {
         *yi = xi * sigmoid_approx(xi);
     }
@@ -34,7 +34,7 @@ pub fn vec_swish(y: &mut [f32], x: &[f32], n: usize) {
 
 /// In-place [`vec_swish`].
 pub fn vec_swish_inplace(y: &mut [f32], n: usize) {
-    debug_assert!(n <= MAX_ACTIVATIONS);
+    celt_assert!(n <= MAX_ACTIVATIONS);
     for v in &mut y[..n] {
         *v *= sigmoid_approx(*v);
     }
@@ -88,7 +88,7 @@ pub fn compute_activation(output: &mut [f32], input: &[f32], n: usize, activatio
         ACTIVATION_EXP => softmax(output, input, n),
         _ => {
             // C: celt_assert(activation == ACTIVATION_LINEAR), then copies.
-            debug_assert!(activation == ACTIVATION_LINEAR);
+            celt_assert!(activation == ACTIVATION_LINEAR);
             output.copy_from_slice(input);
         }
     }
@@ -112,7 +112,7 @@ pub fn compute_activation_inplace(x: &mut [f32], n: usize, activation: i32) {
         }
         ACTIVATION_EXP => softmax_inplace(x, n),
         // LINEAR with `input == output`: nothing to do.
-        _ => debug_assert!(activation == ACTIVATION_LINEAR),
+        _ => celt_assert!(activation == ACTIVATION_LINEAR),
     }
 }
 
@@ -156,7 +156,7 @@ pub fn compute_linear(linear: &LinearLayer, out: &mut [f32], input: &[f32]) {
     }
     if let Some(diag) = linear.diag.as_deref() {
         // Diag is only used for GRU recurrent weights.
-        debug_assert!(3 * m == n);
+        celt_assert!(3 * m == n);
         let input = &input[..m];
         let diag = &diag[..3 * m];
         for i in 0..m {
@@ -264,7 +264,7 @@ pub fn compute_conv2d(
 ) {
     let time_stride = conv.in_channels * (height + conv.kheight - 1);
     let hist = (conv.ktime - 1) * time_stride;
-    debug_assert!(conv.ktime * time_stride <= MAX_CONV2D_INPUTS);
+    celt_assert!(conv.ktime * time_stride <= MAX_CONV2D_INPUTS);
     let in_buf = &mut in_buf[..hist + time_stride];
     in_buf[..hist].copy_from_slice(&mem[..hist]);
     in_buf[hist..].copy_from_slice(&input[..time_stride]);

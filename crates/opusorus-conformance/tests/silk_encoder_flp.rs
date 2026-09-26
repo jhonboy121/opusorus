@@ -359,12 +359,22 @@ fn residual_energy_scale_sort_warped() {
         let wxx = rng.f32_sym() * 10.0;
         let mut mr = m.clone();
         let mut mc = m.clone();
-        eq1(
-            "residual energy covar",
-            flp::silk_residual_energy_covar_flp(&cvec, &mut mr, &wv, wxx, d),
-            c::residual_energy_covar(&cvec, &mut mc, &wv, wxx, d),
-        );
-        eq_f32("covar regularized", &mr, &mc);
+        // It ends in `silk_assert( nrg == 0 )` when the regularization does not converge: with
+        // the `assertions` feature the port panics there and the C oracle would abort.
+        let converges = !cfg!(feature = "assertions")
+            || std::panic::catch_unwind(|| {
+                let mut m2 = m.clone();
+                flp::silk_residual_energy_covar_flp(&cvec, &mut m2, &wv, wxx, d)
+            })
+            .is_ok();
+        if converges {
+            eq1(
+                "residual energy covar",
+                flp::silk_residual_energy_covar_flp(&cvec, &mut mr, &wv, wxx, d),
+                c::residual_energy_covar(&cvec, &mut mc, &wv, wxx, d),
+            );
+            eq_f32("covar regularized", &mr, &mc);
+        }
         let noise = rng.f32_sym().abs() * 3.0;
         let mut xr = [wxx];
         let mut xc = [wxx];
@@ -429,16 +439,28 @@ fn noise_shape_coef_limiters() {
             flp::warped_gain(&coefs, lambda, order),
             c::warped_gain(&coefs, lambda, order),
         );
-        let mut r = coefs.clone();
-        let mut cc = coefs.clone();
-        flp::warped_true2monic_coefs(&mut r, lambda, 3.999, order);
-        c::warped_true2monic_coefs(&mut cc, lambda, 3.999, order);
-        eq_f32("warped_true2monic", &r, &cc);
-        let mut r = coefs.clone();
-        let mut cc = coefs;
-        flp::limit_coefs(&mut r, 3.999, order);
-        c::limit_coefs(&mut cc, 3.999, order);
-        eq_f32("limit_coefs", &r, &cc);
+        // Both limiters end in `silk_assert( 0 )` when they do not converge: with the
+        // `assertions` feature the port panics there and the C oracle would abort, so the
+        // oracle is only called when the port returned.
+        let converges = |f: &dyn Fn(&mut [f32])| {
+            let mut r = coefs.clone();
+            !cfg!(feature = "assertions")
+                || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut r))).is_ok()
+        };
+        if converges(&|r| flp::warped_true2monic_coefs(r, lambda, 3.999, order)) {
+            let mut r = coefs.clone();
+            let mut cc = coefs.clone();
+            flp::warped_true2monic_coefs(&mut r, lambda, 3.999, order);
+            c::warped_true2monic_coefs(&mut cc, lambda, 3.999, order);
+            eq_f32("warped_true2monic", &r, &cc);
+        }
+        if converges(&|r| flp::limit_coefs(r, 3.999, order)) {
+            let mut r = coefs.clone();
+            let mut cc = coefs;
+            flp::limit_coefs(&mut r, 3.999, order);
+            c::limit_coefs(&mut cc, 3.999, order);
+            eq_f32("limit_coefs", &r, &cc);
+        }
     }
 }
 
@@ -1835,38 +1857,57 @@ fn invalid_input_rust_only() {
         let mut nb = 499;
         e.silk_encode(&mut c, &pcm, n, &mut enc, &mut nb, prefill, -1)
     };
+    // With the `assertions` feature (ENABLE_ASSERTIONS) every error path below fails a
+    // `celt_assert( 0 )` and panics, like C's abort (checked on a fresh encoder each time).
+    let mut check = |ctl: SilkEncControlStruct, n: i32, prefill: i32, want: i32| {
+        if cfg!(feature = "assertions") {
+            let r = std::panic::catch_unwind(|| {
+                let mut e = SilkEncoder::new();
+                let mut st = SilkEncControlStruct::default();
+                assert_eq!(e.init(1, &mut st), 0);
+                let mut buf = vec![0u8; 500];
+                let mut c = ctl;
+                let mut enc = EcEnc::new(&mut buf);
+                let mut nb = 499;
+                e.silk_encode(&mut c, &pcm, n, &mut enc, &mut nb, prefill, -1)
+            });
+            assert!(r.is_err(), "{ctl:?}: no assertion failure (result {r:?})");
+        } else {
+            assert_eq!(run(ctl, n, prefill), want, "{ctl:?}");
+        }
+    };
     // not a multiple of 10 ms
-    assert_eq!(run(base, 170, 0), SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
+    check(base, 170, 0, SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
     // more than one packet
-    assert_eq!(run(base, 640, 0), SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
+    check(base, 640, 0, SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
     // prefill must be 10 ms
-    assert_eq!(run(base, 320, 1), SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
+    check(base, 320, 1, SILK_ENC_INPUT_INVALID_NO_OF_SAMPLES);
     // bad packet size / rates / complexity
     let mut c = base;
     c.payload_size_ms = 30;
-    assert_eq!(run(c, 160, 0), SILK_ENC_PACKET_SIZE_NOT_SUPPORTED);
+    check(c, 160, 0, SILK_ENC_PACKET_SIZE_NOT_SUPPORTED);
     let mut c = base;
     c.api_sample_rate = 11025;
-    assert_eq!(run(c, 441, 0), SILK_ENC_FS_NOT_SUPPORTED);
+    check(c, 441, 0, SILK_ENC_FS_NOT_SUPPORTED);
     // 44.1 kHz passes check_control_input but has no resampler: silk_resampler_init returns -1
     // (C asserts there)
     let mut c = base;
     c.api_sample_rate = 44100;
-    assert_eq!(run(c, 441, 0), -1);
+    check(c, 441, 0, -1);
     let mut c = base;
     c.max_internal_sample_rate = 8000;
-    assert_eq!(run(c, 320, 0), SILK_ENC_FS_NOT_SUPPORTED);
+    check(c, 320, 0, SILK_ENC_FS_NOT_SUPPORTED);
     let mut c = base;
     c.packet_loss_percentage = 101;
-    assert_eq!(run(c, 320, 0), SILK_ENC_INVALID_LOSS_RATE);
+    check(c, 320, 0, SILK_ENC_INVALID_LOSS_RATE);
     // (nChannelsAPI > 2 is not testable: C indexes state_Fxx[ nChannelsAPI - 1 ] before
     // validating it)
     let mut c = base;
     c.use_dtx = 2;
-    assert_eq!(run(c, 320, 0), SILK_ENC_INVALID_DTX_SETTING);
+    check(c, 320, 0, SILK_ENC_INVALID_DTX_SETTING);
     let mut c = base;
     c.complexity = 11;
-    assert_eq!(run(c, 320, 0), SILK_ENC_INVALID_COMPLEXITY_SETTING);
+    check(c, 320, 0, SILK_ENC_INVALID_COMPLEXITY_SETTING);
     // still works
     assert_eq!(run(base, 320, 0), 0);
 }

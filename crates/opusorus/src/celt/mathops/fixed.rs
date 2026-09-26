@@ -27,6 +27,16 @@ const fn ilog2<const CHECKED: bool>(x: i32) -> i32 {
     }
 }
 
+/// [`celt_ilog2`] with release-libopus semantics for `x <= 0` (its `celt_sig_assert` is
+/// compiled out; with the feature `assertions`, `ENABLE_ASSERTIONS`, it is checked like in C).
+/// Used on the band energy of `celt/vq.rs:op_pvq_search_c`, whose `opus_val32` sum wraps (C UB)
+/// when a band is far above unit energy: the LFE band-energy clamp under the random decisions
+/// of the fuzzing build (feature `fuzzing`).
+#[must_use]
+pub const fn celt_ilog2_release(x: i32) -> i32 {
+    ilog2::<{ cfg!(feature = "assertions") }>(x)
+}
+
 /// Port of `celt_maxabs16` (fixed): `MAX32(EXTEND32(maxval),-EXTEND32(minval))`.
 #[inline]
 #[must_use]
@@ -52,7 +62,7 @@ pub fn celt_maxabs_res(x: &[OpusRes]) -> OpusRes {
         minval = min32(minval, v);
     }
     // opus_res should never reach such amplitude, so we should be safe.
-    debug_assert!(minval != i32::MIN);
+    celt_sig_assert!(minval != i32::MIN);
     max32(maxval, -minval)
 }
 
@@ -203,10 +213,11 @@ pub fn celt_sqrt32(x: OpusVal32) -> OpusVal32 {
 }
 
 /// [`celt_sqrt32`] with release-libopus semantics for negative `x` (no `celt_ilog2`
-/// assertion): used on the wrapped energies of `celt/vq.rs:stereo_itheta`.
+/// assertion): used on the wrapped energies of `celt/vq.rs:stereo_itheta`. With the feature
+/// `assertions` (`ENABLE_ASSERTIONS`, where libopus checks it) the assertion is kept.
 #[must_use]
 pub fn celt_sqrt32_release(x: OpusVal32) -> OpusVal32 {
-    celt_sqrt32_impl::<false>(x)
+    celt_sqrt32_impl::<{ cfg!(feature = "assertions") }>(x)
 }
 
 /// [`celt_sqrt32`]; `CHECKED` as in [`ilog2`].
@@ -282,7 +293,7 @@ pub fn celt_cos_norm32(x: OpusVal32) -> OpusVal32 {
     const COS_NORM_COEFF_A3: OpusVal32 = -178_761_936; // Q33
     const COS_NORM_COEFF_A4: OpusVal32 = 29_487_206; // Q35
     // The expected x is in the range of [-1.0f, 1.0f].
-    debug_assert!((-1_073_741_824..=1_073_741_824).contains(&x));
+    celt_sig_assert!((-1_073_741_824..=1_073_741_824).contains(&x));
     // Make cos(+/- pi/2) exactly zero.
     if abs32(x) == 1 << 30 {
         return 0;
@@ -325,7 +336,7 @@ pub fn celt_rcp_norm16(x: OpusVal16) -> OpusVal16 {
 /// input in `[0.5, 1)` (Q30 output in `[1, 2)`).
 #[must_use]
 pub fn celt_rcp_norm32(x: OpusVal32) -> OpusVal32 {
-    debug_assert!(x >= 1_073_741_824);
+    celt_sig_assert!(x >= 1_073_741_824);
     let r_q30 = shl32(celt_rcp_norm16((shr32(x, 15) - 32768) as i16), 16);
     // Solving f(y) = a - 1/y using the Newton Method
     // Note: f(y)' = 1/y^2
@@ -359,7 +370,7 @@ pub fn celt_rcp(x: OpusVal32) -> OpusVal32 {
 /// compiled out in release builds).
 fn celt_rcp_impl<const CHECKED: bool>(x: OpusVal32) -> OpusVal32 {
     if CHECKED {
-        debug_assert!(x > 0);
+        celt_sig_assert!(x > 0);
     }
     let i = ilog2::<CHECKED>(x);
     // Compute the reciprocal of a Q15 number in the range [0, 1).
@@ -563,7 +574,7 @@ pub fn celt_atan_norm(x: OpusVal32) -> OpusVal32 {
     const ATAN_COEFF_A13: i32 = 1_583_306_112; // Q36
     const ATAN_COEFF_A15: i32 = -598_602_432; // Q37
     // The expected x is in the range of [-1.0f, 1.0f].
-    debug_assert!((-1_073_741_824..=1_073_741_824).contains(&x));
+    celt_sig_assert!((-1_073_741_824..=1_073_741_824).contains(&x));
     // If x = 1.0f, returns 0.5f.
     if x == 1_073_741_824 {
         return 536_870_912; // 0.5f (Q30)
@@ -596,16 +607,18 @@ pub fn celt_atan2p_norm(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
 /// preconditions of it, `frac_div32`, `celt_rcp` and `celt_ilog2` are `celt_sig_assert`s,
 /// compiled out in release builds. Used on the roots of the wrapped (negative) energies of
 /// `celt/vq.rs:stereo_itheta` (C UB, a stereo encoder with `OPUS_SET_LFE(1)`), so the port
-/// computes what libopus does instead of panicking in debug builds.
+/// computes what libopus does instead of panicking in debug builds. With the feature
+/// `assertions` (`ENABLE_ASSERTIONS`, where libopus checks them and aborts) the preconditions
+/// are checked.
 #[must_use]
 pub fn celt_atan2p_norm_release(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
-    celt_atan2p_norm_impl::<false>(y, x)
+    celt_atan2p_norm_impl::<{ cfg!(feature = "assertions") }>(y, x)
 }
 
 /// [`celt_atan2p_norm`]; `CHECKED` as in [`ilog2`].
 fn celt_atan2p_norm_impl<const CHECKED: bool>(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
     if CHECKED {
-        debug_assert!(x >= 0 && y >= 0);
+        celt_sig_assert!(x >= 0 && y >= 0);
     }
     if y == 0 && x == 0 {
         0
@@ -613,7 +626,7 @@ fn celt_atan2p_norm_impl<const CHECKED: bool>(y: OpusVal32, x: OpusVal32) -> Opu
         celt_atan_norm(shr32(frac_div32_impl::<CHECKED>(y, x), 1))
     } else {
         if CHECKED {
-            debug_assert!(y > 0);
+            celt_sig_assert!(y > 0);
         }
         1_073_741_824 /* 1.0f Q30 */ - celt_atan_norm(shr32(frac_div32_impl::<CHECKED>(x, y), 1))
     }

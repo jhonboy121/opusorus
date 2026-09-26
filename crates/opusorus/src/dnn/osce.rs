@@ -1394,7 +1394,7 @@ const FRAC_09_24: [f32; 8] = [
 /// Port of dnn/osce.c:apply_valin_activation (static), in place on `x[..len]`.
 pub fn apply_valin_activation(x: &mut [f32], len: usize) {
     let mut y = [0f32; 2 * BBWENET_TDSHAPE2_FRAME_SIZE];
-    debug_assert!(len <= 2 * BBWENET_TDSHAPE2_FRAME_SIZE);
+    celt_assert!(len <= 2 * BBWENET_TDSHAPE2_FRAME_SIZE);
     let x = &mut x[..len];
     let y = &mut y[..len];
     for (yi, &xi) in y.iter_mut().zip(x.iter()) {
@@ -1431,9 +1431,9 @@ pub fn interpol_3_2(state: &mut ResampState, x_out: &mut [f32], x_in: &[f32], nu
     let mut buffer = [0f32; 8 * BBWENET_FRAME_SIZE16 + DELAY_SAMPLES];
     let mut i_out = 0;
 
-    debug_assert!(num_samples > 1);
-    debug_assert!(num_samples < 8 * BBWENET_FRAME_SIZE16);
-    debug_assert!(num_samples.is_multiple_of(2));
+    celt_assert!(num_samples > 1);
+    celt_assert!(num_samples < 8 * BBWENET_FRAME_SIZE16);
+    celt_assert!(num_samples.is_multiple_of(2));
 
     buffer[..DELAY_SAMPLES].copy_from_slice(&state.interpol_buffer);
     buffer[DELAY_SAMPLES..DELAY_SAMPLES + num_samples].copy_from_slice(&x_in[..num_samples]);
@@ -1457,8 +1457,8 @@ pub fn interpol_3_2(state: &mut ResampState, x_out: &mut [f32], x_in: &[f32], nu
 /// Port of dnn/osce.c:upsamp_2x (static): 2x upsampling of `num_samples` samples (allpass
 /// polyphase, the SILK `hq_2x` coefficients) into `2*num_samples`.
 pub fn upsamp_2x(state: &mut ResampState, x_out: &mut [f32], x_in: &[f32], num_samples: usize) {
-    debug_assert!(num_samples > 1);
-    debug_assert!(num_samples < 4 * BBWENET_FRAME_SIZE16);
+    celt_assert!(num_samples > 1);
+    celt_assert!(num_samples < 4 * BBWENET_FRAME_SIZE16);
     let [s_even, s_odd] = &mut state.upsamp_buffer;
     let x_out = &mut x_out[..2 * num_samples];
 
@@ -1736,7 +1736,7 @@ pub fn osce_reset(h_osce: &mut SilkOsceStruct, method: i32) {
             }
         }
         // C: celt_assert(0 && "method not defined").
-        _ => debug_assert!(false, "OSCE method {method} not defined"),
+        _ => celt_assert!(false, "OSCE method {method} not defined"),
     }
     h_osce.method = method;
     h_osce.features.reset = 2;
@@ -1790,7 +1790,7 @@ pub fn osce_bwe(
     let mut features = [0f32; 2 * OSCE_BWE_FEATURE_DIM];
 
     // Currently restricting to 10 or 20 ms frames.
-    debug_assert!(xq16_len == 160 || xq16_len == 320);
+    celt_assert!(xq16_len == 160 || xq16_len == 320);
 
     let num_frames = xq16_len / 160;
 
@@ -1981,7 +1981,7 @@ pub fn osce_enhance_frame(
         ),
         _ => {
             // C: celt_assert(0 && "method not defined") and an uninitialized out_buffer.
-            debug_assert!(false, "OSCE method {method} not defined");
+            celt_assert!(false, "OSCE method {method} not defined");
             out_buffer.copy_from_slice(&in_buffer);
         }
     }

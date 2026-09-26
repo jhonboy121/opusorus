@@ -124,8 +124,8 @@ pub fn silk_init_decoder(ps_dec: &mut SilkDecoderState) -> i32 {
 pub fn silk_decoder_set_fs(ps_dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz: i32) -> i32 {
     let mut ret = 0;
 
-    debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
-    debug_assert!(ps_dec.nb_subfr == MAX_NB_SUBFR || ps_dec.nb_subfr == MAX_NB_SUBFR / 2);
+    celt_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
+    celt_assert!(ps_dec.nb_subfr == MAX_NB_SUBFR || ps_dec.nb_subfr == MAX_NB_SUBFR / 2);
 
     // New (sub)frame length
     ps_dec.subfr_length = silk_smulbb(SUB_FRAME_LENGTH_MS, fs_khz);
@@ -173,7 +173,7 @@ pub fn silk_decoder_set_fs(ps_dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz
                 ps_dec.pitch_lag_low_bits_icdf = &SILK_UNIFORM4_ICDF;
             } else {
                 // unsupported sampling rate
-                debug_assert!(false, "unsupported sampling rate");
+                celt_assert!(false, "unsupported sampling rate");
             }
             ps_dec.first_frame_after_reset = 1;
             ps_dec.lag_prev = 100;
@@ -188,7 +188,7 @@ pub fn silk_decoder_set_fs(ps_dec: &mut SilkDecoderState, fs_khz: i32, fs_api_hz
     }
 
     // Check that settings are valid
-    debug_assert!(ps_dec.frame_length > 0 && ps_dec.frame_length <= MAX_FRAME_LENGTH);
+    celt_assert!(ps_dec.frame_length > 0 && ps_dec.frame_length <= MAX_FRAME_LENGTH);
 
     ret
 }
@@ -220,7 +220,7 @@ pub fn silk_decode_frame(
     ps_dec_ctrl.ltp_scale_q14 = 0;
 
     // Safety checks
-    debug_assert!(l > 0 && l <= MAX_FRAME_LENGTH);
+    celt_assert!(l > 0 && l <= MAX_FRAME_LENGTH);
     let lu = l as usize;
 
     if lost_flag == FLAG_DECODE_NORMAL
@@ -274,7 +274,7 @@ pub fn silk_decode_frame(
 
         ps_dec.loss_cnt = 0;
         ps_dec.prev_signal_type = ps_dec.indices.signal_type as i32;
-        debug_assert!(ps_dec.prev_signal_type >= 0 && ps_dec.prev_signal_type <= 2);
+        celt_assert!(ps_dec.prev_signal_type >= 0 && ps_dec.prev_signal_type <= 2);
 
         // A frame has been decoded without errors
         ps_dec.first_frame_after_reset = 0;
@@ -317,7 +317,7 @@ pub fn silk_decode_frame(
 /// The "Update output buffer" block of silk_decode_frame: shifts `outBuf` by one frame and
 /// appends the new frame.
 fn update_out_buf(ps_dec: &mut SilkDecoderState, p_out: &[i16]) {
-    debug_assert!(ps_dec.ltp_mem_length >= ps_dec.frame_length);
+    celt_assert!(ps_dec.ltp_mem_length >= ps_dec.frame_length);
     let frame_length = ps_dec.frame_length as usize;
     let mv_len = (ps_dec.ltp_mem_length - ps_dec.frame_length) as usize;
     ps_dec
@@ -353,7 +353,7 @@ pub fn silk_decode_core(
     let mut res_q14 = [0i32; MSFL];
     let mut s_lpc_q14 = [0i32; MSFL + MLPC];
 
-    debug_assert!(ps_dec.prev_gain_q16 != 0);
+    silk_assert!(ps_dec.prev_gain_q16 != 0);
 
     let offset_q10 = SILK_QUANTIZATION_OFFSETS_Q10[(ps_dec.indices.signal_type >> 1) as usize]
         [ps_dec.indices.quant_offset_type as usize] as i32;
@@ -411,7 +411,7 @@ pub fn silk_decode_core(
         };
 
         // Save inv_gain
-        debug_assert!(inv_gain_q31 != 0);
+        silk_assert!(inv_gain_q31 != 0);
         ps_dec.prev_gain_q16 = ps_dec_ctrl.gains_q16[k];
 
         // Avoid abrupt transition from voiced PLC to unvoiced normal decoding
@@ -435,7 +435,7 @@ pub fn silk_decode_core(
             if k == 0 || (k == 2 && nlsf_interpolation_flag != 0) {
                 // Rewhiten with new A coefs
                 let start_idx = ps_dec.ltp_mem_length - lag - ps_dec.lpc_order - LTP_ORDER / 2;
-                debug_assert!(start_idx > 0);
+                celt_assert!(start_idx > 0);
                 let start_idx = start_idx as usize;
 
                 if k == 2 {
@@ -501,7 +501,7 @@ pub fn silk_decode_core(
         };
 
         // Short-term prediction
-        debug_assert!(lpc_order == 10 || lpc_order == 16);
+        celt_assert!(lpc_order == 10 || lpc_order == 16);
         let xq_sub = &mut xq[pxq..pxq + subfr_length];
         if lpc_order == 16 {
             decode_core_lpc_synthesis::<16>(&mut s_lpc_q14, &a_q12_tmp, pres_q14, xq_sub, gain_q10);
@@ -610,7 +610,7 @@ pub fn silk_decode_indices(
         cb,
         ps_dec.indices.nlsf_indices[0] as i32,
     );
-    debug_assert!(cb.order as i32 == ps_dec.lpc_order);
+    celt_assert!(cb.order as i32 == ps_dec.lpc_order);
     for i in 0..cb.order as usize {
         let mut ix = ps_range_dec.dec_icdf(&cb.ec_icdf[ec_ix[i] as usize..], 8) as i32;
         if ix == 0 {
@@ -1087,7 +1087,7 @@ impl SilkDecoder {
         let mut ms_pred_q13 = [0i32; 2];
         let mut n_samples_out_dec: i32 = 0;
 
-        debug_assert!(dec_control.n_channels_internal == 1 || dec_control.n_channels_internal == 2);
+        celt_assert!(dec_control.n_channels_internal == 1 || dec_control.n_channels_internal == 2);
         let nci = dec_control.n_channels_internal as usize;
         let nca = dec_control.n_channels_api as usize;
 
@@ -1116,15 +1116,20 @@ impl SilkDecoder {
                     20 => (1, 4),
                     40 => (2, 4),
                     60 => (3, 4),
-                    // C: celt_assert( 0 ) before returning (not reproduced so the error path
-                    // stays reachable, as in a C build without assertions).
-                    _ => return SILK_DEC_INVALID_FRAME_SIZE,
+                    // C: celt_assert( 0 ) before returning (a hard check only with the feature
+                    // `assertions`, so the error path stays reachable otherwise, as in a C build
+                    // without assertions).
+                    _ => {
+                        assertion_failure!("0");
+                        return SILK_DEC_INVALID_FRAME_SIZE;
+                    }
                 };
                 cs.n_frames_per_packet = n_frames_per_packet;
                 cs.nb_subfr = nb_subfr;
                 let fs_khz_dec = (dec_control.internal_sample_rate >> 10) + 1;
                 if fs_khz_dec != 8 && fs_khz_dec != 12 && fs_khz_dec != 16 {
                     // C: celt_assert( 0 ) (see above)
+                    assertion_failure!("0");
                     return SILK_DEC_INVALID_SAMPLING_FREQUENCY;
                 }
                 ret += silk_decoder_set_fs(cs, fs_khz_dec, dec_control.api_sample_rate);
@@ -1340,7 +1345,7 @@ impl SilkDecoder {
             #[cfg(feature = "osce")]
             if osce_ctl.osce_extended_mode == OSCE_MODE_SILK_BBWE {
                 // Resample or extend decoded signal to API_sampleRate
-                debug_assert!(dec_control.api_sample_rate == 48000);
+                silk_assert!(dec_control.api_sample_rate == 48000);
 
                 if osce_ctl.prev_osce_extended_mode != OSCE_MODE_SILK_BBWE {
                     // Reset the BWE state

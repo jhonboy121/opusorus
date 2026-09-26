@@ -146,8 +146,12 @@ const fn demo_weights() -> Option<&'static [u8]> {
     None
 }
 
-/// Runs the Rust `opus_demo` in-process.
+/// Runs the Rust `opus_demo` in-process. In a fuzzing build (`FUZZING`) the encoder and the
+/// tool share a process-wide `rand()` generator, as in C, so the runs are serialized (a C
+/// `opus_demo` process has the generator to itself).
 fn rust_demo(args: &[String]) -> Run {
+    static FUZZING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = cfg!(feature = "fuzzing").then(|| FUZZING_LOCK.lock().unwrap());
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = opus_demo_main_with_weights(args, &mut out, &mut err, demo_weights()).unwrap();
@@ -348,9 +352,18 @@ fn run_vectors_report(rate: u32, steps: &[&VectorStep]) -> (String, bool) {
     (report, true)
 }
 
+/// The conformance vector set of this build: RFC 8251's, or with `disable-rfc8251`
+/// (`DISABLE_UPDATE_DRAFT`) the original RFC 6716 vectors (`opus_testvectors.tar.gz`, stereo
+/// references only).
+const VECTOR_SET: &str = if cfg!(feature = "disable-rfc8251") {
+    "rfc6716"
+} else {
+    "rfc8251"
+};
+
 #[test]
 fn rfc8251_vectors() {
-    let Some(vectors) = vectors_dir("rfc8251") else {
+    let Some(vectors) = vectors_dir(VECTOR_SET) else {
         eprintln!("No test vectors found (run scripts/fetch_vectors.sh); skipping");
         return;
     };
@@ -526,6 +539,11 @@ fn opushd_vectors() {
                     known.push(name);
                 } else if RES16 && name.starts_with("testvector") && at_16bit_floor(log) {
                     res16.push(name);
+                } else if cfg!(feature = "disable-rfc8251") && name.starts_with("testvector") {
+                    // The 96 kHz references are RFC 8251 decoder output; the RFC 6716 decoder
+                    // (`DISABLE_UPDATE_DRAFT`) differs (its output is compared with C in
+                    // `opus_decoder.rs`).
+                    known.push(name);
                 } else {
                     failed.push(name);
                 }
@@ -549,14 +567,16 @@ fn opushd_vectors() {
     } else if known.is_empty() {
         println!("All other tests have passed successfully");
     } else {
-        let rfc = if res16.is_empty() {
+        let rfc = if cfg!(feature = "disable-rfc8251") {
+            "RFC 6716 decoder (disable-rfc8251): the RFC vectors at 96 kHz are listed below"
+        } else if res16.is_empty() {
             "All RFC vectors at 96 kHz passed"
         } else {
             "The other RFC vectors at 96 kHz passed"
         };
         println!(
-            "{rfc}; {} Opus HD vectors stop with the range coder mismatch that libopus 1.6.1's \
-             own opus_demo reports on them: {known:?}",
+            "{rfc}; {} vectors do not match (Opus HD vectors: the range coder mismatch that \
+             libopus 1.6.1's own opus_demo reports on them): {known:?}",
             known.len()
         );
     }
@@ -588,6 +608,11 @@ fn lib_config_matches(lib: &[u8]) -> bool {
         // DISABLE_FLOAT_API oracles have no src/analysis.c; FIXED_DEBUG ones the capture shim.
         && has(b"tonality_analysis_init") != cfg!(feature = "disable-float-api")
         && has(b"oracle_fixed_debug_fprintf") == cfg!(feature = "fixed-point-debug")
+        // Marker symbols of csrc/build_options.c.
+        && has(b"opusorus_oracle_float_approx") == cfg!(feature = "float-approx")
+        && has(b"opusorus_oracle_assertions") == cfg!(feature = "assertions")
+        && has(b"opusorus_oracle_fuzzing") == cfg!(feature = "fuzzing")
+        && has(b"opusorus_oracle_disable_update_draft") == cfg!(feature = "disable-rfc8251")
 }
 
 /// The oracle `libopus.a` files whose optional components match this crate's features
@@ -717,6 +742,10 @@ fn build_c_opus_demo() -> Option<PathBuf> {
         (cfg!(feature = "osce"), "_osce"),
         (DNN && cfg!(feature = "dnn-debug-float"), "_dbgfloat"),
         (cfg!(feature = "lossgen"), "_lossgen"),
+        (cfg!(feature = "float-approx"), "_fapprox"),
+        (cfg!(feature = "assertions"), "_assert"),
+        (cfg!(feature = "fuzzing"), "_fuzz"),
+        (cfg!(feature = "disable-rfc8251"), "_no8251"),
     ] {
         if on {
             tag.push_str(t);
@@ -813,6 +842,8 @@ fn normalize_version(stderr: &str) -> String {
     if let Some(first) = lines.first_mut()
         && (*first == "libopus unknown\n"
             || *first == "libopus unknown-fixed\n"
+            || *first == "libopus unknown-fuzzing\n"
+            || *first == "libopus unknown-fixed-fuzzing\n"
             || *first == format!("{}\n", opusorus::celt::celt::opus_get_version_string()))
     {
         *first = "libopus <version>\n";

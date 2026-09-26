@@ -328,6 +328,10 @@ impl DecPair {
 
 /// Stereo `Encoder` with `OPUS_SET_LFE(1)`: bit-exact with C (see the module docs).
 #[test]
+#[cfg_attr(
+    all(feature = "fixed-point", feature = "assertions"),
+    ignore = "ENABLE_ASSERTIONS: the negative stereo energies fail a celt_sig_assert (C aborts)"
+)]
 fn lfe_stereo_encoder_matches_c() {
     let mut rng = Rng::new(0x1fe5_7e2e);
     let mut packets = 0;
@@ -849,6 +853,11 @@ fn run_case(kind: &str, f: CaseFn, i: usize) -> Result<(), String> {
 }
 
 #[test]
+#[cfg_attr(
+    all(feature = "fixed-point", feature = "assertions"),
+    ignore = "ENABLE_ASSERTIONS: the stereo LFE / extreme-input cases whose energies wrap fail a \
+              celt_sig_assert in C (abort) and in the port (panic)"
+)]
 fn public_api_sweep() {
     let kinds: [(&str, CaseFn, usize); 4] = [
         ("enc", encoder_case, 300),
@@ -916,6 +925,11 @@ fn public_api_sweep() {
 /// int conversions of such values are implementation-defined, so this is Rust-only), and
 /// random or full-scale 24-bit samples. Nothing may panic, in any build.
 #[test]
+#[cfg_attr(
+    all(feature = "fixed-point", feature = "assertions"),
+    ignore = "ENABLE_ASSERTIONS: the stereo LFE / extreme-input cases whose energies wrap fail a \
+              celt_sig_assert in C (abort) and in the port (panic)"
+)]
 fn extreme_input_no_panic() {
     let specials = [
         1e30f32,

@@ -218,7 +218,8 @@ fn filters_and_fades() {
         let mut dc_r = [Val32::default(); 4];
         let mut dc_c = [Val32::default(); 4];
         for _ in 0..3 {
-            let cutoff = rng.range_i32(20, 200);
+            // Up to the limit of hp_cutoff's `silk_assert( Fc_Q19 > 0 && Fc_Q19 < 32768 )`.
+            let cutoff = rng.range_i32(20, 200.min(13 * fs / 1000));
             let mut out_r = vec![Res::default(); n];
             let mut out_c = vec![Res::default(); n];
             oe::hp_cutoff(&input, cutoff, &mut out_r, &mut mem_r, len, ch, fs);
@@ -670,8 +671,10 @@ fn rust_encode(
 
 /// Whether `OPUS_SET_LFE(1)` may be used on an encoder with `ch` channels: always. (Stereo LFE in
 /// fixed-point builds overflows in C; the port wraps those operations exactly like C does.)
-const fn lfe_allowed(_ch: i32) -> bool {
-    true
+/// Except stereo in fixed-point builds with `assertions` (`ENABLE_ASSERTIONS`): the wrapped
+/// energies then fail a `celt_sig_assert` (C aborts, the port panics).
+const fn lfe_allowed(ch: i32) -> bool {
+    !(cfg!(all(feature = "fixed-point", feature = "assertions")) && ch == 2)
 }
 
 /// A random CTL (mostly valid values, some invalid) for an encoder with `ch` channels.

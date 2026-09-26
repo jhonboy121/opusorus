@@ -19,6 +19,8 @@ fixed-point = []
 # 24-bit `opus_res` (`ENABLE_RES24`, autotools' default for fixed-point; CMake never sets it, so
 # it is passed in `CMAKE_C_FLAGS` like `ENABLE_QEXT`).
 fixed-res24 = ["fixed-point"]
+# `FLOAT_APPROX` in both C libraries (CMake `OPUS_FLOAT_APPROX=ON` for the optimized one).
+float-approx = []
 
 [build-dependencies]
 cc = { version = "1", features = ["parallel"] }

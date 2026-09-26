@@ -432,7 +432,7 @@ pub fn silk_decode_pulses(
     const { assert!(1 << LOG2_SHELL_CODEC_FRAME_LENGTH == SHELL_CODEC_FRAME_LENGTH) };
     let mut iter = silk_rshift(frame_length, LOG2_SHELL_CODEC_FRAME_LENGTH) as usize;
     if (iter as i32) * SHELL_CODEC_FRAME_LENGTH < frame_length {
-        debug_assert!(frame_length == 12 * 10); // Make sure only happens for 10 ms @ 12 kHz
+        celt_assert!(frame_length == 12 * 10); // Make sure only happens for 10 ms @ 12 kHz
         iter += 1;
     }
 
@@ -554,7 +554,7 @@ pub fn silk_encode_pulses(
     const { assert!(1 << LOG2_SHELL_CODEC_FRAME_LENGTH == SHELL_CODEC_FRAME_LENGTH) };
     let mut iter = silk_rshift(frame_length, LOG2_SHELL_CODEC_FRAME_LENGTH) as usize;
     if (iter as i32) * SHELL_CODEC_FRAME_LENGTH < frame_length {
-        debug_assert!(frame_length == 12 * 10); // Make sure only happens for 10 ms @ 12 kHz
+        celt_assert!(frame_length == 12 * 10); // Make sure only happens for 10 ms @ 12 kHz
         iter += 1;
         let fl = frame_length as usize;
         pulses[fl..fl + SCFL].fill(0);
@@ -696,7 +696,7 @@ pub fn silk_decode_pitch(
         if nb_subfr == PE_MAX_NB_SUBFR {
             (SILK_CB_LAGS_STAGE2.as_flattened(), PE_NB_CBKS_STAGE2_EXT)
         } else {
-            debug_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
+            celt_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
             (
                 SILK_CB_LAGS_STAGE2_10_MS.as_flattened(),
                 PE_NB_CBKS_STAGE2_10MS,
@@ -705,7 +705,7 @@ pub fn silk_decode_pitch(
     } else if nb_subfr == PE_MAX_NB_SUBFR {
         (SILK_CB_LAGS_STAGE3.as_flattened(), PE_NB_CBKS_STAGE3_MAX)
     } else {
-        debug_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
+        celt_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
         (
             SILK_CB_LAGS_STAGE3_10_MS.as_flattened(),
             PE_NB_CBKS_STAGE3_10MS,
@@ -769,11 +769,11 @@ pub fn silk_stereo_decode_mid_only(ps_range_dec: &mut EcDec<'_>) -> i32 {
 pub fn silk_stereo_encode_pred(ps_range_enc: &mut EcEnc<'_>, ix: &[[i8; 3]; 2]) {
     // Entropy coding
     let n = 5 * ix[0][2] as i32 + ix[1][2] as i32;
-    debug_assert!(n < 25);
+    celt_assert!(n < 25);
     ps_range_enc.enc_icdf(n as usize, &SILK_STEREO_PRED_JOINT_ICDF, 8);
     for n in 0..2 {
-        debug_assert!(ix[n][0] < 3);
-        debug_assert!((ix[n][1] as i32) < STEREO_QUANT_SUB_STEPS);
+        celt_assert!(ix[n][0] < 3);
+        celt_assert!((ix[n][1] as i32) < STEREO_QUANT_SUB_STEPS);
         ps_range_enc.enc_icdf(ix[n][0] as usize, &SILK_UNIFORM3_ICDF, 8);
         ps_range_enc.enc_icdf(ix[n][1] as usize, &SILK_UNIFORM5_ICDF, 8);
     }

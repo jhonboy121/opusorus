@@ -877,6 +877,14 @@ fn invalid_control() {
         let mut d = SilkDecoder::new();
         let mut ctrl = ctrl;
         let mut ec = EcDec::new(payload);
+        if cfg!(feature = "assertions") {
+            // ENABLE_ASSERTIONS: the `celt_assert( 0 )` is a hard check, like C's abort.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                d.silk_decode(&mut ctrl, 0, 1, &mut ec, &mut out, &mut n)
+            }));
+            assert!(r.is_err(), "{ctrl:?}: no assertion failure");
+            continue;
+        }
         assert_eq!(
             d.silk_decode(&mut ctrl, 0, 1, &mut ec, &mut out, &mut n),
             want,

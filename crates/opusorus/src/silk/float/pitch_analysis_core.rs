@@ -89,10 +89,12 @@ pub fn silk_pitch_analysis_core_flp(
     let mut cross_corr_st3: Stage3Array = [[[0.0; NB_ST3_LAGS]; NB_CBKS3_MAX]; PMNS];
 
     // Check for valid sampling frequency
-    debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
+    celt_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
     // Check for valid complexity setting
-    debug_assert!(complexity >= SILK_PE_MIN_COMPLEX);
-    debug_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+    celt_assert!(complexity >= SILK_PE_MIN_COMPLEX);
+    celt_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+
+    silk_assert!((0.0f32..=1.0f32).contains(&search_thres1));
 
     let nsf = nb_subfr as usize;
 
@@ -136,7 +138,7 @@ pub fn silk_pitch_analysis_core_flp(
         );
         silk_short2float_array(&mut frame_8khz, &frame_8_fix, frame_length_8khz);
     } else {
-        debug_assert!(fs_khz == 8);
+        celt_assert!(fs_khz == 8);
         silk_float2short_array(&mut frame_8_fix, frame, frame_length_8khz);
     }
 
@@ -206,7 +208,7 @@ pub fn silk_pitch_analysis_core_flp(
 
     // Sort
     let mut length_d_srch = (4 + 2 * complexity) as usize;
-    debug_assert!(3 * length_d_srch <= PE_D_SRCH_LENGTH as usize);
+    celt_assert!(3 * length_d_srch <= PE_D_SRCH_LENGTH as usize);
     silk_insertion_sort_decreasing_flp(
         &mut c[0][min_lag_4khz as usize..],
         &mut d_srch,
@@ -234,7 +236,7 @@ pub fn silk_pitch_analysis_core_flp(
             break;
         }
     }
-    debug_assert!(length_d_srch > 0);
+    celt_assert!(length_d_srch > 0);
 
     for i in (min_lag_8khz - 5) as usize..(max_lag_8khz + 5) as usize {
         d_comp[i] = 0;
@@ -394,7 +396,7 @@ pub fn silk_pitch_analysis_core_flp(
         // Search in original signal
 
         // Compensate for decimation
-        debug_assert!(lag == silk_sat16(lag));
+        silk_assert!(lag == silk_sat16(lag));
         if fs_khz == 12 {
             lag = silk_rshift_round(silk_smulbb(lag, 3), 1);
         } else {
@@ -428,7 +430,7 @@ pub fn silk_pitch_analysis_core_flp(
             complexity,
         );
 
-        debug_assert!(lag == silk_sat16(lag));
+        silk_assert!(lag == silk_sat16(lag));
         let contour_bias = PE_FLATCONTOUR_BIAS / lag as f32;
 
         // Set up cbk parameters according to complexity setting and frame length
@@ -495,7 +497,7 @@ pub fn silk_pitch_analysis_core_flp(
         *lag_index = (lag - min_lag_8khz) as i16;
         *contour_index = cbimax as i8;
     }
-    debug_assert!(*lag_index >= 0);
+    celt_assert!(*lag_index >= 0);
     // return as voiced
     0
 }
@@ -512,7 +514,7 @@ fn stage3_tables(nb_subfr: i32, complexity: i32) -> (LagCb<'static>, &'static [i
             SILK_NB_CBK_SEARCHS_STAGE3[complexity as usize] as usize,
         )
     } else {
-        debug_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
+        celt_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
         (
             LagCb {
                 data: SILK_CB_LAGS_STAGE3_10_MS.as_flattened(),
@@ -537,8 +539,8 @@ pub fn silk_p_ana_calc_corr_st3(
     let mut scratch_mem = [0f32; SCRATCH_SIZE];
     let mut xcorr = [0f32; SCRATCH_SIZE];
 
-    debug_assert!(complexity >= SILK_PE_MIN_COMPLEX);
-    debug_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+    celt_assert!(complexity >= SILK_PE_MIN_COMPLEX);
+    celt_assert!(complexity <= SILK_PE_MAX_COMPLEX);
 
     let (lag_cb, lag_range, nb_cbk_search) = stage3_tables(nb_subfr, complexity);
 
@@ -547,7 +549,7 @@ pub fn silk_p_ana_calc_corr_st3(
         // Calculate the correlations for each subframe
         let lag_low = lag_range[k * 2] as i32;
         let lag_high = lag_range[k * 2 + 1] as i32;
-        debug_assert!((lag_high - lag_low + 1) as usize <= SCRATCH_SIZE);
+        silk_assert!((lag_high - lag_low + 1) as usize <= SCRATCH_SIZE);
         celt_pitch_xcorr(
             &frame[target..],
             &frame[target - (start_lag + lag_high) as usize..],
@@ -582,8 +584,8 @@ pub fn silk_p_ana_calc_energy_st3(
 ) {
     let mut scratch_mem = [0f32; SCRATCH_SIZE];
 
-    debug_assert!(complexity >= SILK_PE_MIN_COMPLEX);
-    debug_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+    celt_assert!(complexity >= SILK_PE_MIN_COMPLEX);
+    celt_assert!(complexity <= SILK_PE_MAX_COMPLEX);
 
     let (lag_cb, lag_range, nb_cbk_search) = stage3_tables(nb_subfr, complexity);
 
@@ -616,6 +618,9 @@ pub fn silk_p_ana_calc_energy_st3(
             // for each start lag
             let idx = (lag_cb.at(k, i) - delta) as usize;
             energies_st3[k][i].copy_from_slice(&scratch_mem[idx..idx + NB_ST3_LAGS]);
+            for &e in &energies_st3[k][i] {
+                silk_assert!(e >= 0.0f32);
+            }
         }
         target += sf_length;
     }

@@ -647,7 +647,7 @@ pub fn unquant_coarse_energy(
     // Decode at a fixed coarse resolution
     for i in start..end {
         for ch in 0..c {
-            debug_assert!(ch < 2);
+            celt_sig_assert!(ch < 2);
             let idx = (i + ch * nb) as usize;
             let tell = dec.tell();
             let qi: i32 = if budget - tell >= 15 {

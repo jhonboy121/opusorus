@@ -180,7 +180,7 @@ pub fn dred_process_frame(enc: &mut DredEnc) {
     let mut feature_buffer = [0f32; 2 * 36];
     let mut input_buffer = [0f32; 2 * DRED_NUM_FEATURES];
 
-    debug_assert!(enc.loaded);
+    celt_assert!(enc.loaded);
     // shift latents buffer
     enc.latents_buffer
         .copy_within(0..(DRED_MAX_FRAMES - 1) * DRED_LATENT_DIM, DRED_LATENT_DIM);
@@ -383,8 +383,8 @@ fn dred_convert_to_16k(
     out: &mut [f32],
     out_len: usize,
 ) {
-    debug_assert!(enc_channels as usize * in_len <= MAX_DOWNMIX_BUFFER);
-    debug_assert!(in_len as i64 * 16000 == out_len as i64 * i64::from(enc_fs));
+    celt_assert!(enc_channels as usize * in_len <= MAX_DOWNMIX_BUFFER);
+    celt_assert!(in_len as i64 * 16000 == out_len as i64 * i64::from(enc_fs));
     let up: usize = match enc_fs {
         8000 => 2,
         12000 => 4,
@@ -394,12 +394,12 @@ fn dred_convert_to_16k(
         #[cfg(feature = "qext")]
         96000 => 1,
         _ => {
-            debug_assert!(false, "unsupported DRED rate {enc_fs}");
+            celt_assert!(false, "unsupported DRED rate {enc_fs}");
             // C leaves `up` uninitialized and later asserts again; bail out.
             return;
         }
     };
-    debug_assert!(up * in_len <= MAX_DOWNMIX_BUFFER);
+    celt_assert!(up * in_len <= MAX_DOWNMIX_BUFFER);
     downmix[..up * in_len].fill(0.0);
     if enc_channels == 1 {
         for i in 0..in_len {
@@ -472,7 +472,7 @@ fn dred_convert_to_16k(
             }
             return;
         }
-        debug_assert!(false, "unsupported DRED rate {enc_fs}");
+        celt_assert!(false, "unsupported DRED rate {enc_fs}");
     }
 }
 
@@ -486,7 +486,7 @@ fn dred_convert_to_16k(
 /// `process_size` samples, not `process_size*channels`, so stereo input is re-read.
 pub fn dred_compute_latents(enc: &mut DredEnc, pcm: &[f32], frame_size: i32, extra_delay: i32) {
     let mut frame_size16k = frame_size * 16000 / enc.fs;
-    debug_assert!(enc.loaded);
+    celt_assert!(enc.loaded);
     let curr_offset16k = 40 + extra_delay * 16000 / enc.fs - enc.input_buffer_fill;
     enc.dred_offset = math::floor(f64::from((curr_offset16k as f32 + 20.0f32) / 40.0f32)) as i32;
     enc.latent_offset = 0;
@@ -637,7 +637,7 @@ pub fn dred_encode_silk_frame(
     ec_encoder.enc_uint(q0 as u32, 16);
     ec_encoder.enc_uint(dq as u32, 8);
     let total_offset = 16 - (enc.dred_offset - extra_dred_offset * 8);
-    debug_assert!(total_offset >= 0);
+    celt_assert!(total_offset >= 0);
     if total_offset > 31 {
         ec_encoder.enc_uint(1, 2);
         ec_encoder.enc_uint((total_offset >> 5) as u32, 256);
@@ -646,10 +646,10 @@ pub fn dred_encode_silk_frame(
         ec_encoder.enc_uint(0, 2);
         ec_encoder.enc_uint(total_offset as u32, 32);
     }
-    debug_assert!(qmax >= q0);
+    celt_assert!(qmax >= q0);
     if q0 < 14 && dq > 0 {
         // If you want to use qmax == q0, you should have set dQ = 0.
-        debug_assert!(qmax > q0);
+        celt_assert!(qmax > q0);
         let nvals = 15 - (q0 + 1);
         let (fl, fh) = if qmax >= 15 {
             (0, nvals)

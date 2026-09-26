@@ -217,10 +217,10 @@ pub fn adaconv_process_frame(
     let mut channel_buffer1 = [0f32; ADACONV_MAX_FRAME_SIZE];
     let mut gain_buffer = [0f32; ADACONV_MAX_OUTPUT_CHANNELS];
 
-    debug_assert!(shape_gain == 1.0);
+    celt_assert!(shape_gain == 1.0);
     // Currently only supports the causal version.
-    debug_assert!(left_padding + 1 == kernel_size);
-    debug_assert!(kernel_size < frame_size);
+    celt_assert!(left_padding + 1 == kernel_size);
+    celt_assert!(kernel_size < frame_size);
 
     // Prepare input.
     {
@@ -435,9 +435,9 @@ pub fn adashape_process_frame(
     let hidden_dim = frame_size / interpolate_k;
     let f = 1.0f32 / avg_pool_k as f32;
 
-    debug_assert!(frame_size.is_multiple_of(avg_pool_k));
-    debug_assert!(frame_size.is_multiple_of(interpolate_k));
-    debug_assert!(feature_dim + frame_size / avg_pool_k + 1 < ADASHAPE_MAX_INPUT_DIM);
+    celt_assert!(frame_size.is_multiple_of(avg_pool_k));
+    celt_assert!(frame_size.is_multiple_of(interpolate_k));
+    celt_assert!(feature_dim + frame_size / avg_pool_k + 1 < ADASHAPE_MAX_INPUT_DIM);
 
     let tenv_size = frame_size / avg_pool_k;
     // tenv = in_buffer + feature_dim

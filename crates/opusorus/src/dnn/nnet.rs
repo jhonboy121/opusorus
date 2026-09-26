@@ -97,10 +97,10 @@ pub fn compute_generic_gru(
 ) {
     let mut zrh = [0f32; 3 * MAX_RNN_NEURONS_ALL];
     let mut recur = [0f32; 3 * MAX_RNN_NEURONS_ALL];
-    debug_assert!(3 * recurrent_weights.nb_inputs == recurrent_weights.nb_outputs);
-    debug_assert!(input_weights.nb_outputs == recurrent_weights.nb_outputs);
+    celt_assert!(3 * recurrent_weights.nb_inputs == recurrent_weights.nb_outputs);
+    celt_assert!(input_weights.nb_outputs == recurrent_weights.nb_outputs);
     let n = recurrent_weights.nb_inputs;
-    debug_assert!(recurrent_weights.nb_outputs <= 3 * MAX_RNN_NEURONS_ALL);
+    celt_assert!(recurrent_weights.nb_outputs <= 3 * MAX_RNN_NEURONS_ALL);
     let zrh = &mut zrh[..3 * n];
     let recur = &mut recur[..3 * n];
     let state = &mut state[..n];
@@ -126,7 +126,7 @@ pub fn compute_generic_gru(
 /// Port of dnn/nnet.c:compute_glu (`output != input`).
 pub fn compute_glu(layer: &LinearLayer, output: &mut [f32], input: &[f32]) {
     let mut act2 = [0f32; MAX_INPUTS];
-    debug_assert!(layer.nb_inputs == layer.nb_outputs);
+    celt_assert!(layer.nb_inputs == layer.nb_outputs);
     let n = layer.nb_outputs;
     let act2 = &mut act2[..n];
     compute_linear(layer, act2, input);
@@ -139,7 +139,7 @@ pub fn compute_glu(layer: &LinearLayer, output: &mut [f32], input: &[f32]) {
 /// Port of dnn/nnet.c:compute_glu for the in-place calls (`output == input`).
 pub fn compute_glu_inplace(layer: &LinearLayer, x: &mut [f32]) {
     let mut act2 = [0f32; MAX_INPUTS];
-    debug_assert!(layer.nb_inputs == layer.nb_outputs);
+    celt_assert!(layer.nb_inputs == layer.nb_outputs);
     let n = layer.nb_outputs;
     let act2 = &mut act2[..n];
     compute_linear(layer, act2, x);
@@ -163,7 +163,7 @@ pub fn compute_generic_conv1d(
     activation: i32,
 ) {
     let mut tmp = [0f32; MAX_CONV_INPUTS_ALL];
-    debug_assert!(layer.nb_inputs <= MAX_CONV_INPUTS_ALL);
+    celt_assert!(layer.nb_inputs <= MAX_CONV_INPUTS_ALL);
     let nb_inputs = layer.nb_inputs;
     let hist = nb_inputs - input_size;
     let tmp = &mut tmp[..nb_inputs];
@@ -193,7 +193,7 @@ pub fn compute_generic_conv1d_dilation(
     let mut tmp = [0f32; MAX_CONV_INPUTS_ALL];
     let nb_inputs = layer.nb_inputs;
     let ksize = nb_inputs / input_size;
-    debug_assert!(nb_inputs <= MAX_CONV_INPUTS_ALL);
+    celt_assert!(nb_inputs <= MAX_CONV_INPUTS_ALL);
     let tmp = &mut tmp[..nb_inputs];
     let hist = nb_inputs - input_size;
     if dilation == 1 {

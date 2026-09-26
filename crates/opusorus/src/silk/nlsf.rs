@@ -71,12 +71,12 @@ pub fn silk_nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
     let mut a32_qa1 = [0i32; SILK_MAX_ORDER_LPC];
 
     const { assert!(LSF_COS_TAB_SZ_FIX == 128) };
-    debug_assert!(d == 10 || d == 16);
+    celt_assert!(d == 10 || d == 16);
 
     // convert LSFs to 2*cos(LSF), using piecewise linear curve from table
     let ordering: &[u8] = if d == 16 { &ORDERING16 } else { &ORDERING10 };
     for k in 0..d {
-        debug_assert!(nlsf[k] >= 0);
+        silk_assert!(nlsf[k] >= 0);
 
         // f_int on a scale 0-127 (rounded down)
         let f_int = silk_rshift(nlsf[k] as i32, 15 - 7);
@@ -84,8 +84,8 @@ pub fn silk_nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
         // f_frac, range: 0..255
         let f_frac = nlsf[k] as i32 - silk_lshift(f_int, 15 - 7);
 
-        debug_assert!(f_int >= 0);
-        debug_assert!(f_int < LSF_COS_TAB_SZ_FIX);
+        silk_assert!(f_int >= 0);
+        silk_assert!(f_int < LSF_COS_TAB_SZ_FIX);
 
         // Read start and end value from table
         let cos_val = SILK_LSFCOSTAB_FIX_Q12[f_int as usize] as i32; // Q12
@@ -268,7 +268,7 @@ pub fn silk_a2nlsf(nlsf: &mut [i16], a_q16: &mut [i32], d: usize) {
             }
             nlsf[root_ix] = silk_min_32(silk_lshift(k as i32, 8) + ffrac, SILK_INT16_MAX) as i16;
 
-            debug_assert!(nlsf[root_ix] >= 0);
+            silk_assert!(nlsf[root_ix] >= 0);
 
             root_ix += 1; // Next root
             if root_ix >= d {
@@ -427,7 +427,7 @@ const MAX_LOOPS: i32 = 20;
 /// sorted. `ndelta_min_q15` has `l + 1` entries and `ndelta_min_q15[l]` must be >= 1.
 pub fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
     // This is necessary to ensure an output within range of a opus_int16
-    debug_assert!(ndelta_min_q15[l] >= 1);
+    silk_assert!(ndelta_min_q15[l] >= 1);
 
     let mut loops = 0;
     while loops < MAX_LOOPS {
@@ -526,8 +526,8 @@ pub fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usiz
 /// Port of silk/NLSF_VQ_weights_laroia.c:silk_NLSF_VQ_weights_laroia — Laroia low complexity
 /// NLSF weights (R. Laroia, N. Phamdo and N. Farvardin, ICASSP 1991).
 pub fn silk_nlsf_vq_weights_laroia(p_nlsfw_q_out: &mut [i16], p_nlsf_q15: &[i16], d: usize) {
-    debug_assert!(d > 0);
-    debug_assert!((d & 1) == 0);
+    celt_assert!(d > 0);
+    celt_assert!((d & 1) == 0);
 
     // First value
     let mut tmp1_int = silk_max_int(p_nlsf_q15[0] as i32, 1);
@@ -535,7 +535,7 @@ pub fn silk_nlsf_vq_weights_laroia(p_nlsfw_q_out: &mut [i16], p_nlsf_q15: &[i16]
     let mut tmp2_int = silk_max_int(p_nlsf_q15[1] as i32 - p_nlsf_q15[0] as i32, 1);
     tmp2_int = silk_div32_16(1i32 << (15 + NLSF_W_Q), tmp2_int);
     p_nlsfw_q_out[0] = silk_min_int(tmp1_int + tmp2_int, SILK_INT16_MAX) as i16;
-    debug_assert!(p_nlsfw_q_out[0] > 0);
+    silk_assert!(p_nlsfw_q_out[0] > 0);
 
     // Main loop
     let mut k = 1;
@@ -543,12 +543,12 @@ pub fn silk_nlsf_vq_weights_laroia(p_nlsfw_q_out: &mut [i16], p_nlsf_q15: &[i16]
         tmp1_int = silk_max_int(p_nlsf_q15[k + 1] as i32 - p_nlsf_q15[k] as i32, 1);
         tmp1_int = silk_div32_16(1i32 << (15 + NLSF_W_Q), tmp1_int);
         p_nlsfw_q_out[k] = silk_min_int(tmp1_int + tmp2_int, SILK_INT16_MAX) as i16;
-        debug_assert!(p_nlsfw_q_out[k] > 0);
+        silk_assert!(p_nlsfw_q_out[k] > 0);
 
         tmp2_int = silk_max_int(p_nlsf_q15[k + 2] as i32 - p_nlsf_q15[k + 1] as i32, 1);
         tmp2_int = silk_div32_16(1i32 << (15 + NLSF_W_Q), tmp2_int);
         p_nlsfw_q_out[k + 1] = silk_min_int(tmp1_int + tmp2_int, SILK_INT16_MAX) as i16;
-        debug_assert!(p_nlsfw_q_out[k + 1] > 0);
+        silk_assert!(p_nlsfw_q_out[k + 1] > 0);
         k += 2;
     }
 
@@ -556,7 +556,7 @@ pub fn silk_nlsf_vq_weights_laroia(p_nlsfw_q_out: &mut [i16], p_nlsf_q15: &[i16]
     tmp1_int = silk_max_int((1 << 15) - p_nlsf_q15[d - 1] as i32, 1);
     tmp1_int = silk_div32_16(1i32 << (15 + NLSF_W_Q), tmp1_int);
     p_nlsfw_q_out[d - 1] = silk_min_int(tmp1_int + tmp2_int, SILK_INT16_MAX) as i16;
-    debug_assert!(p_nlsfw_q_out[d - 1] > 0);
+    silk_assert!(p_nlsfw_q_out[d - 1] > 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -573,7 +573,7 @@ pub fn silk_nlsf_vq(
     k: usize,
     lpc_order: usize,
 ) {
-    debug_assert!((lpc_order & 1) == 0);
+    celt_assert!((lpc_order & 1) == 0);
 
     // Loop over codebook
     for i in 0..k {
@@ -600,7 +600,7 @@ pub fn silk_nlsf_vq(
             );
             pred_q24 = diffw_q24;
 
-            debug_assert!(sum_error_q24 >= 0);
+            silk_assert!(sum_error_q24 >= 0);
         }
         err_q24[i] = sum_error_q24;
     }
@@ -797,12 +797,12 @@ pub fn silk_nlsf_del_dec_quant(
     }
     for j in 0..order as usize {
         indices[j] = ind[ind_tmp & (NS - 1)][j];
-        debug_assert!(indices[j] as i32 >= -EXT);
-        debug_assert!(indices[j] as i32 <= EXT);
+        celt_assert!(indices[j] as i32 >= -EXT);
+        celt_assert!(indices[j] as i32 <= EXT);
     }
     indices[0] += (ind_tmp >> NLSF_QUANT_DEL_DEC_STATES_LOG2) as i8;
-    debug_assert!(indices[0] as i32 <= EXT);
-    debug_assert!(min_q25 >= 0);
+    celt_assert!(indices[0] as i32 <= EXT);
+    silk_assert!(min_q25 >= 0);
     min_q25
 }
 
@@ -830,8 +830,8 @@ pub fn silk_nlsf_encode(
     let mut pred_q8 = [0u8; MLPC];
     let mut ec_ix = [0i16; MLPC];
 
-    debug_assert!((0..=2).contains(&signal_type));
-    debug_assert!((0..=32767).contains(&nlsf_mu_q20));
+    celt_assert!((0..=2).contains(&signal_type));
+    celt_assert!((0..=32767).contains(&nlsf_mu_q20));
 
     let order = ps_nlsf_cb.order as usize;
     let n_vectors = ps_nlsf_cb.n_vectors as usize;

@@ -195,8 +195,20 @@ fn init_all_rate_pairs() {
                     batch_size: 99,
                     ..SilkResamplerState::default()
                 };
-                let ret = r::silk_resampler_init(&mut s, fin, fout, for_enc);
                 let what = format!("init({fin}, {fout}, {for_enc})");
+                if cfg!(feature = "assertions") && !c_accepts(fin, fout, for_enc) {
+                    // ENABLE_ASSERTIONS: the rejection is a `celt_assert( 0 )` (C aborts).
+                    let hook = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(|_| {}));
+                    let r = std::panic::catch_unwind(|| {
+                        let mut s = SilkResamplerState::default();
+                        r::silk_resampler_init(&mut s, fin, fout, for_enc)
+                    });
+                    std::panic::set_hook(hook);
+                    assert!(r.is_err(), "{what}: no assertion failure");
+                    continue;
+                }
+                let ret = r::silk_resampler_init(&mut s, fin, fout, for_enc);
                 assert_eq!(
                     SilkResamplerState::new(fin, fout, for_enc != 0).is_ok(),
                     ret == 0,

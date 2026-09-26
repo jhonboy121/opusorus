@@ -373,7 +373,7 @@ pub fn pitch_postprocessing(ps_features: &mut OsceFeatureState, lag: i32, type_:
     ps_features.last_type = type_;
 
     // "with the current setup this should never happen (but who knows...)"
-    debug_assert!(new_lag != 0);
+    celt_assert!(new_lag != 0);
 
     new_lag
 }
@@ -499,7 +499,7 @@ pub fn osce_bwe_calculate_features(
     let mut mag_spec = [0f32; OSCE_SPEC_NUM_FREQS];
 
     // OSCE_BWE_WINDOW_SIZE == 320 is a hard requirement.
-    debug_assert!(
+    celt_assert!(
         num_samples.is_multiple_of(OSCE_BWE_HALF_WINDOW_SIZE) && OSCE_BWE_WINDOW_SIZE == 320
     );
 
@@ -566,7 +566,7 @@ pub fn osce_bwe_calculate_features(
 /// Port of dnn/osce_features.c:osce_cross_fade_10ms: fades from `x_in` into `x_enhanced` over
 /// the first 160 samples (`length >= 160`).
 pub fn osce_cross_fade_10ms(x_enhanced: &mut [f32], x_in: &[f32], length: usize) {
-    debug_assert!(length >= 160);
+    celt_assert!(length >= 160);
     for ((e, &x), &w) in x_enhanced[..160]
         .iter_mut()
         .zip(&x_in[..160])
@@ -579,7 +579,7 @@ pub fn osce_cross_fade_10ms(x_enhanced: &mut [f32], x_in: &[f32], length: usize)
 /// Port of dnn/osce_features.c:osce_bwe_cross_fade_10ms: fades from `x_fadeout` into
 /// `x_fadein` over the first 480 (48 kHz) samples (`length >= 480`).
 pub fn osce_bwe_cross_fade_10ms(x_fadein: &mut [i16], x_fadeout: &[i16], length: usize) {
-    debug_assert!(length >= 480);
+    celt_assert!(length >= 480);
     let f = 1.0f32 / 3.0;
     let x_fadein = &mut x_fadein[..480];
     let x_fadeout = &x_fadeout[..480];

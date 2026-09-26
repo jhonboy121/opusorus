@@ -30,6 +30,10 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
 | No float API (no `*_float` entry points, no soft clip, no float tonality analysis in the encoder) | `disable-float-api` | upstream `--disable-float-api` (`DISABLE_FLOAT_API`); requires `fixed-point`, as upstream's float build does not compile with it |
 | Checking fixed-point arithmetic: every macro checks its operand ranges, reports libopus' diagnostic (stderr or a handler) and counts operations | `fixed-point-debug` | upstream `--enable-fixed-point-debug` (`FIXED_DEBUG`); implies `fixed-point`; debugging only (slow) |
 | `std` platform libm (bit-exact with C on the same platform) | `std` (default) | without it: pure-Rust `libm`, `no_std` |
+| Float approximations of `celt_log2`/`celt_exp2`/`celt_isnan` | `float-approx` | upstream `--enable-float-approx` (`FLOAT_APPROX`); float build only |
+| libopus internal checks as hard assertions in every profile | `assertions` | upstream `--enable-assertions` (`ENABLE_ASSERTIONS`); panics where libopus aborts |
+| Random encoder decisions (process-wide glibc `rand()`), for fuzzing | `fuzzing` | upstream `--enable-fuzzing` (`FUZZING`); not for production |
+| Pre-RFC 8251 bitstream behaviour (RFC 6716 decoder) | `disable-rfc8251` | upstream `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`) |
 
 > **`fixed-point` / `fixed-res24` are NOT additive.** They *replace* the float implementation
 > with the integer one (bit-exact with a fixed-point libopus build), exactly like libopus'

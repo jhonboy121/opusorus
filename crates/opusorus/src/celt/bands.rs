@@ -3,8 +3,10 @@
 //! coupling and spectral folding, anti-collapse and spreading decisions.
 //!
 //! Float and fixed-point builds (`#ifdef FIXED_POINT` → `feature = "fixed-point"`). Only the
-//! portable C paths are ported (no `MEASURE_NORM_MSE`, no `FUZZING` random decisions, `DISABLE_UPDATE_DRAFT` is not defined upstream so the "update draft"
-//! folding is the one ported, `RESYNTH` is not defined).
+//! portable C paths are ported (no `MEASURE_NORM_MSE`, `RESYNTH` is not defined). `FUZZING`
+//! (feature `fuzzing`): random spreading and tapset decisions from [`crate::glibc_rand`].
+//! `DISABLE_UPDATE_DRAFT` (feature `disable-rfc8251`): the pre-RFC 8251 folding (no
+//! `special_hybrid_folding`, the original `lowband_offset` and `fold_end` rules).
 //!
 //! # Buffer aliasing
 //!
@@ -142,12 +144,12 @@ pub const fn celt_lcg_rand(seed: u32) -> u32 {
 #[must_use]
 pub const fn bitexact_cos(x: i16) -> i16 {
     let tmp: i32 = (4096 + (x as i32) * (x as i32)) >> 13;
-    debug_assert!(tmp <= 32767);
+    celt_sig_assert!(tmp <= 32767);
     let mut x2: i16 = tmp as i16;
     let x2i = x2 as i32;
     x2 = ((32767 - x2i) + frac_mul16(x2i, -7651 + frac_mul16(x2i, 8277 + frac_mul16(-626, x2i))))
         as i16;
-    debug_assert!(x2 <= 32766);
+    celt_sig_assert!(x2 <= 32766);
     (1 + x2 as i32) as i16
 }
 
@@ -385,7 +387,7 @@ pub fn denormalise_bands(
             }
         }
     }
-    debug_assert!(start <= end);
+    celt_assert!(start <= end);
     freq[bound as usize..n as usize].fill(CeltSig::default());
 }
 
@@ -413,7 +415,7 @@ pub fn anti_collapse(
         let iu = i as usize;
         let n0 = i32::from(m.e_bands[iu + 1]) - i32::from(m.e_bands[iu]);
         // depth in 1/8 bits
-        debug_assert!(pulses[iu] >= 0);
+        celt_sig_assert!(pulses[iu] >= 0);
         let depth: i32 = (celt_udiv((1 + pulses[iu]) as u32, n0 as u32) >> lm) as i32;
 
         #[cfg(feature = "fixed-point")]
@@ -619,7 +621,7 @@ pub fn spreading_decision(
     let mut nb_bands: i32 = 0;
     let mut hf_sum: i32 = 0;
 
-    debug_assert!(end > 0);
+    celt_assert!(end > 0);
 
     let n0 = mm * m.short_mdct_size;
 
@@ -684,15 +686,15 @@ pub fn spreading_decision(
             *tapset_decision = 0;
         }
     }
-    debug_assert!(nb_bands > 0); // end has to be non-zero
-    debug_assert!(sum >= 0);
+    celt_assert!(nb_bands > 0); // end has to be non-zero
+    celt_assert!(sum >= 0);
     sum = celt_udiv((sum << 8) as u32, nb_bands as u32) as i32;
     // Recursive averaging
     sum = (sum + *average) >> 1;
     *average = sum;
     // Hysteresis
     sum = (3 * sum + (((3 - last_decision) << 7) + 64) + 2) >> 2;
-    if sum < 80 {
+    let decision = if sum < 80 {
         SPREAD_AGGRESSIVE
     } else if sum < 256 {
         SPREAD_NORMAL
@@ -700,7 +702,15 @@ pub fn spreading_decision(
         SPREAD_LIGHT
     } else {
         SPREAD_NONE
-    }
+    };
+    #[cfg(feature = "fuzzing")]
+    let decision = {
+        let _ = decision;
+        let random = crate::glibc_rand::rand() & 0x3;
+        *tapset_decision = crate::glibc_rand::rand() % 3;
+        random
+    };
+    decision
 }
 
 /// `ordery_table`: indexing table for converting from natural Hadamard to ordery Hadamard. This
@@ -717,7 +727,7 @@ static ORDERY_TABLE: [usize; 30] = [
 
 /// Port of celt/bands.c:deinterleave_hadamard.
 pub fn deinterleave_hadamard(x: &mut [CeltNorm], n0: i32, stride: i32, hadamard: bool) {
-    debug_assert!(stride > 0);
+    celt_assert!(stride > 0);
     let (n0, stride) = (n0 as usize, stride as usize);
     let n = n0 * stride;
     let mut tmp_buf = Scratch::<CeltNorm, MAX_BAND_SIZE>::new();
@@ -801,7 +811,7 @@ pub const fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: boo
         qn = EXP2_TABLE8[(qb & 0x7) as usize] as i32 >> (14 - (qb >> BITRES));
         qn = (qn + 1) >> 1 << 1;
     }
-    debug_assert!(qn <= 256);
+    celt_assert!(qn <= 256);
     qn
 }
 
@@ -1110,7 +1120,7 @@ fn compute_theta(
                 }
             }
         }
-        debug_assert!(itheta >= 0);
+        celt_assert!(itheta >= 0);
         itheta = celt_udiv((itheta * 16384) as u32, qn as u32) as i32;
         #[cfg(feature = "qext")]
         {
@@ -1553,7 +1563,7 @@ fn cubic_quant_partition(
     resynth: bool,
     encode: bool,
 ) -> u32 {
-    debug_assert!(lm >= 0);
+    celt_assert!(lm >= 0);
     let remaining = |ec: &EcCoder<'_, '_>| {
         ec.storage()
             .wrapping_mul(8 * 8)
@@ -2084,7 +2094,9 @@ fn quant_band_stereo(
 }
 
 /// Port of celt/bands.c:special_hybrid_folding: duplicates enough of the first band folding
-/// data to be able to fold the second band. Copies no data for CELT-only mode.
+/// data to be able to fold the second band. Copies no data for CELT-only mode. (Not compiled
+/// with `DISABLE_UPDATE_DRAFT`, feature `disable-rfc8251`.)
+#[cfg(not(feature = "disable-rfc8251"))]
 pub fn special_hybrid_folding(
     m: &CeltMode,
     norm: &mut [CeltNorm],
@@ -2348,7 +2360,7 @@ pub fn quant_all_bands(
         let last = i == end - 1;
         let x_off = (mm * eb(i)) as usize;
         let n = mm * eb(i + 1) - mm * eb(i);
-        debug_assert!(n > 0);
+        celt_assert!(n > 0);
         let nu = n as usize;
         let tell: i32 = ctx.ec.tell_frac() as i32;
 
@@ -2399,14 +2411,22 @@ pub fn quant_all_bands(
             0
         };
 
-        if resynth
-            && (mm * eb(i) - n >= mm * eb(start) || i == start + 1)
-            && (update_lowband || lowband_offset == 0)
+        #[cfg(not(feature = "disable-rfc8251"))]
         {
-            lowband_offset = i;
+            if resynth
+                && (mm * eb(i) - n >= mm * eb(start) || i == start + 1)
+                && (update_lowband || lowband_offset == 0)
+            {
+                lowband_offset = i;
+            }
+            if i == start + 1 {
+                special_hybrid_folding(m, norm, norm2, start, mm, dual_stereo);
+            }
         }
-        if i == start + 1 {
-            special_hybrid_folding(m, norm, norm2, start, mm, dual_stereo);
+        // DISABLE_UPDATE_DRAFT: the RFC 6716 rule, no special hybrid folding.
+        #[cfg(feature = "disable-rfc8251")]
+        if resynth && mm * eb(i) - n >= mm * eb(start) && (update_lowband || lowband_offset == 0) {
+            lowband_offset = i;
         }
 
         let tf_change = tf_res[i as usize];
@@ -2437,7 +2457,12 @@ pub fn quant_all_bands(
             let mut fold_end = lowband_offset - 1;
             loop {
                 fold_end += 1;
-                if !(fold_end < i && mm * eb(fold_end) < effective_lowband + norm_offset + n) {
+                #[cfg(not(feature = "disable-rfc8251"))]
+                let more = fold_end < i && mm * eb(fold_end) < effective_lowband + norm_offset + n;
+                // DISABLE_UPDATE_DRAFT: `fold_end` is not bounded by the current band.
+                #[cfg(feature = "disable-rfc8251")]
+                let more = mm * eb(fold_end) < effective_lowband + norm_offset + n;
+                if !more {
                     break;
                 }
             }
@@ -2650,6 +2675,7 @@ pub fn quant_all_bands(
                     ctx.restore(&ctx_save);
                     xb.copy_from_slice(&x_save[..nu]);
                     yb.copy_from_slice(&y_save[..nu]);
+                    #[cfg(not(feature = "disable-rfc8251"))]
                     if i == start + 1 {
                         special_hybrid_folding(m, norm, norm2, start, mm, dual_stereo);
                     }

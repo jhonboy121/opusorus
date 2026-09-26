@@ -51,6 +51,12 @@ dnn-weights-embedded = ["opus/dnn-weights-embedded"]
 # writes OSCE training files into the working directory).
 dnn-debug-float = ["opus/dnn-debug-float"]
 osce-training-data = ["opus/osce-training-data"]
+# Upstream build options, forwarded to `opusorus` (libopus `--enable-float-approx`,
+# `--enable-assertions`, `--enable-fuzzing`, `--disable-rfc8251`).
+float-approx = ["opus/float-approx"]
+assertions = ["opus/assertions"]
+fuzzing = ["opus/fuzzing"]
+disable-rfc8251 = ["opus/disable-rfc8251"]
 # Also exports the libopus-internal helpers that upstream's `test_opus_extensions.c` links
 # against (`opus_packet_parse_impl`, `opus_repacketizer_out_range_impl`,
 # `opus_packet_extensions_*`). Not part of the libopus ABI; used by `tests/c_suite.rs`.

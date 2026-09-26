@@ -67,6 +67,18 @@ osce-training-data = ["osce", "std"]
 # `opus_demo -sim_loss`), as `opusorus::lossgen`; its small model is compiled in. Works in
 # every build (float or fixed-point, no DNN feature needed).
 lossgen = []
+# libopus `--enable-float-approx` (`FLOAT_APPROX`): polynomial `celt_log2`/`celt_exp2` and a
+# bit-test `celt_isnan` in the float build (no effect with `fixed-point`, as upstream).
+float-approx = []
+# libopus `--enable-assertions` (`ENABLE_ASSERTIONS`): the libopus internal checks (celt_assert,
+# celt_sig_assert, silk_assert) are `assert!`s in every build profile instead of `debug_assert!`s.
+assertions = []
+# libopus `--enable-fuzzing` (`FUZZING`): the encoder makes random decisions from a process-wide
+# glibc-compatible `rand()` (`glibc_rand`). Not for production.
+fuzzing = []
+# libopus `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`): the original RFC 6716 decoder behaviour
+# (folding, mono phase inversion), without the RFC 8251 bitstream fixes.
+disable-rfc8251 = []
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

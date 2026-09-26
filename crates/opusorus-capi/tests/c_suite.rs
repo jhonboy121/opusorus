@@ -10,8 +10,12 @@
 //! is always built with `internal-api` for `test_opus_extensions.c`.
 //!
 //! `rfc8251_vectors` builds `opus_demo` and `opus_compare` and runs the equivalent of
-//! `tests/run_vectors.sh` on `testdata/vectors/rfc8251` (skipped if absent; fetch it with
-//! `scripts/fetch_vectors.sh`).
+//! `tests/run_vectors.sh` on `testdata/vectors/rfc8251` (`rfc6716` with `disable-rfc8251`;
+//! skipped if absent; fetch it with `scripts/fetch_vectors.sh`).
+//!
+//! The upstream build options `float-approx`, `assertions`, `fuzzing` and `disable-rfc8251` are
+//! forwarded to the library (and, except `ENABLE_ASSERTIONS`, defined for the C programs, as
+//! upstream's `config.h` does).
 //!
 //! With the DNN features (`deep-plc`, `dred`, `osce`) the library is built with them plus
 //! `dnn-weights-embedded` (compiled-in weights, as upstream's tests expect: they never call
@@ -82,6 +86,10 @@ fn config() -> (Vec<&'static str>, String) {
         (cfg!(feature = "deep-plc"), "deep-plc"),
         (cfg!(feature = "dred"), "dred"),
         (cfg!(feature = "osce"), "osce"),
+        (cfg!(feature = "float-approx"), "float-approx"),
+        (cfg!(feature = "assertions"), "assertions"),
+        (cfg!(feature = "fuzzing"), "fuzzing"),
+        (cfg!(feature = "disable-rfc8251"), "disable-rfc8251"),
     ] {
         if on {
             features.push(feature);
@@ -217,6 +225,18 @@ fn config_defines() -> Vec<&'static str> {
     }
     if cfg!(feature = "osce") {
         d.extend(["-DENABLE_OSCE", "-DENABLE_OSCE_BWE"]);
+    }
+    // As upstream's config.h for these options. Not `ENABLE_ASSERTIONS`: the libopus sources
+    // some test programs compile in (e.g. `mapping_matrix.c`) would then need libopus'
+    // internal `celt_fatal`, which the C ABI library does not export.
+    for (on, define) in [
+        (cfg!(feature = "float-approx"), "-DFLOAT_APPROX"),
+        (cfg!(feature = "fuzzing"), "-DFUZZING"),
+        (cfg!(feature = "disable-rfc8251"), "-DDISABLE_UPDATE_DRAFT"),
+    ] {
+        if on {
+            d.push(define);
+        }
     }
     d
 }
@@ -399,7 +419,13 @@ fn static_link() {
 /// each output must match `testvectorNN.dec` or `testvectorNNm.dec` per `opus_compare`.
 #[test]
 fn rfc8251_vectors() {
-    let vectors = root().join("testdata/vectors/rfc8251");
+    // With `disable-rfc8251` (`DISABLE_UPDATE_DRAFT`): the original RFC 6716 vectors.
+    let set = if cfg!(feature = "disable-rfc8251") {
+        "rfc6716"
+    } else {
+        "rfc8251"
+    };
+    let vectors = root().join("testdata/vectors").join(set);
     if !vectors.join("testvector01.bit").exists() {
         eprintln!(
             "rfc8251_vectors: SKIPPED ({} not found; run scripts/fetch_vectors.sh)",

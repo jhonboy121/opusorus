@@ -36,7 +36,8 @@
 //!   (see [`dred`]). `OPUS_SET_DNN_BLOB` is accepted in both cases (libopus with compiled-in
 //!   weights answers `OPUS_UNIMPLEMENTED`).
 //! * `opus_get_version_string` reports `"libopus 1.6.1 (opusorus)"` (`"libopus
-//!   1.6.1-fixed (opusorus)"` in fixed-point builds).
+//!   1.6.1-fixed (opusorus)"` in fixed-point builds, with `-fuzzing` after the version in
+//!   fuzzing builds).
 //!
 //! ## Fixed-point
 //!
@@ -93,9 +94,14 @@ pub const extern "C" fn opus_strerror(error: c_int) -> *const c_char {
 /// fixed-point builds (upstream: "applications may rely on the presence of this substring").
 #[unsafe(no_mangle)]
 pub const extern "C" fn opus_get_version_string() -> *const c_char {
-    #[cfg(feature = "fixed-point")]
+    #[cfg(all(feature = "fixed-point", not(feature = "fuzzing")))]
     let s = c"libopus 1.6.1-fixed (opusorus)";
-    #[cfg(not(feature = "fixed-point"))]
+    #[cfg(all(not(feature = "fixed-point"), not(feature = "fuzzing")))]
     let s = c"libopus 1.6.1 (opusorus)";
+    // Fuzzing builds (`FUZZING`) append "-fuzzing" like upstream.
+    #[cfg(all(feature = "fixed-point", feature = "fuzzing"))]
+    let s = c"libopus 1.6.1-fixed-fuzzing (opusorus)";
+    #[cfg(all(not(feature = "fixed-point"), feature = "fuzzing"))]
+    let s = c"libopus 1.6.1-fuzzing (opusorus)";
     s.as_ptr()
 }

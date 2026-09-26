@@ -11,6 +11,13 @@ publish = false
 # Adds the 96 kHz Opus HD (QEXT) encode/decode benchmarks (all three implementations built with
 # QEXT; upstream CMake has no QEXT switch, so the optimized build gets -DENABLE_QEXT).
 qext = ["opusorus/qext", "opusorus-oracle/qext", "opus-sys-optimized/qext"]
+# libopus `--enable-float-approx` (`FLOAT_APPROX`) in all three implementations (CMake
+# `OPUS_FLOAT_APPROX=ON` for the optimized build).
+float-approx = [
+    "opusorus/float-approx",
+    "opusorus-oracle/float-approx",
+    "opus-sys-optimized/float-approx",
+]
 # Fixed-point builds (docs/FIXED_POINT.md): opusorus `fixed-point` vs the fixed-point oracle vs
 # upstream CMake with `OPUS_FIXED_POINT=ON`; the codec benchmarks use the native 16-bit
 # (`fixed-res24`: 24-bit) PCM API, and the Criterion groups get a `fixed_` (`fixed24_`) prefix.

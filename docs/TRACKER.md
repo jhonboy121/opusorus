@@ -74,6 +74,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | Fuzz targets (`fuzz/`) | ✅ | 11 targets, ~7.5M execs, 0 findings; DNN/custom-mode fuzz targets are follow-ups |
 | Benchmarks `opusorus-bench` (criterion, Rust vs C scalar vs C NEON) | ✅ | see STATUS |
 | Size report (`scripts/size_report.sh`) | ✅ | see STATUS |
+| Upstream options `float-approx`, `assertions`, `fuzzing`, `disable-rfc8251` (`src/assertions.rs`, `src/glibc_rand.rs`, sites in mathops/arch/bands/rate/celt_encoder/celt_decoder/encoder; oracle `csrc/build_options.c`) | ✅ | `tests/float_approx.rs`, `assertions.rs`, `fuzzing.rs`, `disable_rfc8251.rs` + the whole suites with each option (`just test-options`) |
 | opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C (float and fixed-point C opus_demo) |
 | Rust port of libopus tests (`crates/opusorus/tests`, `libopus_unit.rs`) | ✅ | host + wasm, float and fixed-point (incl. the `FIXED_POINT` celt/tests mathops tests) |
 

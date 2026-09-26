@@ -97,7 +97,8 @@ pub fn warped_true2monic_coefs(coefs: &mut [f32], lambda: f32, limit: f32, order
             *c *= gain;
         }
     }
-    // C: silk_assert( 0 ) (compiled out)
+    // C: silk_assert( 0 ): not reached for encoder input; the unit tests drive it.
+    assertion_failure!("0");
 }
 
 /// Port of the static `noise_shape_analysis_FLP.c:limit_coefs` — limit the maximum absolute
@@ -125,7 +126,8 @@ pub fn limit_coefs(coefs: &mut [f32], limit: f32, order: usize) {
             - (0.8f32 + 0.1f32 * iter as f32) * (maxabs - limit) / (maxabs * (ind + 1) as f32);
         silk_bwexpander_flp(coefs, order, chirp);
     }
-    // C: silk_assert( 0 ) (compiled out)
+    // C: silk_assert( 0 ): not reached for encoder input; the unit tests drive it.
+    assertion_failure!("0");
 }
 
 /// Port of `silk/float/noise_shape_analysis_FLP.c:silk_noise_shape_analysis_FLP` — compute noise

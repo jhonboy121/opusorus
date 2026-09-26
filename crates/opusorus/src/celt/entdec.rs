@@ -246,7 +246,7 @@ impl<'a> EcDec<'a> {
     /// Sets the error flag if the decoded value is out of range.
     pub fn dec_uint(&mut self, ft: u32) -> u32 {
         // In order to optimize EC_ILOG(), it is undefined for the value 0.
-        debug_assert!(ft > 1);
+        celt_assert!(ft > 1);
         let ft = ft - 1;
         let mut ftb = ec_ilog(ft);
         if ftb > EC_UINT_BITS {

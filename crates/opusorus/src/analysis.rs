@@ -557,7 +557,7 @@ pub fn downmix_and_resample<T>(
         subframe = subframe * 2 / 3;
         offset = offset * 2 / 3;
     } else if fs != 24000 {
-        debug_assert!(false, "downmix_and_resample: unsupported Fs {fs}");
+        celt_assert!(false, "downmix_and_resample: unsupported Fs {fs}");
     }
     let n = subframe as usize;
     debug_assert!(n <= MAX_DOWNMIX);

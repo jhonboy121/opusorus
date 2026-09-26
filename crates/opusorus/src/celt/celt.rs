@@ -161,7 +161,7 @@ pub const fn resampling_factor(rate: i32) -> i32 {
         8000 => 6,
         _ => {
             #[cfg(not(feature = "custom-modes"))]
-            debug_assert!(false, "resampling_factor: unsupported rate");
+            celt_assert!(false, "resampling_factor: unsupported rate");
             0
         }
     }
@@ -591,9 +591,13 @@ pub const fn opus_strerror(error: i32) -> &'static str {
 #[must_use]
 pub const fn opus_get_version_string() -> &'static str {
     // C: "libopus " PACKAGE_VERSION (+ "-fixed" / "-fuzzing" in those builds).
-    #[cfg(feature = "fixed-point")]
+    #[cfg(all(feature = "fixed-point", not(feature = "fuzzing")))]
     let s = "libopus 1.6.1-fixed";
-    #[cfg(not(feature = "fixed-point"))]
+    #[cfg(all(not(feature = "fixed-point"), not(feature = "fuzzing")))]
     let s = "libopus 1.6.1";
+    #[cfg(all(feature = "fixed-point", feature = "fuzzing"))]
+    let s = "libopus 1.6.1-fixed-fuzzing";
+    #[cfg(all(not(feature = "fixed-point"), feature = "fuzzing"))]
+    let s = "libopus 1.6.1-fuzzing";
     s
 }

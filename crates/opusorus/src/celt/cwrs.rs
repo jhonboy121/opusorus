@@ -378,7 +378,7 @@ pub const fn log2_frac(mut val: u32, mut frac: i32) -> i32 {
 #[cfg(feature = "custom-modes")]
 pub fn get_required_bits(bits: &mut [i16], n: i32, maxk: i32, frac: i32) {
     // _maxk==0 => there's nothing to do.
-    debug_assert!(maxk > 0);
+    celt_assert!(maxk > 0);
     bits[0] = 0;
     for k in 1..=maxk {
         bits[k as usize] = log2_frac(celt_pvq_v(n, k), frac) as i16;
@@ -388,7 +388,7 @@ pub fn get_required_bits(bits: &mut [i16], n: i32, maxk: i32, frac: i32) {
 /// Port of celt/cwrs.c:icwrs: index of the pulse vector `y` of dimension `n`.
 #[must_use]
 fn icwrs(n: i32, y: &[i32]) -> u32 {
-    debug_assert!(n >= 2);
+    celt_assert!(n >= 2);
     let mut j = n - 1;
     let mut i: u32 = u32::from(y[j as usize] < 0);
     let mut k = y[j as usize].abs();
@@ -408,7 +408,7 @@ fn icwrs(n: i32, y: &[i32]) -> u32 {
 
 /// Port of celt/cwrs.c:encode_pulses.
 pub fn encode_pulses(y: &[i32], n: i32, k: i32, enc: &mut EcEnc<'_>) {
-    debug_assert!(k > 0);
+    celt_assert!(k > 0);
     enc.enc_uint(icwrs(n, y), celt_pvq_v(n, k));
 }
 
@@ -434,8 +434,8 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
     let mut s: i32;
     let mut k0: i32;
     let mut val: i16;
-    debug_assert!(k > 0);
-    debug_assert!(n > 1);
+    celt_assert!(k > 0);
+    celt_assert!(n > 1);
     while n > 2 {
         let q: u32;
         // Lots of pulses case:
@@ -449,7 +449,7 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> OpusVal32 {
             k0 = k;
             q = CELT_PVQ_U_DATA[row + n as usize];
             if q > i {
-                debug_assert!(p > q);
+                celt_sig_assert!(p > q);
                 k = n;
                 loop {
                     k -= 1;

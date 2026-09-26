@@ -484,8 +484,13 @@ static void test_build_config(void)
    /* A non-trivial curve changes the bitstream (it would be ignored as ~0 if Q24 integers were
       read as floats); the same curve is deterministic. */
    CHECK(masked_encode(high) != masked_encode(zero));
+#ifdef FUZZING
+   /* The fuzzing encoder's random decisions come from the (advancing) rand() state. */
+   CHECK(strstr(version, "-fuzzing") != NULL);
+#else
    CHECK(masked_encode(high) == masked_encode(high));
    CHECK(masked_encode(NULL) == masked_encode(NULL));
+#endif
 }
 
 int main(void)

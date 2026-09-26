@@ -45,6 +45,10 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | O9 | Generative packet loss model (`dnn/lossgen.c`, `opus_demo -sim_loss`, `lossgen_demo`) | `--enable-lossgen` | `lossgen` | ✅ |
 | O10 | No float API: float entry points, soft clip and the encoder's float analysis (analysis.c, mlp) compiled out; requires fixed point (the float build does not compile with it upstream) | `--disable-float-api` (`DISABLE_FLOAT_API`) | `disable-float-api` | ✅ |
 | O11 | Checking fixed-point arithmetic (`celt/fixed_debug.h`, `silk/MacroDebug.h`): range checks with libopus' diagnostics, `celt_mips` operation count; implies fixed point | `--enable-fixed-point-debug` (`FIXED_DEBUG`) | `fixed-point-debug` | ✅ |
+| O12 | Float approximations (`celt_log2`/`celt_exp2` polynomials, bit-test `celt_isnan`; no effect in fixed point) | `--enable-float-approx` (`FLOAT_APPROX`) | `float-approx` | ✅ |
+| O13 | Internal checks (`celt_assert`, `celt_sig_assert`, `silk_assert`) as hard assertions in every profile | `--enable-assertions` (`ENABLE_ASSERTIONS`) | `assertions` | ✅ |
+| O14 | Random encoder decisions from a process-wide glibc-compatible `rand()` (`opusorus::glibc_rand`) | `--enable-fuzzing` (`FUZZING`) | `fuzzing` | ✅ |
+| O15 | Pre-RFC 8251 bitstream behaviour (RFC 6716 folding, mono phase inversion on); passes the RFC 6716 vectors | `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`) | `disable-rfc8251` | ✅ |
 
 ## Tooling & quality
 | # | Item | Status |

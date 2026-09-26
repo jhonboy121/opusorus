@@ -95,14 +95,14 @@ pub fn silk_pitch_analysis_core(
     let mut cc = [0i32; PE_NB_CBKS_STAGE2_EXT as usize];
 
     // Check for valid sampling frequency
-    debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
+    celt_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
 
     // Check for valid complexity setting
-    debug_assert!(complexity >= SILK_PE_MIN_COMPLEX);
-    debug_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+    celt_assert!(complexity >= SILK_PE_MIN_COMPLEX);
+    celt_assert!(complexity <= SILK_PE_MAX_COMPLEX);
 
-    debug_assert!((0..=(1 << 16)).contains(&search_thres1_q16));
-    debug_assert!((0..=(1 << 13)).contains(&search_thres2_q13));
+    celt_assert!((0..=(1 << 16)).contains(&search_thres1_q16));
+    celt_assert!((0..=(1 << 13)).contains(&search_thres2_q13));
 
     // Set up frame lengths max / min lag for the sampling frequency
     let frame_length = (PE_LTP_MEM_LENGTH_MS + nb_subfr * PE_SUBFR_LENGTH_MS) * fs_khz;
@@ -140,7 +140,7 @@ pub fn silk_pitch_analysis_core(
         silk_resampler_down2_3(&mut filt_state, &mut frame_8khz_buf, frame, frame_length);
         &frame_8khz_buf[..fl8]
     } else {
-        debug_assert!(fs_khz == 8);
+        celt_assert!(fs_khz == 8);
         frame
     };
 
@@ -170,7 +170,7 @@ pub fn silk_pitch_analysis_core(
     let mut target_ptr = silk_lshift(SF_LENGTH_4KHZ, 2) as usize;
     for k in 0..(nb_subfr >> 1) as usize {
         // Check that we are within range of the array
-        debug_assert!(target_ptr + SF_LENGTH_8KHZ as usize <= fl4);
+        celt_assert!(target_ptr + SF_LENGTH_8KHZ as usize <= fl4);
 
         let mut basis_ptr = target_ptr - MIN_LAG_4KHZ as usize;
 
@@ -236,7 +236,7 @@ pub fn silk_pitch_analysis_core(
 
     // Sort
     let mut length_d_srch = silk_add_lshift32(4, complexity, 1);
-    debug_assert!(3 * length_d_srch <= PE_D_SRCH_LENGTH);
+    celt_assert!(3 * length_d_srch <= PE_D_SRCH_LENGTH);
     silk_insertion_sort_decreasing_int16(&mut c, &mut d_srch, cs4, length_d_srch as usize);
 
     // Escape if correlation is very low already here
@@ -259,7 +259,7 @@ pub fn silk_pitch_analysis_core(
             break;
         }
     }
-    debug_assert!(length_d_srch > 0);
+    celt_assert!(length_d_srch > 0);
 
     let mut d_comp = [0i16; D_COMP_STRIDE as usize];
     let dc = |i: i32| (i - D_COMP_MIN) as usize;
@@ -310,7 +310,7 @@ pub fn silk_pitch_analysis_core(
     let sf8 = SF_LENGTH_8KHZ as usize;
     for k in 0..nb_subfr as usize {
         // Check that we are within range of the array
-        debug_assert!(target_ptr + sf8 <= fl8);
+        celt_assert!(target_ptr + sf8 <= fl8);
 
         let target = &frame_8khz[target_ptr..target_ptr + sf8];
         let energy_target = silk_add32(silk_inner_prod_aligned(target, target, sf8), 1);
@@ -350,7 +350,7 @@ pub fn silk_pitch_analysis_core(
     } else {
         0
     };
-    debug_assert!(search_thres2_q13 == search_thres2_q13 as i16 as i32);
+    silk_assert!(search_thres2_q13 == search_thres2_q13 as i16 as i32);
 
     // Set up stage 2 codebook based on number of subframes
     let (lag_cb, nb_cbk_search) = if nb_subfr == PE_MAX_NB_SUBFR {
@@ -398,16 +398,16 @@ pub fn silk_pitch_analysis_core(
 
         // Bias towards shorter lags
         let lag_log2_q7 = silk_lin2log(d); // Q7
-        debug_assert!(lag_log2_q7 == lag_log2_q7 as i16 as i32);
-        debug_assert!(shortlag_bias_q13 == shortlag_bias_q13 as i16 as i32);
+        silk_assert!(lag_log2_q7 == lag_log2_q7 as i16 as i32);
+        celt_assert!(shortlag_bias_q13 == shortlag_bias_q13 as i16 as i32);
         let mut ccmax_new_b =
             ccmax_new - silk_rshift(silk_smulbb(shortlag_bias_q13, lag_log2_q7), 7); // Q13
 
         // Bias towards previous lag
-        debug_assert!(prevlag_bias_q13 == prevlag_bias_q13 as i16 as i32);
+        celt_assert!(prevlag_bias_q13 == prevlag_bias_q13 as i16 as i32);
         if prev_lag > 0 {
             let mut delta_lag_log2_sqr_q7 = lag_log2_q7 - prev_lag_log2_q7;
-            debug_assert!(delta_lag_log2_sqr_q7 == delta_lag_log2_sqr_q7 as i16 as i32);
+            silk_assert!(delta_lag_log2_sqr_q7 == delta_lag_log2_sqr_q7 as i16 as i32);
             delta_lag_log2_sqr_q7 =
                 silk_rshift(silk_smulbb(delta_lag_log2_sqr_q7, delta_lag_log2_sqr_q7), 7);
             let mut prev_lag_bias_q13 =
@@ -442,14 +442,14 @@ pub fn silk_pitch_analysis_core(
 
     // Output normalized correlation
     *ltp_corr_q15 = silk_lshift(silk_div32_16(ccmax, nb_subfr), 2);
-    debug_assert!(*ltp_corr_q15 >= 0);
+    silk_assert!(*ltp_corr_q15 >= 0);
 
     if fs_khz > 8 {
         // Search in original signal
 
         let cbimax_old = cbimax;
         // Compensate for decimation
-        debug_assert!(lag == lag as i16 as i32);
+        celt_assert!(lag == lag as i16 as i32);
         if fs_khz == 12 {
             lag = silk_rshift(silk_smulbb(lag, 3), 1);
         } else if fs_khz == 16 {
@@ -509,7 +509,7 @@ pub fn silk_pitch_analysis_core(
             complexity,
         );
 
-        debug_assert!(lag == lag as i16 as i32);
+        celt_assert!(lag == lag as i16 as i32);
         let contour_bias_q15 = silk_div32_16(silk_fix_const(PE_FLATCONTOUR_BIAS as f64, 15), lag);
 
         let target_ptr = (PE_LTP_MEM_LENGTH_MS * fs_khz) as usize;
@@ -528,13 +528,13 @@ pub fn silk_pitch_analysis_core(
                         cross_corr_st3[k * nb_cbk_search + j][lag_counter],
                     );
                     energy = silk_add32(energy, energies_st3[k * nb_cbk_search + j][lag_counter]);
-                    debug_assert!(energy >= 0);
+                    silk_assert!(energy >= 0);
                 }
                 let ccmax_new = if cross_corr > 0 {
                     let v = silk_div32_varq(cross_corr, energy, 13 + 1); // Q13
                     // Reduce depending on flatness of contour
                     let diff = i16::MAX as i32 - silk_mul(contour_bias_q15, j as i32); // Q15
-                    debug_assert!(diff == diff as i16 as i32);
+                    celt_assert!(diff == diff as i16 as i32);
                     silk_smulwb(v, diff) // Q14
                 } else {
                     0
@@ -564,15 +564,15 @@ pub fn silk_pitch_analysis_core(
         *lag_index = (lag - MIN_LAG_8KHZ) as i16;
         *contour_index = cbimax as i8;
     }
-    debug_assert!(*lag_index >= 0);
+    celt_assert!(*lag_index >= 0);
     // return as voiced
     0
 }
 
 /// Lag range table and codebook of stage 3 (`Lag_range_ptr`, `Lag_CB_ptr`, `nb_cbk_search`).
 fn stage3_tables(nb_subfr: i32, complexity: i32) -> (&'static [[i8; 2]], LagCb<'static>, usize) {
-    debug_assert!(complexity >= SILK_PE_MIN_COMPLEX);
-    debug_assert!(complexity <= SILK_PE_MAX_COMPLEX);
+    celt_assert!(complexity >= SILK_PE_MIN_COMPLEX);
+    celt_assert!(complexity <= SILK_PE_MAX_COMPLEX);
     if nb_subfr == PE_MAX_NB_SUBFR {
         (
             &SILK_LAG_RANGE_STAGE3[complexity as usize],
@@ -583,7 +583,7 @@ fn stage3_tables(nb_subfr: i32, complexity: i32) -> (&'static [[i8; 2]], LagCb<'
             SILK_NB_CBK_SEARCHS_STAGE3[complexity as usize] as usize,
         )
     } else {
-        debug_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
+        celt_assert!(nb_subfr == PE_MAX_NB_SUBFR >> 1);
         (
             &SILK_LAG_RANGE_STAGE3_10_MS,
             LagCb {
@@ -626,7 +626,7 @@ pub fn silk_p_ana_calc_corr_st3(
         // Calculate the correlations for each subframe
         let lag_low = lag_range[k][0] as i32;
         let lag_high = lag_range[k][1] as i32;
-        debug_assert!(lag_high - lag_low < SCRATCH_SIZE as i32);
+        silk_assert!(lag_high - lag_low < SCRATCH_SIZE as i32);
         celt_pitch_xcorr(
             &frame[target_ptr..],
             &frame[target_ptr - (start_lag + lag_high) as usize..],
@@ -635,7 +635,7 @@ pub fn silk_p_ana_calc_corr_st3(
             (lag_high - lag_low + 1) as usize,
         );
         for j in lag_low..=lag_high {
-            debug_assert!(lag_counter < SCRATCH_SIZE);
+            silk_assert!(lag_counter < SCRATCH_SIZE);
             scratch_mem[lag_counter] = xcorr32[(lag_high - j) as usize];
             lag_counter += 1;
         }
@@ -646,8 +646,8 @@ pub fn silk_p_ana_calc_corr_st3(
             // for each start lag
             let idx = (lag_cb.at(k, i) - delta) as usize;
             for j in 0..NB_ST3_LAGS {
-                debug_assert!(idx + j < SCRATCH_SIZE);
-                debug_assert!(idx + j < lag_counter);
+                silk_assert!(idx + j < SCRATCH_SIZE);
+                silk_assert!(idx + j < lag_counter);
                 cross_corr_st3[k * nb_cbk_search + i][j] = scratch_mem[idx + j];
             }
         }
@@ -677,7 +677,7 @@ pub fn silk_p_ana_calc_energy_st3(
         let basis_ptr = target_ptr - (start_lag + lag_range[k][0] as i32) as usize;
         let basis = &frame[basis_ptr..basis_ptr + sfl];
         let mut energy = silk_inner_prod_aligned(basis, basis, sfl);
-        debug_assert!(energy >= 0);
+        silk_assert!(energy >= 0);
         scratch_mem[lag_counter] = energy;
         lag_counter += 1;
 
@@ -686,13 +686,13 @@ pub fn silk_p_ana_calc_energy_st3(
             // remove part outside new window
             let r = frame[basis_ptr + sfl - i] as i32;
             energy -= silk_smulbb(r, r);
-            debug_assert!(energy >= 0);
+            silk_assert!(energy >= 0);
 
             // add part that comes into window
             let a = frame[basis_ptr - i] as i32;
             energy = silk_add_sat32(energy, silk_smulbb(a, a));
-            debug_assert!(energy >= 0);
-            debug_assert!(lag_counter < SCRATCH_SIZE);
+            silk_assert!(energy >= 0);
+            silk_assert!(lag_counter < SCRATCH_SIZE);
             scratch_mem[lag_counter] = energy;
             lag_counter += 1;
         }
@@ -703,10 +703,10 @@ pub fn silk_p_ana_calc_energy_st3(
             // for each start lag
             let idx = (lag_cb.at(k, i) - delta) as usize;
             for j in 0..NB_ST3_LAGS {
-                debug_assert!(idx + j < SCRATCH_SIZE);
-                debug_assert!(idx + j < lag_counter);
+                silk_assert!(idx + j < SCRATCH_SIZE);
+                silk_assert!(idx + j < lag_counter);
                 energies_st3[k * nb_cbk_search + i][j] = scratch_mem[idx + j];
-                debug_assert!(energies_st3[k * nb_cbk_search + i][j] >= 0);
+                silk_assert!(energies_st3[k * nb_cbk_search + i][j] >= 0);
             }
         }
         target_ptr += sf_length as usize;

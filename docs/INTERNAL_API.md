@@ -1443,3 +1443,40 @@ typing rules and the conversion plan.
   `-DFIXED_POINT=1` (+ `-DENABLE_RES24`) against the fixed oracle's `libopus.a`, selected among
   the matching archives by a C probe of the `opus_decode24` resolution (16- and 24-bit fixed
   archives have the same members); `normalize_version` also accepts `libopus unknown-fixed`.
+
+## `g_float_approx_assertions_fuzzing_rfc8251` (phase G)
+
+### api for other units
+
+* `src/assertions.rs` (declared first in `lib.rs` with `#[macro_use]`): `celt_assert!`,
+  `celt_sig_assert!`, `silk_assert!` (same arguments as `assert!`; `debug_assert!` by default,
+  `assert!` with the feature `assertions`) and `assertion_failure!("msg")` for a `celt_assert(0)`
+  / `silk_assert(0)` that the port keeps reachable (panics only with `assertions`). New ports of
+  C checks use these; Rust-only invariants stay `debug_assert!`.
+* `crate::glibc_rand` (compiled with `fuzzing` or `internals`): `GlibcRand` (one generator
+  state, `new(seed)` = `srand`, `next_value()` = `rand()`), the process-wide `srand` / `rand`,
+  `RAND_MAX`, `FUZZING`. Every `#ifdef FUZZING` site draws from `glibc_rand::rand()` in the C
+  order. `opusorus_tools::demo` uses `GlibcRand` (local) or the process-wide one (fuzzing).
+* `celt::mathops::celt_ilog2_release` (fixed): release-libopus `celt_ilog2` for C-UB wrapped
+  inputs (checked with `assertions`), like `celt_sqrt32_release` / `celt_atan2p_norm_release`.
+* Oracle: `opusorus_oracle::build_options` (`options()`, C `srand`/`rand`, float-build
+  `celt_log2`/`celt_exp2`/`celt_isnan`, `fail_*` shims that fail one check of each kind);
+  `csrc/build_options.c` also defines marker symbols (`opusorus_oracle_fuzzing`, ...) by which
+  tests that link programs to the oracle's `libopus.a` pick the matching archive.
+
+### notes
+
+1. Assertion mapping: 455 former `debug_assert!`s were matched against the 669 checks of the
+   compiled C sources (`celt_assert` 329, `silk_assert` 108, `celt_sig_assert` 18); 26
+   Rust-only ones stay `debug_assert!`. C checks without a counterpart: pointer / `NULL` /
+   aliasing checks, `arch` ranges, `OPUS_CHECK_ASM` `memcmp`s and compile-time relations.
+   Added: `compute_ebands` layout checks, `silk_residual_energy_covar_FLP` `nrg == 0`, the SILK
+   limiters' and error paths' `celt_assert(0)`/`silk_assert(0)` (feature only), `hp_cutoff`
+   `cutoff_Hz`/`Fc_Q19`, `wrappers_FLP` gains, `pitch_analysis_core_FLP` threshold/energies.
+2. `validate_ms_decoder` calls `validate_layout` and ignores the result in C, so the port's
+   check there stays a Rust-side `debug_assert!`.
+3. Tests that exercised the C-assert error paths Rust-only (`silk_decoder::invalid_control`,
+   `silk_encoder_flp::invalid_input_rust_only`, `silk_encoder_common::check_control_input_random`,
+   `silk_resampler::init_all_rate_pairs`) expect a panic with `assertions`; the unit tests that
+   drove the SILK limiters / residual energy past convergence skip the C call when the port's
+   check fires (C would abort).

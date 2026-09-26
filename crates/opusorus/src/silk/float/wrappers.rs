@@ -115,6 +115,7 @@ pub fn silk_nsq_wrapper_flp(
 
     for i in 0..nb_subfr {
         gains_q16[i] = silk_float2int(ps_enc_ctrl.gains[i] * 65536.0f32);
+        silk_assert!(gains_q16[i] > 0);
     }
 
     let ltp_scale_q14 = if ps_indices.signal_type as i32 == TYPE_VOICED {

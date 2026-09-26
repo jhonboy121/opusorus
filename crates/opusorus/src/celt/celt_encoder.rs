@@ -21,7 +21,8 @@
 //! * The QEXT mode (`compute_qext_mode(mode)`, a pure function of the mode) is computed once at
 //!   init instead of every frame; its debug assertion (C `celt_assert(0)` for an unsupported
 //!   custom mode) stays where C calls it, when a frame carries QEXT data.
-//! * `FUZZING` branches are not ported.
+//! * `FUZZING` (feature `fuzzing`): the random transient, TF, trim, silence and anti-collapse
+//!   decisions draw from [`crate::glibc_rand`] in the C order.
 //! * There are no DNN (deep PLC / DRED / OSCE) hooks in this file.
 //!
 //! Fixed-point build (`FIXED_POINT`, feature `fixed-point`): the analysis helpers whose
@@ -919,8 +920,8 @@ pub fn transient_analysis(
         // Inverse of the mean energy in Q15+6
         let norm: OpusVal32 = len2 as f32 / (EPSILON + mean);
         // We should never see NaNs here (C aborts with hardening).
-        debug_assert!(!tmp[0].is_nan());
-        debug_assert!(!norm.is_nan());
+        celt_assert!(!celt_isnan(tmp[0]));
+        celt_assert!(!celt_isnan(norm));
         let mut i = 12usize;
         while (i as i32) < len2 - 5 {
             // C: (int)MAX32(0,MIN32(127,floor(64*norm*(tmp[i]+EPSILON)))) in double.
@@ -959,6 +960,11 @@ pub fn transient_analysis(
     let t = f64::from(0.0069f64 as f32 * min16(163.0, tf_max)) - 0.139;
     let t = if 0.0 > t { 0.0 } else { t };
     *tf_estimate = math::sqrt(t) as f32;
+    #[cfg(feature = "fuzzing")]
+    let is_transient = {
+        let _ = is_transient;
+        crate::glibc_rand::rand() & 0x1 != 0
+    };
     is_transient
 }
 
@@ -1284,6 +1290,15 @@ pub fn tf_analysis(
             path0[i + 1]
         };
     }
+    #[cfg(feature = "fuzzing")]
+    {
+        use crate::glibc_rand::rand;
+        tf_select = rand() & 0x1;
+        tf_res[0] = rand() & 0x1;
+        for i in 1..lenu {
+            tf_res[i] = tf_res[i - 1] ^ i32::from((rand() & 0xF) == 0);
+        }
+    }
     tf_select
 }
 
@@ -1414,7 +1429,13 @@ pub fn alloc_trim_analysis(
     }
 
     let trim_index = floor_i32(f64::from(0.5f32 + trim));
-    imax(0, imin(10, trim_index))
+    let trim_index = imax(0, imin(10, trim_index));
+    #[cfg(feature = "fuzzing")]
+    let trim_index = {
+        let _ = trim_index;
+        crate::glibc_rand::rand() % 11
+    };
+    trim_index
 }
 
 /// Port of celt/celt_encoder.c:stereo_analysis: whether dual (L/R) stereo is cheaper than M/S.
@@ -1736,7 +1757,7 @@ pub fn tone_lpc(x: &[OpusVal16], len: i32, delay: i32, lpc: &mut [OpusVal32; 2])
     let mut r00: OpusVal32 = 0.0;
     let mut r01: OpusVal32 = 0.0;
     let mut r02: OpusVal32 = 0.0;
-    debug_assert!(len > 2 * delay);
+    celt_assert!(len > 2 * delay);
     // Compute correlations as if using the forward prediction covariance method.
     for i in 0..lenu - 2 * d {
         r00 += x[i] * x[i];
@@ -2473,7 +2494,7 @@ impl CeltEncoder {
             nb_compressed_bytes -= 1;
         }
         #[cfg(not(feature = "custom-modes"))]
-        debug_assert!(st.signalling == 0);
+        celt_assert!(st.signalling == 0);
 
         // Can't produce more than 1275 output bytes for the main payload, plus any QEXT extra
         // data.
@@ -2692,6 +2713,10 @@ impl CeltEncoder {
         let mut silence = sample_max == 0;
         #[cfg(not(feature = "fixed-point"))]
         let mut silence = sample_max <= 1.0f32 / (1i32 << st.lsb_depth) as f32;
+        #[cfg(feature = "fuzzing")]
+        if (crate::glibc_rand::rand() & 0x3F) == 0 {
+            silence = true;
+        }
         if tell == 1 {
             enc.enc_bit_logp(silence, 15);
         } else {
@@ -2864,7 +2889,7 @@ impl CeltEncoder {
         compute_mdcts(mode, short_blocks, input, freq, c, cc, lm, up);
         // This should catch any NaN in the CELT input. Since we're not supposed to see any
         // (they're filtered at the Opus layer), just abort (C asserts).
-        debug_assert!(!celt_isnan(freq[0]) && (c == 1 || !celt_isnan(freq[nu])));
+        celt_assert!(!celt_isnan(freq[0]) && (c == 1 || !celt_isnan(freq[nu])));
         if cc == 2 && c == 1 {
             tf_chan = 0;
         }
@@ -2923,7 +2948,7 @@ impl CeltEncoder {
                         diff += mask16 * (1 + 2 * i - mask_end) as f32;
                     }
                 }
-                debug_assert!(count > 0);
+                celt_assert!(count > 0);
                 mask_avg /= count as f32;
                 mask_avg += 0.2f32;
                 diff = diff * 6.0 / (c * (mask_end - 1) * (mask_end + 1) * mask_end) as f32;
@@ -3558,7 +3583,7 @@ impl CeltEncoder {
                         || mode.short_mdct_size == 90 * qext_scale)
                 {
                     // C: `compute_qext_mode(&qext_mode_struct, mode)` (precomputed at init).
-                    debug_assert!(
+                    celt_assert!(
                         qext_mode_supported(mode),
                         "compute_qext_mode: unsupported mode"
                     );
@@ -3830,6 +3855,11 @@ impl CeltEncoder {
 
         if anti_collapse_rsv > 0 {
             let anti_collapse_on = st.consec_transient < 2;
+            #[cfg(feature = "fuzzing")]
+            let anti_collapse_on = {
+                let _ = anti_collapse_on;
+                crate::glibc_rand::rand() & 0x1 != 0
+            };
             enc.enc_bits(u32::from(anti_collapse_on), 1);
         }
         if qext_bytes == 0 {

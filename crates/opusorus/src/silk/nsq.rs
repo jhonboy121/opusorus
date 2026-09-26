@@ -90,7 +90,7 @@ pub fn silk_noise_shape_quantizer_short_prediction_c(
     coef16: &[i16],
     order: i32,
 ) -> i32 {
-    debug_assert!(order == 10 || order == 16);
+    silk_assert!(order == 10 || order == 16);
     let n = buf32.len();
 
     // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf.
@@ -180,7 +180,7 @@ pub fn silk_nsq_c(
     // Set unvoiced lag to the previous one, overwrite later for voiced
     let mut lag = nsq.lag_prev;
 
-    debug_assert!(nsq.prev_gain_q16 != 0);
+    silk_assert!(nsq.prev_gain_q16 != 0);
 
     let offset_q10 = SILK_QUANTIZATION_OFFSETS_Q10[(ps_indices.signal_type >> 1) as usize]
         [ps_indices.quant_offset_type as usize] as i32;
@@ -211,7 +211,7 @@ pub fn silk_nsq_c(
         let ar_shp_q13 = &ar_q13[k * MSHP..(k + 1) * MSHP];
 
         // Noise shape parameters
-        debug_assert!(harm_shape_gain_q14[k] >= 0);
+        silk_assert!(harm_shape_gain_q14[k] >= 0);
         let mut harm_shape_fir_packed_q14 = silk_rshift(harm_shape_gain_q14[k], 2);
         harm_shape_fir_packed_q14 |= silk_lshift(silk_rshift(harm_shape_gain_q14[k], 1), 16);
 
@@ -225,7 +225,7 @@ pub fn silk_nsq_c(
                 // Rewhiten with new A coefs
                 let start_idx =
                     ps_enc_c.ltp_mem_length - lag - ps_enc_c.predict_lpc_order - LTP_ORDER / 2;
-                debug_assert!(start_idx > 0);
+                celt_assert!(start_idx > 0);
                 let start_idx = start_idx as usize;
 
                 silk_lpc_analysis_filter(
@@ -351,7 +351,7 @@ fn silk_noise_shape_quantizer(
         };
 
         // Noise shape feedback
-        debug_assert!((shaping_lpc_order & 1) == 0); // check that order is even
+        celt_assert!((shaping_lpc_order & 1) == 0); // check that order is even
         let mut n_ar_q12 = silk_nsq_noise_shape_feedback_loop_c(
             nsq.s_diff_shp_q14,
             &mut nsq.s_ar2_q14,
@@ -367,7 +367,7 @@ fn silk_noise_shape_quantizer(
         );
         n_lf_q12 = silk_smlawt(n_lf_q12, nsq.s_lf_ar_shp_q14, lf_shp_q14);
 
-        debug_assert!(lag > 0 || signal_type != TYPE_VOICED);
+        celt_assert!(lag > 0 || signal_type != TYPE_VOICED);
 
         // Combine prediction and noise shaping signals
         let mut tmp1 = silk_sub32_ovflw(silk_lshift32(lpc_pred_q10, 2), n_ar_q12); // Q12
@@ -506,7 +506,7 @@ fn silk_nsq_scale_states(
 ) {
     let lag = pitch_l[subfr];
     let mut inv_gain_q31 = silk_inverse32_varq(silk_max(gains_q16[subfr], 1), 47);
-    debug_assert!(inv_gain_q31 != 0);
+    silk_assert!(inv_gain_q31 != 0);
 
     // Scale input
     let inv_gain_q26 = silk_rshift_round(inv_gain_q31, 5);
@@ -521,7 +521,7 @@ fn silk_nsq_scale_states(
             inv_gain_q31 = silk_lshift(silk_smulwb(inv_gain_q31, ltp_scale_q14), 2);
         }
         for i in (nsq.s_ltp_buf_idx - lag - LTP_ORDER / 2) as usize..nsq.s_ltp_buf_idx as usize {
-            debug_assert!(i < MFL);
+            celt_assert!(i < MFL);
             s_ltp_q15[i] = silk_smulwb(inv_gain_q31, s_ltp[i] as i32);
         }
     }

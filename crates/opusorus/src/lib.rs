@@ -86,6 +86,36 @@
 //! operations (`fixed_debug::celt_mips`). The output is bit-exact with libopus built with
 //! `FIXED_DEBUG` (which differs from a release build where operands are out of range). For
 //! debugging only: it is several times slower. See the `fixed_debug` module.
+//!
+//! # Upstream build options (`float-approx`, `assertions`, `fuzzing`, `disable-rfc8251`)
+//!
+//! Each mirrors a libopus configure/meson option and is verified against the C library built
+//! with the same define:
+//!
+//! * **`float-approx`** (`--enable-float-approx`, `FLOAT_APPROX`): the float build's
+//!   `celt_log2`/`celt_exp2` become libopus' polynomial approximations (no libm call) and
+//!   `celt_isnan` tests the IEEE 754 bits. Output changes accordingly (bit-exact with a
+//!   `FLOAT_APPROX` libopus, which upstream's autotools enable by default on x86, ARM and
+//!   AArch64; meson and CMake do not). No effect on the fixed-point build, as upstream.
+//! * **`assertions`** (`--enable-assertions`, `ENABLE_ASSERTIONS`): the libopus internal checks
+//!   (`celt_assert`, `celt_sig_assert`, `silk_assert`, which the port otherwise has as
+//!   `debug_assert!`s) are `assert!`s in every build profile, and the checks that the port
+//!   leaves out of debug builds (`celt_assert(0)` before error returns, the `compute_ebands`
+//!   layout checks, the non-converging SILK limiters) are compiled in: a failed check panics
+//!   where libopus aborts. In the fixed-point build this includes the `celt_sig_assert`s that
+//!   libopus fails on its signed-overflow (C UB) paths, such as a stereo encoder with
+//!   `OPUS_SET_LFE(1)`: such an encoder panics, as libopus aborts (without the feature, both
+//!   wrap). For testing and debugging; the port's memory safety never depends on it.
+//! * **`fuzzing`** (`--enable-fuzzing`, `FUZZING`): the encoder makes random decisions (mode,
+//!   mono/stereo, transient, TF, spreading, tapset, trim, band skipping, silence,
+//!   anti-collapse, QEXT depths) from `glibc_rand` (a public module with the feature), a
+//!   process-wide reproduction of glibc's `rand()`, so its bitstreams are bit-exact with a
+//!   `FUZZING` libopus on a glibc host given the same seed (see the module for the state
+//!   semantics). **Not for production.**
+//! * **`disable-rfc8251`** (`--disable-rfc8251`, `DISABLE_UPDATE_DRAFT`): the decoder (and the
+//!   encoder's band quantization) without the RFC 8251 bitstream fixes: RFC 6716 band folding
+//!   and mono decoders with stereo phase inversion enabled. Such a decoder passes the original
+//!   RFC 6716 test vectors, not the RFC 8251 ones.
 
 #![no_std]
 #![cfg_attr(
@@ -147,6 +177,11 @@ macro_rules! const_unless_fixed_debug {
         $(#[$m])* $v fn $name $($rest)*
     };
 }
+//!
+// libopus assertion macros (`celt_assert!`, `celt_sig_assert!`, `silk_assert!`); must precede the
+// modules that use them.
+#[macro_use]
+mod assertions;
 
 mod error;
 pub use error::{Error, Result};
@@ -159,6 +194,11 @@ pub use constants::*;
 
 #[doc(hidden)]
 pub mod math;
+
+// glibc `rand()` for the fuzzing build (libopus `FUZZING`); `opus_demo` uses its generator.
+#[cfg(any(feature = "fuzzing", feature = "internals"))]
+#[cfg_attr(not(feature = "fuzzing"), doc(hidden))]
+pub mod glibc_rand;
 
 #[cfg(feature = "internals")]
 #[doc(hidden)]

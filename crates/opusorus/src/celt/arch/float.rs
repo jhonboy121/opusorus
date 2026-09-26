@@ -48,11 +48,22 @@ pub const Q15_ONE: f32 = 1.0;
 /// `MAX_ENCODING_DEPTH` (float build).
 pub const MAX_ENCODING_DEPTH: i32 = 24;
 
-/// `celt_isnan`.
+/// `celt_isnan`: `((x)!=(x))`.
+#[cfg(not(feature = "float-approx"))]
 #[inline(always)]
 #[must_use]
 pub const fn celt_isnan(x: f32) -> bool {
     x.is_nan()
+}
+
+/// `celt_isnan` (`FLOAT_APPROX`): tests the IEEE 754 bits (all-ones exponent, non-zero
+/// mantissa) so NaN is detected even under `-ffast-math` in C. Same result as `x != x` here.
+#[cfg(feature = "float-approx")]
+#[inline(always)]
+#[must_use]
+pub const fn celt_isnan(x: f32) -> bool {
+    let i = x.to_bits();
+    ((i >> 23) & 0xFF) == 0xFF && (i & 0x007F_FFFF) != 0
 }
 
 macro_rules! ident1 {

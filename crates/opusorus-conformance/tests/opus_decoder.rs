@@ -1888,13 +1888,18 @@ fn rfc_vector(dir: &Path, n: usize) -> bool {
     let bit = dir.join(format!("testvector{n:02}.bit"));
     let dec = dir.join(format!("testvector{n:02}.dec"));
     let decm = dir.join(format!("testvector{n:02}m.dec"));
-    if !bit.is_file() || !dec.is_file() || !decm.is_file() {
+    // The RFC 6716 set (feature `disable-rfc8251`) has no alternative `m` references.
+    if !bit.is_file() || !dec.is_file() || (!decm.is_file() && VECTOR_SET == "rfc8251") {
         eprintln!("NOTE: testvector{n:02} missing; skipping");
         return false;
     }
     let packets = read_bit(&bit);
     let x1 = read_pcm16(&std::fs::read(&dec).unwrap(), 2);
-    let x2 = read_pcm16(&std::fs::read(&decm).unwrap(), 2);
+    let x2 = if decm.is_file() {
+        read_pcm16(&std::fs::read(&decm).unwrap(), 2)
+    } else {
+        x1.clone()
+    };
     for &fs in &[8000, 12000, 16000, 24000, 48000] {
         for ch in 1..=2 {
             let what = format!("testvector{n:02} {fs}/{ch}");
@@ -1916,10 +1921,19 @@ fn rfc_vector(dir: &Path, n: usize) -> bool {
     true
 }
 
-/// RFC 8251 vectors at every rate, mono and stereo (in parallel).
+/// The conformance vector set of this build: RFC 8251's, or with `disable-rfc8251`
+/// (`DISABLE_UPDATE_DRAFT`) the original RFC 6716 vectors.
+const VECTOR_SET: &str = if cfg!(feature = "disable-rfc8251") {
+    "rfc6716"
+} else {
+    "rfc8251"
+};
+
+/// RFC 8251 vectors (RFC 6716 with `disable-rfc8251`) at every rate, mono and stereo (in
+/// parallel).
 #[test]
 fn rfc8251_vectors() {
-    let Some(dir) = vectors_dir("rfc8251") else {
+    let Some(dir) = vectors_dir(VECTOR_SET) else {
         eprintln!(
             "NOTE: testdata/vectors/rfc8251 not found; skipping (run scripts/fetch_vectors.sh)"
         );
@@ -2091,23 +2105,19 @@ mod qext {
             return false;
         }
         let packets = read_bit(&bit);
-        let (out, mism) = demo_decode(&packets, 96000, 2, ignore, !is_qext, name);
+        // With `disable-rfc8251` the RFC vectors decode differently at 96 kHz (the RFC 6716
+        // folding reads other symbols there): only Rust == C is asserted.
+        let rfc = !is_qext && !cfg!(feature = "disable-rfc8251");
+        let (out, mism) = demo_decode(&packets, 96000, 2, ignore, rfc, name);
         if mism > 0 {
             eprintln!(
                 "NOTE: {name}: final range (C and Rust) differs from the file for {mism} packets"
             );
         }
-        check(&refp, &out, name, !is_qext);
+        check(&refp, &out, name, rfc);
         // Other output configurations: bit-exact vs C only.
-        demo_decode(
-            &packets,
-            96000,
-            1,
-            ignore,
-            !is_qext,
-            &format!("{name} mono"),
-        );
-        demo_decode(&packets, 48000, 2, ignore, !is_qext, &format!("{name} 48k"));
+        demo_decode(&packets, 96000, 1, ignore, rfc, &format!("{name} mono"));
+        demo_decode(&packets, 48000, 2, ignore, rfc, &format!("{name} 48k"));
         true
     }
 

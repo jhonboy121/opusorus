@@ -57,8 +57,11 @@
 //!   `frame_size * channels` for PLC/FEC.
 //! * The packet is `Option<&[u8]>`: `None` or an empty slice is C's `data == NULL` / `len == 0`
 //!   (packet loss). A negative C `len` (always `OPUS_BAD_ARG` in C) cannot be expressed.
-//! * `validate_opus_decoder` / `celt_assert` are `debug_assert!`s; `MUST_SUCCEED` failures return
+//! * `validate_opus_decoder` / `celt_assert` are `debug_assert!`s (`assert!`s with the feature
+//!   `assertions`, libopus `ENABLE_ASSERTIONS`); `MUST_SUCCEED` failures return
 //!   [`Error::InternalError`] (the non-hardening C behaviour) instead of aborting.
+//!   `validate_dred_decoder` (the `magic` check) has no counterpart: a
+//!   DRED decoder (`dred::DredDecoder`) cannot be uninitialised.
 //!
 //! # DNN features
 //!
@@ -321,12 +324,15 @@ const fn res_from_val32(x: i32) -> OpusRes {
 const fn c_ignores_result<T: Copy>(_r: Result<T>) {}
 
 /// `MUST_SUCCEED` for CTL-like calls: a failure is `OPUS_INTERNAL_ERROR` (C aborts with
-/// assertions enabled).
+/// assertions enabled: a panic with the feature `assertions`).
 #[inline]
 const fn must_succeed(r: Result<()>) -> Result<()> {
     match r {
         Ok(()) => Ok(()),
-        Err(_) => Err(Error::InternalError),
+        Err(_) => {
+            assertion_failure!("(call) == OPUS_OK");
+            Err(Error::InternalError)
+        }
     }
 }
 
@@ -567,20 +573,20 @@ impl Decoder {
 
     /// Port of `validate_opus_decoder` (assertions only).
     fn validate(&self) {
-        debug_assert!(self.channels == 1 || self.channels == 2);
-        debug_assert!(valid_fs(self.fs));
-        debug_assert!(self.dec_control.api_sample_rate == self.fs);
-        debug_assert!(matches!(
+        celt_assert!(self.channels == 1 || self.channels == 2);
+        celt_assert!(valid_fs(self.fs));
+        celt_assert!(self.dec_control.api_sample_rate == self.fs);
+        celt_assert!(matches!(
             self.dec_control.internal_sample_rate,
             0 | 16000 | 12000 | 8000
         ));
-        debug_assert!(self.dec_control.n_channels_api == self.channels);
-        debug_assert!(matches!(self.dec_control.n_channels_internal, 0..=2));
-        debug_assert!(matches!(
+        celt_assert!(self.dec_control.n_channels_api == self.channels);
+        celt_assert!(matches!(self.dec_control.n_channels_internal, 0..=2));
+        celt_assert!(matches!(
             self.dec_control.payload_size_ms,
             0 | 10 | 20 | 40 | 60
         ));
-        debug_assert!(self.stream_channels == 1 || self.stream_channels == 2);
+        celt_assert!(self.stream_channels == 1 || self.stream_channels == 2);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -727,7 +733,7 @@ impl Decoder {
                         crate::constants::raw::OPUS_BANDWIDTH_MEDIUMBAND => 12000,
                         crate::constants::raw::OPUS_BANDWIDTH_WIDEBAND => 16000,
                         _ => {
-                            debug_assert!(false, "SILK-only bandwidth above wideband");
+                            celt_assert!(false, "SILK-only bandwidth above wideband");
                             16000
                         }
                     };
@@ -886,7 +892,7 @@ impl Decoder {
                 crate::constants::raw::OPUS_BANDWIDTH_SUPERWIDEBAND => 19,
                 crate::constants::raw::OPUS_BANDWIDTH_FULLBAND => 21,
                 _ => {
-                    debug_assert!(false, "invalid bandwidth");
+                    celt_assert!(false, "invalid bandwidth");
                     21
                 }
             };
@@ -1207,7 +1213,7 @@ impl Decoder {
                     break;
                 }
             }
-            debug_assert!(pcm_count == frame_size);
+            celt_assert!(pcm_count == frame_size);
             self.last_packet_duration = pcm_count;
             return Ok(pcm_count);
         };
@@ -1259,7 +1265,7 @@ impl Decoder {
                         self.last_packet_duration = duration_copy;
                         return Err(e);
                     }
-                    Ok(r) => debug_assert!(r == frame_size - packet_frame_size),
+                    Ok(r) => celt_assert!(r == frame_size - packet_frame_size),
                 }
             }
             // Complete with FEC
@@ -1327,7 +1333,7 @@ impl Decoder {
                 #[cfg(feature = "qext")]
                 ext_data,
             )?;
-            debug_assert!(ret == packet_frame_size);
+            celt_assert!(ret == packet_frame_size);
             nb_samples += ret;
         }
         self.last_packet_duration = nb_samples;
@@ -1381,7 +1387,7 @@ impl Decoder {
                 _ => return Err(Error::InvalidPacket),
             }
         }
-        debug_assert!(self.channels == 1 || self.channels == 2);
+        celt_assert!(self.channels == 1 || self.channels == 2);
         let n = frame_size as usize * self.channels as usize;
         // Rust-only guard: C would write past the caller's buffer.
         if n > pcm_len {
@@ -1946,7 +1952,7 @@ impl Decoder {
         if frame_size <= 0 {
             return Err(Error::BadArg);
         }
-        debug_assert!(self.channels == 1 || self.channels == 2);
+        celt_assert!(self.channels == 1 || self.channels == 2);
         let n = frame_size as usize * self.channels as usize;
         // Rust-only guard: C would write past the caller's buffer.
         if n > pcm_len {

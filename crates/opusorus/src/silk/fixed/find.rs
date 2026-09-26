@@ -99,7 +99,7 @@ pub fn silk_find_lpc_fix(
                 res_nrg -= silk_rshift(res_tmp_nrg, shift);
             }
         } else {
-            debug_assert!(shift > -32);
+            silk_assert!(shift > -32);
             res_nrg = silk_rshift(res_nrg, -shift) - res_tmp_nrg;
             res_nrg_q = res_tmp_nrg_q;
         }
@@ -164,7 +164,7 @@ pub fn silk_find_lpc_fix(
         silk_a2nlsf(nlsf_q15, &mut a_q16, order);
     }
 
-    debug_assert!(
+    celt_assert!(
         ps_enc_c.indices.nlsf_interp_coef_q2 == 4
             || (ps_enc_c.use_interpolated_nlsfs != 0
                 && ps_enc_c.first_frame_after_reset == 0
@@ -267,7 +267,7 @@ pub fn silk_find_pitch_lags_fix(
     let buf_len = la_pitch + s_cmn.frame_length as usize + s_cmn.ltp_mem_length as usize;
 
     // Safety check
-    debug_assert!(buf_len >= win_len);
+    celt_assert!(buf_len >= win_len);
 
     let x = &x_buf[x_start..x_start + buf_len];
 
@@ -443,7 +443,7 @@ pub fn silk_find_pred_coefs_fix(
     }
     for i in 0..nb_subfr {
         // Divide to Q16
-        debug_assert!(ps_enc_ctrl.gains_q16[i] > 0);
+        silk_assert!(ps_enc_ctrl.gains_q16[i] > 0);
         // Invert and normalize gains, and ensure that maximum invGains_Q16 is within range of
         // a 16 bit int
         inv_gains_q16[i] = silk_div32_varq(min_gain_q16, ps_enc_ctrl.gains_q16[i], 16 - 2);
@@ -452,7 +452,7 @@ pub fn silk_find_pred_coefs_fix(
         inv_gains_q16[i] = silk_max(inv_gains_q16[i], 100);
 
         // Square the inverted gains
-        debug_assert!(inv_gains_q16[i] == silk_sat16(inv_gains_q16[i]));
+        silk_assert!(inv_gains_q16[i] == silk_sat16(inv_gains_q16[i]));
 
         // Invert the inverted and normalized gains
         local_gains[i] = silk_div32(1i32 << 16, inv_gains_q16[i]);
@@ -464,7 +464,7 @@ pub fn silk_find_pred_coefs_fix(
         let mut xx_ltp_q17 = [0i32; MNSF * LTPO * LTPO];
 
         // VOICED
-        debug_assert!(
+        celt_assert!(
             s_cmn.ltp_mem_length - s_cmn.predict_lpc_order
                 >= ps_enc_ctrl.pitch_l[0] + LTP_ORDER / 2
         );
