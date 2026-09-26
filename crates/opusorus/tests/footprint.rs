@@ -7,9 +7,6 @@
 //! This is the only test of its binary: other tests allocating concurrently would distort
 //! the measurement.
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -117,6 +114,13 @@ fn run(packets: &[Vec<u8>], mut decode: impl FnMut(Option<&[u8]>)) {
 
 /// Enables every DNN path of a decoder with loaded models (deep PLC, NoLACE, BWE).
 #[allow(unused_variables, reason = "only used with the DNN features")]
+#[cfg_attr(
+    not(any(feature = "deep-plc", feature = "osce")),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "empty without the DNN features"
+    )
+)]
 fn enable_dnn(dec: &mut Decoder) {
     #[cfg(any(feature = "deep-plc", feature = "osce"))]
     {
@@ -127,6 +131,13 @@ fn enable_dnn(dec: &mut Decoder) {
 }
 
 /// Whether the decoders have DNN models (so the DNN states `get_size` counts are allocated).
+#[cfg_attr(
+    not(any(feature = "deep-plc", feature = "osce")),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "constant without the DNN features"
+    )
+)]
 fn dnn_loaded() -> bool {
     #[cfg(any(feature = "deep-plc", feature = "osce"))]
     {

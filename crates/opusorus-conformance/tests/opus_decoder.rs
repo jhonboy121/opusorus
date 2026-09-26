@@ -1918,9 +1918,6 @@ fn rfc8251_vectors() {
 #[cfg(feature = "qext")]
 mod qext {
     use super::*;
-    // `qext_compare` is not compiled in fixed-point builds of opusorus-tools yet (it needs the
-    // float `mini_kfft`); there the Opus HD vectors are only checked bit-exact against C.
-    #[cfg(not(feature = "fixed-point"))]
     use opusorus_tools::compare::{QextCompareOptions, SampleFormat, qext_compare, read_pcm};
 
     /// Regression test for a `celt/bands.rs` aliasing bug: a 96 kHz QEXT stream (all 14 QEXT
@@ -2012,7 +2009,6 @@ mod qext {
         }
     }
 
-    #[cfg(not(feature = "fixed-point"))]
     fn f32_of(x: &[i32]) -> Vec<f32> {
         // opus_demo -f32: int24 * (1/8388608), then the tools read f32 * 32768.
         x.iter()
@@ -2020,17 +2016,14 @@ mod qext {
             .collect()
     }
 
-    /// `qext_compare -s -r 96000 -f32 -thresholds 0.05 .1 .1 reference out` (fixed-point
-    /// builds: not available, see the imports).
-    #[cfg(feature = "fixed-point")]
-    fn check(_reference: &Path, _out: &[i32], what: &str, _must_pass: bool) {
-        eprintln!(
-            "NOTE: {what}: qext_compare not available in fixed-point builds; bit-exact vs C only"
-        );
-    }
-
     /// `qext_compare -s -r 96000 -f32 -thresholds 0.05 .1 .1 reference out`.
-    #[cfg(not(feature = "fixed-point"))]
+    ///
+    /// In the 16-bit fixed-point build (`fixed-point` without `fixed-res24`) the output has
+    /// 16-bit resolution: `qext_compare` measures in 16-bit LSBs and rounding to 16 bits leaves
+    /// an error of rms up to `1/sqrt(12)` = 0.2887 LSB, above the `rms` threshold of 0.1. There
+    /// a vector that must pass may exceed the thresholds only with an rms within that
+    /// quantisation floor (< 0.3); the output is bit-exact with the 16-bit fixed-point C decoder
+    /// in any case.
     fn check(reference: &Path, out: &[i32], what: &str, must_pass: bool) {
         let x = read_pcm(&std::fs::read(reference).unwrap(), 2, SampleFormat::F32Le);
         let opts = QextCompareOptions {
@@ -2041,7 +2034,14 @@ mod qext {
         };
         let res = qext_compare(&x, &f32_of(out), &opts).unwrap();
         let pass = res.passes(0.05, 0.1, 0.1);
-        if must_pass {
+        let res16 = cfg!(all(feature = "fixed-point", not(feature = "fixed-res24")));
+        if must_pass && res16 && !pass {
+            assert!(
+                res.rms < 0.3,
+                "{what}: qext_compare fails beyond the 16-bit quantisation floor {res:?}"
+            );
+            eprintln!("NOTE: {what}: 16-bit output resolution limits qext_compare: {res:?}");
+        } else if must_pass {
             assert!(pass, "{what}: qext_compare fails {res:?}");
         } else if !pass {
             eprintln!(

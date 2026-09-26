@@ -12,6 +12,20 @@ use crate::celt::arch::{
 };
 
 use super::celt_ilog2;
+use crate::celt::entcode::ec_ilog;
+
+/// `celt_ilog2(x)`. With `CHECKED = false`, what a release build of libopus computes for any
+/// `x`: the `x>0` precondition is a `celt_sig_assert` (compiled out), and `EC_ILOG` works on
+/// the unsigned value, so `x <= 0` gives 31 (negative) or -1 (zero) instead of a debug
+/// assertion failure.
+#[inline(always)]
+const fn ilog2<const CHECKED: bool>(x: i32) -> i32 {
+    if CHECKED {
+        celt_ilog2(x)
+    } else {
+        ec_ilog(x as u32) - 1
+    }
+}
 
 /// Port of `celt_maxabs16` (fixed): `MAX32(EXTEND32(maxval),-EXTEND32(minval))`.
 #[inline]
@@ -65,12 +79,18 @@ pub fn celt_maxabs32(x: &[OpusVal32]) -> OpusVal32 {
 
 /// Port of `celt/mathops.c:frac_div32_q29`: `a/b` in Q29.
 #[must_use]
-pub fn frac_div32_q29(mut a: OpusVal32, mut b: OpusVal32) -> OpusVal32 {
-    let shift = celt_ilog2(b) - 29;
+pub fn frac_div32_q29(a: OpusVal32, b: OpusVal32) -> OpusVal32 {
+    frac_div32_q29_impl::<true>(a, b)
+}
+
+/// [`frac_div32_q29`]; `CHECKED = false` skips the precondition assertions of `celt_ilog2` /
+/// `celt_rcp` (`b > 0`) like a release build of libopus (see [`celt_atan2p_norm_release`]).
+fn frac_div32_q29_impl<const CHECKED: bool>(mut a: OpusVal32, mut b: OpusVal32) -> OpusVal32 {
+    let shift = ilog2::<CHECKED>(b) - 29;
     a = vshr32(a, shift);
     b = vshr32(b, shift);
     // 16-bit reciprocal. C: `ROUND16(celt_rcp(ROUND16(b,16)),3)`.
-    let rcp: OpusVal16 = round16(celt_rcp(i32::from(round16(b, 16))), 3);
+    let rcp: OpusVal16 = round16(celt_rcp_impl::<CHECKED>(i32::from(round16(b, 16))), 3);
     let mut result = mult16_32_q15(rcp, a);
     let rem = pshr32(a, 2) - mult32_32_q31(result, b);
     result = add32(result, shl32(mult16_32_q15(rcp, rem), 2));
@@ -80,7 +100,12 @@ pub fn frac_div32_q29(mut a: OpusVal32, mut b: OpusVal32) -> OpusVal32 {
 /// Port of `celt/mathops.c:frac_div32`: `a/b` in Q31, saturated to ±(2^31-1).
 #[must_use]
 pub fn frac_div32(a: OpusVal32, b: OpusVal32) -> OpusVal32 {
-    let result = frac_div32_q29(a, b);
+    frac_div32_impl::<true>(a, b)
+}
+
+/// [`frac_div32`]; `CHECKED` as in [`frac_div32_q29_impl`].
+fn frac_div32_impl<const CHECKED: bool>(a: OpusVal32, b: OpusVal32) -> OpusVal32 {
+    let result = frac_div32_q29_impl::<CHECKED>(a, b);
     if result >= 536_870_912 {
         // 2^29
         2_147_483_647 // 2^31 - 1
@@ -174,12 +199,24 @@ pub fn celt_sqrt(mut x: OpusVal32) -> OpusVal32 {
 /// Q(x/2 + 16).
 #[must_use]
 pub fn celt_sqrt32(x: OpusVal32) -> OpusVal32 {
+    celt_sqrt32_impl::<true>(x)
+}
+
+/// [`celt_sqrt32`] with release-libopus semantics for negative `x` (no `celt_ilog2`
+/// assertion): used on the wrapped energies of `celt/vq.rs:stereo_itheta`.
+#[must_use]
+pub fn celt_sqrt32_release(x: OpusVal32) -> OpusVal32 {
+    celt_sqrt32_impl::<false>(x)
+}
+
+/// [`celt_sqrt32`]; `CHECKED` as in [`ilog2`].
+fn celt_sqrt32_impl<const CHECKED: bool>(x: OpusVal32) -> OpusVal32 {
     if x == 0 {
         return 0;
     } else if x >= 1_073_741_824 {
         return 2_147_483_647; // 2^31 -1
     }
-    let k = celt_ilog2(x) >> 1;
+    let k = ilog2::<CHECKED>(x) >> 1;
     let mut x_frac = vshr32(x, 2 * (k - 14) - 1);
     x_frac = mult32_32_q31(celt_rsqrt_norm32(x_frac), x_frac);
     if k < 12 {
@@ -315,8 +352,16 @@ pub fn celt_rcp_norm32(x: OpusVal32) -> OpusVal32 {
 /// Port of `celt/mathops.c:celt_rcp`: reciprocal approximation (Q15 input, Q16 output).
 #[must_use]
 pub fn celt_rcp(x: OpusVal32) -> OpusVal32 {
-    debug_assert!(x > 0);
-    let i = celt_ilog2(x);
+    celt_rcp_impl::<true>(x)
+}
+
+/// [`celt_rcp`]; `CHECKED = false` skips the `x > 0` precondition (a `celt_sig_assert` in C,
+/// compiled out in release builds).
+fn celt_rcp_impl<const CHECKED: bool>(x: OpusVal32) -> OpusVal32 {
+    if CHECKED {
+        debug_assert!(x > 0);
+    }
+    let i = ilog2::<CHECKED>(x);
     // Compute the reciprocal of a Q15 number in the range [0, 1).
     let r: OpusVal16 = celt_rcp_norm16((vshr32(x, i - 15) - 32768) as i16);
     // r is now the Q15 solution to 2/(n+1), with a maximum relative error of 7.05346E-5, a
@@ -544,14 +589,33 @@ pub fn celt_atan_norm(x: OpusVal32) -> OpusVal32 {
 /// Port of `celt_atan2p_norm` (fixed): `atan2(y,x)*2/pi` in Q30 for Q30 inputs `x, y >= 0`.
 #[must_use]
 pub fn celt_atan2p_norm(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
-    debug_assert!(x >= 0 && y >= 0);
+    celt_atan2p_norm_impl::<true>(y, x)
+}
+
+/// [`celt_atan2p_norm`] with release-libopus semantics for negative inputs: the `x, y >= 0`
+/// preconditions of it, `frac_div32`, `celt_rcp` and `celt_ilog2` are `celt_sig_assert`s,
+/// compiled out in release builds. Used on the roots of the wrapped (negative) energies of
+/// `celt/vq.rs:stereo_itheta` (C UB, a stereo encoder with `OPUS_SET_LFE(1)`), so the port
+/// computes what libopus does instead of panicking in debug builds.
+#[must_use]
+pub fn celt_atan2p_norm_release(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
+    celt_atan2p_norm_impl::<false>(y, x)
+}
+
+/// [`celt_atan2p_norm`]; `CHECKED` as in [`ilog2`].
+fn celt_atan2p_norm_impl<const CHECKED: bool>(y: OpusVal32, x: OpusVal32) -> OpusVal32 {
+    if CHECKED {
+        debug_assert!(x >= 0 && y >= 0);
+    }
     if y == 0 && x == 0 {
         0
     } else if y < x {
-        celt_atan_norm(shr32(frac_div32(y, x), 1))
+        celt_atan_norm(shr32(frac_div32_impl::<CHECKED>(y, x), 1))
     } else {
-        debug_assert!(y > 0);
-        1_073_741_824 /* 1.0f Q30 */ - celt_atan_norm(shr32(frac_div32(x, y), 1))
+        if CHECKED {
+            debug_assert!(y > 0);
+        }
+        1_073_741_824 /* 1.0f Q30 */ - celt_atan_norm(shr32(frac_div32_impl::<CHECKED>(x, y), 1))
     }
 }
 

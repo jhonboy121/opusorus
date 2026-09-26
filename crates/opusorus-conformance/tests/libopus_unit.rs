@@ -7,8 +7,13 @@
 //!
 //! These are self-checks of opusorus (no C oracle involved). Tests that call the C library
 //! `rand()` use glibc's generator (`GlibcRand`), so they draw the same values as the C
-//! programs on glibc. The float-build variants of the tests are ported (`FIXED_POINT`
-//! sections are not).
+//! programs on glibc. Both builds are ported: in fixed-point builds (`fixed-point`,
+//! `fixed-res24`) the tests use the integer `kiss_fft_scalar` / `celt_norm` / `opus_res` types
+//! and test_unit_mathops.c runs its `FIXED_POINT` tests (`testilog2`, fixed `testlog2`/`testexp2`
+//! /`testdiv`/`testsqrt`, `testrsqrt`, `testsqrt32`, `test_cos_norm32`, `test_rcp_norm32`, and
+//! with `qext` `testlog2_db`, `testexp2_db`, `testatan_norm`, `testatan2p_norm`) instead of the
+//! float ones, as the C programs do; `test_simple_matrix` skips the float matrix variants
+//! (`!defined(FIXED_POINT)` in C).
 //!
 //! Adaptations:
 //! * `cwrsi`/`icwrs` are private to `celt/cwrs.rs`; the cwrs32 test reaches them through
@@ -20,9 +25,6 @@
 //!   `opus_limit2_checkwithin1`; opusorus has only the C implementation, checked once per
 //!   `use_ref_impl` value.
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -40,6 +42,7 @@
 
 use std::f64::consts::PI as M_PI;
 
+use opusorus::celt::arch::{CeltCoef, CeltNorm, OpusRes};
 use opusorus::celt::arch::{int16tores, res2int16};
 use opusorus::celt::bands::{SPREAD_NORMAL, bitexact_cos, bitexact_log2tan};
 use opusorus::celt::cwrs::{celt_pvq_v, decode_pulses, encode_pulses};
@@ -47,21 +50,43 @@ use opusorus::celt::entdec::EcDec;
 use opusorus::celt::entenc::EcEnc;
 use opusorus::celt::kiss_fft::{opus_fft, opus_ifft};
 use opusorus::celt::laplace::{ec_laplace_decode, ec_laplace_encode};
-use opusorus::celt::mathops::{
-    celt_atan2p_norm, celt_cos_norm2, celt_exp2, celt_float2int16, celt_log2, celt_rcp, celt_sqrt,
-    float2int16, opus_limit2_checkwithin1,
-};
+use opusorus::celt::mathops::{celt_float2int16, float2int16, opus_limit2_checkwithin1};
 use opusorus::celt::mdct::{clt_mdct_backward, clt_mdct_forward};
 #[cfg(not(feature = "custom-modes"))]
 use opusorus::celt::modes::opus_custom_mode_create;
 use opusorus::celt::rate::get_pulses;
-use opusorus::celt::static_modes::KissFftCpx;
+use opusorus::celt::static_modes::{KissFftCpx, KissFftScalar};
 use opusorus::celt::vq::exp_rotation;
 use opusorus::mapping_matrix::{
-    MappingMatrix, mapping_matrix_get_size, mapping_matrix_multiply_channel_in_float,
-    mapping_matrix_multiply_channel_in_short, mapping_matrix_multiply_channel_out_float,
+    MappingMatrix, mapping_matrix_get_size, mapping_matrix_multiply_channel_in_short,
     mapping_matrix_multiply_channel_out_short,
 };
+#[cfg(not(feature = "fixed-point"))]
+use opusorus::mapping_matrix::{
+    mapping_matrix_multiply_channel_in_float, mapping_matrix_multiply_channel_out_float,
+};
+
+/// An `int` stored in a `kiss_fft_scalar` (float, or `opus_int32` in fixed-point builds).
+#[cfg(not(feature = "fixed-point"))]
+const fn scalar(v: i32) -> KissFftScalar {
+    v as KissFftScalar
+}
+/// An `int` stored in a `kiss_fft_scalar` (float, or `opus_int32` in fixed-point builds).
+#[cfg(feature = "fixed-point")]
+const fn scalar(v: i32) -> KissFftScalar {
+    v
+}
+
+/// An `int` stored in a `celt_norm` (float, or `opus_int32` in fixed-point builds).
+#[cfg(not(feature = "fixed-point"))]
+const fn norm(v: i32) -> CeltNorm {
+    v as CeltNorm
+}
+/// An `int` stored in a `celt_norm` (float, or `opus_int32` in fixed-point builds).
+#[cfg(feature = "fixed-point")]
+const fn norm(v: i32) -> CeltNorm {
+    v
+}
 
 /// glibc's `rand()` (`TYPE_3` additive feedback generator); `new(1)` is an unseeded `rand()`.
 #[derive(Debug, Clone)]
@@ -217,9 +242,14 @@ fn unit_cwrs32() {
 // test_unit_dft.c
 // ---------------------------------------------------------------------------------------------
 
+/// Complex values as `(re, im)` doubles (C: `in[k].r * re` promotes to double).
+fn pairs(v: &[KissFftCpx]) -> Vec<(f64, f64)> {
+    v.iter().map(|c| (f64::from(c.r), f64::from(c.i))).collect()
+}
+
 /// `check` of test_unit_dft.c / test_unit_mini_kfft.c: SNR of `out` vs a double-precision DFT
 /// of `input` (scaled by `1/nfft` for the forward transform when `scale_forward`).
-fn check_dft(input: &[KissFftCpx], out: &[KissFftCpx], isinverse: bool, scale_forward: bool) {
+fn check_dft(input: &[(f64, f64)], out: &[(f64, f64)], isinverse: bool, scale_forward: bool) {
     let nfft = input.len();
     let mut errpow = 0f64;
     let mut sigpow = 0f64;
@@ -237,11 +267,11 @@ fn check_dft(input: &[KissFftCpx], out: &[KissFftCpx], isinverse: bool, scale_fo
                 re /= nfft as f64;
                 im /= nfft as f64;
             }
-            ansr += f64::from(x.r) * re - f64::from(x.i) * im;
-            ansi += f64::from(x.r) * im + f64::from(x.i) * re;
+            ansr += x.0 * re - x.1 * im;
+            ansi += x.0 * im + x.1 * re;
         }
-        let difr = ansr - f64::from(out[bin].r);
-        let difi = ansi - f64::from(out[bin].i);
+        let difr = ansr - out[bin].0;
+        let difi = ansi - out[bin].1;
         errpow += difr * difr + difi * difi;
         sigpow += ansr * ansr + ansi * ansi;
     }
@@ -253,21 +283,21 @@ fn check_dft(input: &[KissFftCpx], out: &[KissFftCpx], isinverse: bool, scale_fo
 }
 
 /// The random input of test1d: `(rand() % 32767) - 16384`, times 32768 (and `/nfft` for the
-/// inverse).
+/// inverse), in `kiss_fft_scalar` arithmetic (integer division in fixed-point builds).
 fn random_cpx(nfft: usize, isinverse: bool, rand: &mut GlibcRand) -> Vec<KissFftCpx> {
     let mut input = vec![KissFftCpx::default(); nfft];
     for x in &mut input {
-        x.r = ((rand.next() % 32767) - 16384) as f32;
-        x.i = ((rand.next() % 32767) - 16384) as f32;
+        x.r = scalar((rand.next() % 32767) - 16384);
+        x.i = scalar((rand.next() % 32767) - 16384);
     }
     for x in &mut input {
-        x.r *= 32768.0;
-        x.i *= 32768.0;
+        x.r *= scalar(32768);
+        x.i *= scalar(32768);
     }
     if isinverse {
         for x in &mut input {
-            x.r /= nfft as f32;
-            x.i /= nfft as f32;
+            x.r /= scalar(nfft as i32);
+            x.i /= scalar(nfft as i32);
         }
     }
     input
@@ -299,7 +329,7 @@ fn dft_test1d(nfft: usize, isinverse: bool, rand: &mut GlibcRand) {
     } else {
         opus_fft(cfg, &input, &mut out);
     }
-    check_dft(&input, &out, isinverse, true);
+    check_dft(&pairs(&input), &pairs(&out), isinverse, true);
 }
 
 #[test]
@@ -324,16 +354,29 @@ fn unit_mini_kfft() {
         for isinverse in [false, true] {
             let fft = mini_kiss_fft_alloc(nfft as i32, false).unwrap();
             let ifft = mini_kiss_fft_alloc(nfft as i32, true).unwrap();
-            let input = random_cpx(nfft, isinverse, &mut rand);
-            let min: Vec<MiniKissFftCpx> = input
-                .iter()
-                .map(|c| MiniKissFftCpx { r: c.r, i: c.i })
-                .collect();
+            // The mini FFT is float code in every build.
+            let mut min = vec![MiniKissFftCpx::default(); nfft];
+            for x in &mut min {
+                x.r = ((rand.next() % 32767) - 16384) as f32;
+                x.i = ((rand.next() % 32767) - 16384) as f32;
+            }
+            for x in &mut min {
+                x.r *= 32768.0;
+                x.i *= 32768.0;
+            }
+            if isinverse {
+                for x in &mut min {
+                    x.r /= nfft as f32;
+                    x.i /= nfft as f32;
+                }
+            }
             let mut mout = vec![MiniKissFftCpx::default(); nfft];
             mini_kiss_fft(if isinverse { &ifft } else { &fft }, &min, &mut mout);
-            let out: Vec<KissFftCpx> = mout.iter().map(|c| KissFftCpx { r: c.r, i: c.i }).collect();
+            let p = |v: &[MiniKissFftCpx]| -> Vec<(f64, f64)> {
+                v.iter().map(|c| (f64::from(c.r), f64::from(c.i))).collect()
+            };
             // The mini FFT does not scale the forward transform (`if (0&&isinverse)` in C).
-            check_dft(&input, &out, isinverse, false);
+            check_dft(&p(&min), &p(&mout), isinverse, false);
         }
     }
 }
@@ -343,7 +386,7 @@ fn unit_mini_kfft() {
 // ---------------------------------------------------------------------------------------------
 
 /// `check` of test_unit_mdct.c (forward).
-fn check_mdct(input: &[f32], out: &[f32]) {
+fn check_mdct(input: &[KissFftScalar], out: &[KissFftScalar]) {
     let nfft = input.len();
     let mut errpow = 0f64;
     let mut sigpow = 0f64;
@@ -365,7 +408,7 @@ fn check_mdct(input: &[f32], out: &[f32]) {
 }
 
 /// `check_inv` of test_unit_mdct.c.
-fn check_mdct_inv(input: &[f32], out: &[f32]) {
+fn check_mdct_inv(input: &[KissFftScalar], out: &[KissFftScalar]) {
     let nfft = input.len();
     let mut errpow = 0f64;
     let mut sigpow = 0f64;
@@ -403,21 +446,25 @@ fn mdct_test1d(nfft: usize, isinverse: bool, rand: &mut GlibcRand) {
         (&mode.mdct, shift)
     };
 
-    let mut input: Vec<f32> = (0..nfft)
-        .map(|_| ((rand.next() % 32768) - 16384) as f32)
+    let mut input: Vec<KissFftScalar> = (0..nfft)
+        .map(|_| scalar((rand.next() % 32768) - 16384))
         .collect();
-    // Q15ONE (Q31ONE with QEXT) is 1.0 in the float build.
-    let window = vec![1.0f32; nfft / 2];
+    // Q15ONE (Q31ONE with QEXT): 1.0 in the float build.
+    #[cfg(feature = "qext")]
+    let one: CeltCoef = opusorus::celt::arch::Q31ONE;
+    #[cfg(not(feature = "qext"))]
+    let one: CeltCoef = opusorus::celt::arch::Q15ONE;
+    let window = vec![one; nfft / 2];
     for x in &mut input {
-        *x *= 32768.0;
+        *x *= scalar(32768);
     }
     if isinverse {
         for x in &mut input {
-            *x /= nfft as f32;
+            *x /= scalar(nfft as i32);
         }
     }
     let in_copy = input.clone();
-    let mut out = vec![0f32; nfft];
+    let mut out = vec![scalar(0); nfft];
 
     if isinverse {
         clt_mdct_backward(cfg, &input, &mut out, &window, nfft / 2, shift, 1);
@@ -799,10 +846,11 @@ fn unit_laplace() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// test_unit_mathops.c (float build)
+// test_unit_mathops.c
 // ---------------------------------------------------------------------------------------------
 
 /// `PI` of celt/mathops.h.
+#[cfg(not(feature = "fixed-point"))]
 const PI: f64 = 3.141_592_653_589_793_1;
 
 #[test]
@@ -858,8 +906,10 @@ fn unit_mathops_bitexact() {
     assert_eq!(bitexact_log2tan(23171, 23171), 0);
 }
 
+#[cfg(not(feature = "fixed-point"))]
 #[test]
 fn unit_mathops_div_sqrt() {
+    use opusorus::celt::mathops::{celt_rcp, celt_sqrt};
     // testdiv
     for i in 1..=327_670i32 {
         let val = celt_rcp(i as f32);
@@ -885,8 +935,10 @@ fn unit_mathops_div_sqrt() {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 #[test]
 fn unit_mathops_log2_exp2() {
+    use opusorus::celt::mathops::{celt_exp2, celt_log2};
     // testlog2
     let error_threshold = 2.2e-06f32;
     let mut x = 0.001f32;
@@ -926,8 +978,10 @@ fn unit_mathops_log2_exp2() {
     }
 }
 
+#[cfg(not(feature = "fixed-point"))]
 #[test]
 fn unit_mathops_cos_atan2() {
+    use opusorus::celt::mathops::{celt_atan2p_norm, celt_cos_norm2};
     // test_cos
     let error_threshold = 6.0e-07f32;
     let mut x = -4.0f32;
@@ -961,6 +1015,274 @@ fn unit_mathops_cos_atan2() {
             y += 0.007f32;
         }
         x += 0.007f32;
+    }
+}
+
+/// The `FIXED_POINT` tests of test_unit_mathops.c. `FIX_INT_TO_DOUBLE(x, q)` is
+/// `ldexp((double)x, -q)` (exact) and `DOUBLE_TO_FIX_INT(x, q)` is `ldexp((double)x, q)`
+/// converted to `opus_int32` (truncation). Error values are stored in `float` variables as in C.
+#[cfg(feature = "fixed-point")]
+mod mathops_fixed {
+    use opusorus::celt::mathops::{
+        celt_cos_norm32, celt_exp2, celt_ilog2, celt_log2, celt_rcp, celt_rcp_norm32,
+        celt_rsqrt_norm32, celt_sqrt, celt_sqrt32,
+    };
+
+    /// `FIX_INT_TO_DOUBLE(x, q)`.
+    fn fix_to_double(x: i32, q: i32) -> f64 {
+        f64::from(x) * 2f64.powi(-q)
+    }
+
+    /// `DOUBLE_TO_FIX_INT(x, q)` stored in an `opus_int32`. C converts an out-of-range double
+    /// with undefined behaviour (`test_rcp_norm32` reaches `1.0` in Q31); `as` saturates, as
+    /// AArch64 does.
+    fn double_to_fix(x: f32, q: i32) -> i32 {
+        (f64::from(x) * 2f64.powi(q)) as i32
+    }
+
+    #[test]
+    fn unit_mathops_div_sqrt() {
+        // testdiv
+        for i in 1..=327_670i32 {
+            let val = celt_rcp(i);
+            let prod = (1.0 / 32768.0 / 65526.0) * f64::from(val) * f64::from(i);
+            assert!(
+                (prod - 1.0).abs() <= 0.00025,
+                "div failed: 1/{i}={val} (product = {prod})"
+            );
+        }
+        // testsqrt: `opus_val16 val = celt_sqrt(i)`.
+        let mut i = 1i32;
+        while i <= 1_000_000_000 {
+            let val = celt_sqrt(i) as i16;
+            let r = f64::from(i).sqrt();
+            let ratio = f64::from(val) / r;
+            assert!(
+                (ratio - 1.0).abs() <= 0.0005 || (f64::from(val) - r).abs() <= 2.0,
+                "sqrt failed: sqrt({i})={val} (ratio = {ratio})"
+            );
+            i += i >> 10;
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn unit_mathops_log2_exp2() {
+        // testlog2
+        let mut x = 8i32;
+        while x < 1_073_741_824 {
+            let error = ((1.442_695_040_888_963_387 * (f64::from(x) / 16384.0).ln())
+                - f64::from(celt_log2(x)) / 1024.0)
+                .abs() as f32;
+            assert!(
+                f64::from(error) <= 0.003,
+                "celt_log2 failed: x = {x}, error = {error}"
+            );
+            x += x >> 3;
+        }
+        // testexp2
+        for x in -32768..15360i32 {
+            let x = x as i16;
+            let e = f64::from(celt_exp2(x));
+            let error1 = (f64::from(x) / 1024.0 - (1.442_695_040_888_963_387 * (e / 65536.0).ln()))
+                .abs() as f32;
+            let error2 = ((0.693_147_180_559_945_309_4 * f64::from(x) / 1024.0).exp() - e / 65536.0)
+                .abs() as f32;
+            assert!(
+                f64::from(error1) <= 0.0002 || f64::from(error2) <= 0.00004,
+                "celt_exp2 failed: x = {x}, error1 = {error1}, error2 = {error2}"
+            );
+        }
+        // testexp2log2
+        let mut x = 8i32;
+        while x < 65536 {
+            let error =
+                ((f64::from(x) - 0.25 * f64::from(celt_exp2(celt_log2(x)))).abs() / 16384.0) as f32;
+            assert!(
+                f64::from(error) <= 0.004,
+                "celt_log2/celt_exp2 failed: (x = {x}, error = {error})"
+            );
+            x += x >> 3;
+        }
+    }
+
+    #[test]
+    fn unit_mathops_cos_norm32() {
+        let error_threshold = 1e-07f32;
+        let mut fx = -1.0f32;
+        while fx <= 1.0 {
+            let x = double_to_fix(fx, 30);
+            let error = ((1.570_796_326_794_896_6 * fix_to_double(x, 30)).cos()
+                - fix_to_double(celt_cos_norm32(x), 31))
+            .abs() as f32;
+            assert!(
+                error <= error_threshold,
+                "celt_cos_norm32 failed: error: [{error} > {error_threshold}] (x = {fx})"
+            );
+            fx += 0.007f32;
+        }
+    }
+
+    #[test]
+    fn unit_mathops_ilog2() {
+        let mut x = 1i32;
+        while x <= 268_435_455 {
+            let lg = celt_ilog2(x);
+            assert!(
+                (0..31).contains(&lg),
+                "celt_ilog2 failed: 0<=celt_ilog2(x)<31 (x = {x}, celt_ilog2(x) = {lg})"
+            );
+            let y = 1i32 << lg;
+            assert!(
+                x >= y && (x >> 1) < y,
+                "celt_ilog2 failed: 2**celt_ilog2(x)<=x<2**(celt_ilog2(x)+1) (x = {x}, \
+                 2**celt_ilog2(x) = {y})"
+            );
+            x += 127;
+        }
+    }
+
+    #[test]
+    fn unit_mathops_rsqrt_sqrt32() {
+        // testrsqrt
+        let error_threshold = 6.0e-08f32;
+        let mut fx = 0.25f32;
+        while fx < 1.0 {
+            let x = double_to_fix(fx, 31);
+            let quantized_fx = fix_to_double(x, 31) as f32;
+            let error = (fix_to_double(celt_rsqrt_norm32(x), 29)
+                - 1.0 / f64::from(quantized_fx).sqrt())
+            .abs() as f32;
+            assert!(
+                error <= error_threshold,
+                "celt_rsqrt_norm32 failed: (x = {quantized_fx}, error = {error})"
+            );
+            fx += 0.007f32;
+        }
+        // testsqrt32
+        let two_lsbs = fix_to_double(2, 16) as f32;
+        let mut i = 0i32;
+        while i <= 1_073_741_824 + 64 {
+            let r = f64::from(i).sqrt();
+            let absolute_error = (r - fix_to_double(celt_sqrt32(i), 16)).abs() as f32;
+            let relative_error_threshold = (8e-8 * r) as f32;
+            assert!(
+                absolute_error <= two_lsbs || absolute_error <= relative_error_threshold,
+                "celt_sqrt32 failed: absolute_error: [{absolute_error} > {two_lsbs}] \
+                 relative_error: [{absolute_error} > {relative_error_threshold}] (x = {i})"
+            );
+            i += i >> 25;
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn unit_mathops_rcp_norm32() {
+        let two_lsbs = fix_to_double(2, 29) as f32;
+        let relative_error_threshold = 6.51e-08f32;
+        let mut fx = 0.5f32;
+        while f64::from(fx) <= 1.0 {
+            let x = double_to_fix(fx, 31);
+            let quantized_fx = fix_to_double(x, 31) as f32;
+            // `1 / quantized_fx` is a float division.
+            let ground_truth = f64::from(1.0 / quantized_fx);
+            let absolute_error =
+                (ground_truth - fix_to_double(celt_rcp_norm32(x), 30)).abs() as f32;
+            let relative_error = (f64::from(absolute_error) / ground_truth) as f32;
+            assert!(
+                absolute_error <= two_lsbs
+                    || f64::from(absolute_error)
+                        <= f64::from(relative_error_threshold) * ground_truth,
+                "celt_rcp_norm32 failed: absolute_error: [{absolute_error} > {two_lsbs}] \
+                 relative_error: [{relative_error} > {relative_error_threshold}] (x = \
+                 {quantized_fx})"
+            );
+            fx = (f64::from(fx) + 0.000_000_7) as f32;
+        }
+    }
+
+    #[cfg(feature = "qext")]
+    #[test]
+    fn unit_mathops_log2_exp2_db() {
+        use opusorus::celt::arch::DB_SHIFT;
+        use opusorus::celt::mathops::{celt_exp2_db, celt_log2_db};
+        // testlog2_db
+        let error_threshold = 2.0e-07f32;
+        let mut x = 8i32;
+        while x < 1_073_741_824 {
+            let error = ((1.442_695_040_888_963_387 * fix_to_double(x, 14).ln())
+                - fix_to_double(celt_log2_db(x), DB_SHIFT))
+            .abs() as f32;
+            assert!(
+                error <= error_threshold,
+                "celt_log2_db failed: error: [{error} > {error_threshold}] (x = {x})"
+            );
+            x += x >> 3;
+        }
+        // testexp2_db
+        let absolute_error_threshold = fix_to_double(2, 16) as f32;
+        let mut fx = -32.0f32;
+        while f64::from(fx) < 15.0 {
+            let x_32 = double_to_fix(fx, DB_SHIFT);
+            let quantized_fx = fix_to_double(x_32, DB_SHIFT) as f32;
+            let ground_truth = (0.693_147_180_559_945_309_4 * f64::from(quantized_fx)).exp();
+            let absolute_error =
+                (ground_truth - fix_to_double(celt_exp2_db(x_32), 16)).abs() as f32;
+            let relative_error_threshold = (1.24e-7 * ground_truth) as f32;
+            assert!(
+                absolute_error <= absolute_error_threshold
+                    || absolute_error <= relative_error_threshold,
+                "celt_exp2_db failed: absolute_error: [{absolute_error} > \
+                 {absolute_error_threshold}] relative_error: [{absolute_error} > \
+                 {relative_error_threshold}] (x = {quantized_fx})"
+            );
+            fx = (f64::from(fx) + 0.0007) as f32;
+        }
+    }
+
+    #[cfg(feature = "qext")]
+    #[test]
+    fn unit_mathops_atan() {
+        use opusorus::celt::mathops::{celt_atan_norm, celt_atan2p_norm};
+        const ATAN2_2_OVER_PI: f32 = 0.636_619_772_367_581;
+        // testatan_norm
+        let error_threshold = 5.97e-08f32;
+        let mut fx = -1.0f32;
+        while fx <= 1.0 {
+            let x = double_to_fix(fx, 30);
+            let error = (fix_to_double(x, 30).atan() * f64::from(ATAN2_2_OVER_PI)
+                - fix_to_double(celt_atan_norm(x), 30))
+            .abs() as f32;
+            assert!(
+                error <= error_threshold,
+                "celt_atan_norm failed: error: [{error} > {error_threshold}] (x = {fx})"
+            );
+            fx += 0.007f32;
+        }
+        // testatan2p_norm
+        let error_threshold = 1.2e-07f32;
+        let mut fx = 0.0f32;
+        while fx <= 1.0 {
+            let x = double_to_fix(fx, 30);
+            let mut fy = 0.0f32;
+            while fy <= 1.0 {
+                let y = double_to_fix(fy, 30);
+                // C: `if (x == 0 && x == 0) continue;` (skips the whole x == 0 column).
+                if x != 0 {
+                    let error = (fix_to_double(y, 30).atan2(fix_to_double(x, 30))
+                        * f64::from(ATAN2_2_OVER_PI)
+                        - fix_to_double(celt_atan2p_norm(y, x), 30))
+                    .abs() as f32;
+                    assert!(
+                        error <= error_threshold,
+                        "celt_atan2p_norm failed: error: [{error} > {error_threshold}] (x = \
+                         {fx}, y = {fy})"
+                    );
+                }
+                fy += 0.007f32;
+            }
+            fx += 0.007f32;
+        }
     }
 }
 
@@ -1088,14 +1410,14 @@ fn unit_mathops_float2int16_limit2() {
 
 fn test_rotation(n: usize, k: i32, rand: &mut GlibcRand) {
     const MAX_SIZE: usize = 100;
-    let mut x0 = [0f32; MAX_SIZE];
-    let mut x1 = [0f32; MAX_SIZE];
+    let mut x0 = [norm(0); MAX_SIZE];
+    let mut x1 = [norm(0); MAX_SIZE];
     for i in 0..n {
-        let v = (rand.next() % 16_777_215 - 8_388_608) as f32;
+        let v = norm(rand.next() % 16_777_215 - 8_388_608);
         x0[i] = v;
         x1[i] = v;
     }
-    let snr_of = |x0: &[f32], x1: &[f32]| {
+    let snr_of = |x0: &[CeltNorm], x1: &[CeltNorm]| {
         let mut err = 0f64;
         let mut ener = 0f64;
         for i in 0..n {
@@ -1133,7 +1455,7 @@ const SIMPLE_MATRIX_INPUT_SIZE: usize = 30;
 const SIMPLE_MATRIX_OUTPUT_SIZE: usize = 40;
 const ERROR_TOLERANCE: i32 = 1;
 
-fn assert_is_equal(a: &[f32], b: &[i16]) {
+fn assert_is_equal(a: &[OpusRes], b: &[i16]) {
     for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
         assert!(
             (i32::from(res2int16(x)) - i32::from(y)).abs() <= ERROR_TOLERANCE,
@@ -1173,10 +1495,10 @@ fn projection_simple_matrix() {
     let (rows, cols) = (rows as usize, cols as usize);
 
     // Copy inputs.
-    let input_pcm: Vec<f32> = input_int16.iter().map(|&v| int16tores(v)).collect();
+    let input_pcm: Vec<OpusRes> = input_int16.iter().map(|&v| int16tores(v)).collect();
 
     // _in_short
-    let mut output_pcm = [0f32; SIMPLE_MATRIX_OUTPUT_SIZE];
+    let mut output_pcm = [OpusRes::default(); SIMPLE_MATRIX_OUTPUT_SIZE];
     for i in 0..rows {
         mapping_matrix_multiply_channel_in_short(
             &simple_matrix,
@@ -1205,12 +1527,25 @@ fn projection_simple_matrix() {
     }
     assert_is_equal_short(&output_int16, &expected_output_int16);
 
+    // `!defined(DISABLE_FLOAT_API) && !defined(FIXED_POINT)` in C.
+    #[cfg(not(feature = "fixed-point"))]
+    projection_simple_matrix_float(&simple_matrix, &input_pcm, &expected_output_int16);
+}
+
+/// The `_in_float` / `_out_float` part of `test_simple_matrix` (float build only).
+#[cfg(not(feature = "fixed-point"))]
+fn projection_simple_matrix_float(
+    simple_matrix: &MappingMatrix,
+    input_pcm: &[f32],
+    expected_output_int16: &[i16],
+) {
+    let (rows, cols) = (4, 3);
     // _in_float
     let mut output_pcm = [0f32; SIMPLE_MATRIX_OUTPUT_SIZE];
     for i in 0..rows {
         mapping_matrix_multiply_channel_in_float(
-            &simple_matrix,
-            &input_pcm,
+            simple_matrix,
+            input_pcm,
             cols,
             &mut output_pcm[i..],
             i,
@@ -1218,13 +1553,13 @@ fn projection_simple_matrix() {
             SIMPLE_MATRIX_FRAME_SIZE,
         );
     }
-    assert_is_equal(&output_pcm, &expected_output_int16);
+    assert_is_equal(&output_pcm, expected_output_int16);
 
     // _out_float
     let mut output_pcm = [0f32; SIMPLE_MATRIX_OUTPUT_SIZE];
     for i in 0..cols {
         mapping_matrix_multiply_channel_out_float(
-            &simple_matrix,
+            simple_matrix,
             &input_pcm[i..],
             i,
             cols,
@@ -1233,7 +1568,7 @@ fn projection_simple_matrix() {
             SIMPLE_MATRIX_FRAME_SIZE,
         );
     }
-    assert_is_equal(&output_pcm, &expected_output_int16);
+    assert_is_equal(&output_pcm, expected_output_int16);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -33,7 +33,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | C | `celt_decoder` | `celt/celt_decoder.rs` | celt/celt_decoder.c | ✅ (float + fixed) | celt_decoder.rs: all LM/ch/rates/budgets, hybrid shared ec, downsample, PLC noise+pitch, corrupt input, custom modes, qext 96k — bit-exact (PCM, rng, full state); release perf 0.92x C time; fixed-point (FX3 `fixed_celt_decoder`): the same suite vs the fixed oracle (C fixed encoder packets, `opus_res` PCM) in fixed-point / fixed-res24 × qext × custom-modes — bit-exact |
 | C | `celt_encoder` | `celt/celt_encoder.rs` | celt/celt_encoder.c | ✅ | celt_encoder.rs: all LM/ch/bitrates/VBR modes/complexity/lsb depth/lfe/masks/hybrid, qext — bytes + rng bit-exact |
 | C | `silk_encoder_flp` | `silk/float.rs`<br>`silk/encoder.rs` | silk/float/*.c, silk/float/*.h (may add submodules under silk/float/)<br>silk/{enc_API,init_encoder,control_codec}.c | ✅ | silk_encoder_flp.rs: silk_Encode all rates/internal bw/packet sizes/complexity/CBR-VBR/FEC/DTX/stereo — bytes + rng bit-exact |
-| D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ✅ (float + fixed) | opus_decoder.rs: 180 C-encoded streams all apps/rates/frame sizes/transitions, FEC/PLC/DTX, garbage, extensions, multistream 0/1/255, projection 2/3, RFC 8251 vectors all rates bit-exact + opus_compare pass, Opus HD vectors (qext) — bit-exact; release ≈0.86–0.94× C time; fixed-point (FX4 `fixed_opus_decoder`): the same suite vs the fixed oracle (streams from the fixed C encoder, i16/i24/float output) in fixed-point / fixed-res24 × qext × custom-modes — bit-exact; RFC 8251 vectors bit-exact + `.bit` final ranges + opus_compare pass (qext_compare of the HD vectors not available in fixed tools yet) |
+| D | `opus_decoder` | `decoder.rs`<br>`ms_decoder.rs`<br>`projection_decoder.rs` | src/opus_decoder.c<br>src/opus_multistream_decoder.c<br>src/opus_projection_decoder.c | ✅ (float + fixed) | opus_decoder.rs: 180 C-encoded streams all apps/rates/frame sizes/transitions, FEC/PLC/DTX, garbage, extensions, multistream 0/1/255, projection 2/3, RFC 8251 vectors all rates bit-exact + opus_compare pass, Opus HD vectors (qext) — bit-exact; release ≈0.86–0.94× C time; fixed-point (FX4 `fixed_opus_decoder`): the same suite vs the fixed oracle (streams from the fixed C encoder, i16/i24/float output) in fixed-point / fixed-res24 × qext × custom-modes — bit-exact; RFC 8251 vectors bit-exact + `.bit` final ranges + opus_compare pass, HD vectors with `qext_compare` (16-bit builds: within the 16-bit rounding floor) |
 | D | `opus_encoder` | `encoder.rs`<br>`ms_encoder.rs`<br>`projection_encoder.rs` | src/opus_encoder.c<br>src/opus_multistream_encoder.c<br>src/opus_projection_encoder.c | ✅ | opus_encoder.rs: long streams over all apps/rates/bitrates/VBR modes/complexity/frame durations/FEC/DTX/ctl switches, multistream+surround, projection, qext — bytes+rng bit-exact |
 
 ## Fixed-point units (docs/FIXED_POINT.md)
@@ -41,11 +41,11 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | Layer | Unit | Status |
 |---|---|---|
 | FX0 | `fixed_foundation` (arch/fixed_generic macros, fixed mathops, static modes, gating, fixed oracle) | ✅ |
-| FX1 | `fixed_fft`, `fixed_modes`, `fixed_pitch_lpc`, `fixed_silk_shared`, `fixed_packet` | ⬜ |
-| FX2 | `fixed_bands`, `fixed_silk_encoder`, `fixed_analysis` | ⬜ |
-| FX3 | `fixed_celt_decoder`, `fixed_celt_encoder` | ⬜ |
-| FX4 | `fixed_opus_decoder`, `fixed_opus_encoder` | ⬜ |
-| FX5 | `fixed_integration` (API, tools, C ABI, vectors, benches) | ⬜ |
+| FX1 | `fixed_fft`, `fixed_modes`, `fixed_pitch_lpc`, `fixed_silk_shared`, `fixed_packet` | ✅ |
+| FX2 | `fixed_bands`, `fixed_silk_encoder`, `fixed_analysis` | ✅ |
+| FX3 | `fixed_celt_decoder`, `fixed_celt_encoder` | ✅ |
+| FX4 | `fixed_opus_decoder`, `fixed_opus_encoder` | ✅ |
+| FX5 | `fixed_integration`: `fx5_api` (public tests + examples in every fixed config and under wasmtime, `opus_demo`/`qext_compare`, C opus_demo comparison vs the fixed oracle, RFC 8251 + Opus HD procedure, public-API overflow hardening + `api_overflow.rs` sweep, docs); C ABI, benches: separate parts | ✅ (`fx5_api`) |
 
 ## DNN units
 
@@ -66,13 +66,14 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | Oracle crate (libopus 1.6.1 via cc) | ✅ | float, no intrinsics, -ffp-contract=off, qext/custom-modes features |
 | Conformance crate | ✅ | shared Rng, signal generators, bit-exact asserts |
 | justfile (check/clippy/test/cross/test-wasm/vectors/bench/size/fuzz) | ✅ | |
-| RFC 8251 + Opus HD vectors (`tests/vectors.rs`, `scripts/run_vectors.sh`) | ✅ | bit-exact, same quality numbers as C |
+| RFC 8251 + Opus HD vectors (`tests/vectors.rs`, `scripts/run_vectors.sh`) | ✅ | bit-exact, same quality numbers as C; float and fixed-point decoders (`--fixed`, `--fixed-res24`) |
+| Public-API overflow sweep (`tests/api_overflow.rs`) | ✅ | stereo-LFE and CELT up-sampled regressions + random public-API sweep vs C under `catch_unwind` (`OPUSORUS_API_SWEEP`), float and fixed builds |
 | C ABI crate `opusorus-capi` (libopusorus.so/.a) | ✅ | upstream C tests all pass; `just cross-capi` builds staticlib for Android/iOS |
 | Fuzz targets (`fuzz/`) | ✅ | 11 targets, ~7.5M execs, 0 findings; DNN/custom-mode fuzz targets are follow-ups |
 | Benchmarks `opusorus-bench` (criterion, Rust vs C scalar vs C NEON) | ✅ | see STATUS |
 | Size report (`scripts/size_report.sh`) | ✅ | see STATUS |
-| opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C |
-| Rust port of libopus tests (`crates/opusorus/tests`, `libopus_unit.rs`) | ✅ | host + wasm |
+| opus_demo port (`opusorus-tools`) | ✅ | byte-identical to C (float and fixed-point C opus_demo) |
+| Rust port of libopus tests (`crates/opusorus/tests`, `libopus_unit.rs`) | ✅ | host + wasm, float and fixed-point (incl. the `FIXED_POINT` celt/tests mathops tests) |
 
 ## Open follow-ups
 
@@ -80,6 +81,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 |---|---|
 | Decoder memory footprint (rest) | Done (see STATUS "Decoder memory"): with the DNN features Rust ≤ C; without them Rust 36/49 KB vs C 18/27 KB (mono/stereo). Remaining: the `quant_all_bands` scratch (`BandsScratch`, celt/bands.rs, ≈12 KB per CELT decoder) could become stack arrays; the int16/int24 `out` buffer (20 ms) stays on the heap because a stack array would be zeroed per call. `justfile` `float_all` can now include `opusorus-capi/osce` (test_opus_api's 256 KiB bound holds). |
 | DNN fuzz targets, custom-modes fuzz target | fuzz crate has no DNN/OpusCustom targets yet |
+| Fixed-point test restrictions now obsolete | `opusorus-conformance/tests/opus_encoder.rs` (`lfe_allowed`: LFE only on mono encoders in fixed builds) and `celt_encoder.rs` (`run_streams` limits the end band of up-sampled fixed-point streams) worked around the two C-UB overflows that FX5 made wrapping; both could now be lifted (owned by the FX4/FX3 units) |
 | FFT/MDCT vectorisation | contiguous per-stage twiddles could let LLVM vectorise butterflies (still bit-exact) |
 
 ## Performance log

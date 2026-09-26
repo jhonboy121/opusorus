@@ -35,13 +35,21 @@ clippy: dnn-blob
     cargo clippy -p opusorus --no-default-features --features fixed-point -- -D warnings
 
 # All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
-# loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds (16- and
-# 24-bit resolution; only the converted modules are tested).
+# loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds: the full
+# differential suite in 16-bit and 24-bit + QEXT resolution, and the public-API tests (the Rust
+# port of the libopus tests, examples), the libopus unit tests, the public-API overflow sweep
+# and the opus_demo/conformance vectors in the other fixed configurations.
 test: dnn-blob
+    #!/usr/bin/env bash
+    set -euxo pipefail
     cargo test --workspace
     cargo test --workspace --features {{float_all}}
-    cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-point
-    cargo test -p opusorus -p opusorus-conformance --features opusorus-conformance/fixed-res24,opusorus-conformance/qext
+    cargo test -p opusorus -p opusorus-tools -p opusorus-conformance --features opusorus-conformance/fixed-point
+    cargo test -p opusorus -p opusorus-tools -p opusorus-conformance --features opusorus-conformance/fixed-res24,opusorus-conformance/qext
+    for f in fixed-res24 fixed-point,qext fixed-point,custom-modes fixed-res24,qext,custom-modes; do
+        cargo test -p opusorus --features "$f"
+        cargo test -p opusorus-conformance --features "$f" --test vectors --test libopus_unit --test api_overflow
+    done
 
 # Full-length libopus runs, exhaustive sweeps and timing tests, default and QEXT + custom-modes.
 # All tests including the ignored long ones (OPUS_TEST_FULL=1, --include-ignored).
@@ -99,18 +107,24 @@ cross-capi:
             cargo rustc -q -p opusorus-capi --lib --release --target "$t" --crate-type staticlib
     done
 
-# Run the library's own tests under wasmtime (wasm32-wasip1).
+# Run the library's own tests under wasmtime (wasm32-wasip1), float and fixed-point (a 32-bit
+# target: the OPUS_FAST_INT64 = 0 multiply forms).
 test-wasm:
     CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1
+    CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1 --features fixed-point
 
 # RFC 6716/8251 through the Rust opus_demo/opus_compare, the Opus HD (QEXT) vectors with
-# qext_compare, the C opus_demo comparison, and the RFC 8251 vectors through upstream's C
-# opus_demo linked to the C ABI library.
+# qext_compare, the C opus_demo comparison (against the matching float or fixed-point C
+# opus_demo), for the float and the fixed-point (16-bit, 24-bit, with QEXT) decoders, and the
+# RFC 8251 vectors through upstream's C opus_demo linked to the C ABI library.
 # Official decoder test vectors (fetched if missing) and the opus_demo comparisons.
 vectors:
     ./scripts/fetch_vectors.sh
     cargo test -p opusorus-conformance --test vectors -- --nocapture
     cargo test -p opusorus-conformance --features qext --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --features fixed-point --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --features fixed-res24,qext --test vectors -- --nocapture
+    cargo test -p opusorus-conformance --features fixed-point,qext --test vectors -- --nocapture
     cargo test -p opusorus-capi --test c_suite rfc8251_vectors -- --nocapture
 
 # Benchmarks (Rust vs C oracle).

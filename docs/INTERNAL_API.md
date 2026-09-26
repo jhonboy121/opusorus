@@ -1410,3 +1410,36 @@ typing rules and the conversion plan.
 - Oracle: `opusorus_oracle::fixed_foundation` (ids `id1`/`id2`/`id3`/`mid1`/`mid2`/`mode_arr`,
   `op1/op2/op2_int32/op3/math1/math2`, `mode_scalars/mode_array/mode_fft`, `cwrs_roundtrip`,
   `laplace_roundtrip`, float API helpers). Shims mark their builds with `// oracle-build:`.
+
+## `fixed_integration` (FX5, part `fx5_api`)
+
+- Public API: identical in the float and fixed-point builds (see the crate docs of `lib.rs` for
+  the behavioural differences). `Decoder::get_size` does not count the int16 `out` buffer in the
+  16-bit fixed build (`decode` writes `opus_res` directly there).
+- Overflow hardening (C UB reachable from the public API, wrapped like C in practice):
+  - `celt::vq::stereo_itheta` (fixed): `add32_ovflw` / `sub32_ovflw` / `pshr32_ovflw` and
+    wrapping `MAC16_16` sums; when a sum wrapped negative it calls
+    `celt::mathops::celt_sqrt32_release` and `celt::mathops::celt_atan2p_norm_release`
+    (fixed only): the same code as `celt_sqrt32` / `celt_atan2p_norm` with the
+    `celt_sig_assert` preconditions of it, `frac_div32(_q29)`, `celt_rcp` and `celt_ilog2`
+    skipped (`const CHECKED: bool` private variants `*_impl::<false>`; `ilog2::<false>` is
+    `ec_ilog(x as u32) - 1`, i.e. 31 for negative `x`, as release C). The checked public
+    functions keep their debug assertions.
+  - `celt::celt_encoder::fixed::alloc_trim_analysis`: the spectral tilt sum `diff` and its
+    products use `wrapping_add` / `wrapping_mul`.
+  - `celt::arch::mult32_32_q16_ovflw` (fixed, `int64`/`int32` forms, not a libopus macro):
+    `MULT32_32_Q16` whose result may exceed 32 bits, wrapping in both forms (the 32-bit form
+    with `add32_ovflw`); used by the `fixed-res24` decoder gain (`OPUS_SET_GAIN` near
+    +128 dB). `celt_encoder.rs` re-exports `acos_approx` / `normalize_tone_input` /
+    `tone_lpc` (fixed) only with `internals` (the crate-level `unused_imports` allowance of
+    fixed builds is gone).
+- `crates/opusorus/tests/overflow.rs`: Rust-only counterpart (runs under wasmtime).
+- Tests: `opusorus-conformance/tests/api_overflow.rs` (regressions + `public_api_sweep`, env
+  `OPUSORUS_API_SWEEP=<scale>`, `OPUSORUS_API_SWEEP_CASE=<enc|dec|ms|proj>:<i>`).
+  `libopus_unit.rs` runs in fixed builds (`scalar()` / `norm()` helpers for the build's
+  `kiss_fft_scalar` / `celt_norm`, `mathops_fixed` module with the C `FIXED_POINT` tests).
+- `opusorus-tools`: `demo` and (with `qext`) `compare::qext_compare*` are built in every build;
+  `fixed_point_unavailable` is gone. `tests/vectors.rs` builds the C `opus_demo` with
+  `-DFIXED_POINT=1` (+ `-DENABLE_RES24`) against the fixed oracle's `libopus.a`, selected among
+  the matching archives by a C probe of the `opus_decode24` resolution (16- and 24-bit fixed
+  archives have the same members); `normalize_version` also accepts `libopus unknown-fixed`.

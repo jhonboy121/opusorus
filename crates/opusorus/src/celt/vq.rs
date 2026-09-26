@@ -15,13 +15,15 @@ use alloc::vec::Vec;
 
 #[cfg(any(feature = "qext", feature = "fixed-point"))]
 use crate::celt::arch::imax;
+#[cfg(not(feature = "fixed-point"))]
+use crate::celt::arch::sub32;
 use crate::celt::arch::{
     CeltNorm, EPSILON, OpusVal16, OpusVal32, Q15_ONE, Q15ONE, abs16, add16, add32, extend32,
     extract16, half16, mac16_16, mult16_16, mult16_16_q15, mult16_32_q15, mult16_32_q16,
-    mult32_32_q31, neg16, pshr32, shr32, sub16, sub32, vshr32,
+    mult32_32_q31, neg16, pshr32, shr32, sub16, vshr32,
 };
 #[cfg(feature = "fixed-point")]
-use crate::celt::arch::{NORM_SHIFT, shl32};
+use crate::celt::arch::{NORM_SHIFT, add32_ovflw, pshr32_ovflw, shl32, sub32_ovflw};
 #[cfg(feature = "qext")]
 use crate::celt::arch::{OpusVal64, abs32, imin};
 use crate::celt::bands::SPREAD_NONE;
@@ -37,6 +39,8 @@ use crate::celt::mathops::{
     celt_atan2p_norm, celt_cos_norm, celt_div, celt_rcp, celt_rsqrt_norm, celt_rsqrt_norm32,
     celt_sqrt32,
 };
+#[cfg(feature = "fixed-point")]
+use crate::celt::mathops::{celt_atan2p_norm_release, celt_sqrt32_release};
 #[cfg(not(feature = "fixed-point"))]
 use crate::celt::pitch::celt_inner_prod;
 #[cfg(not(feature = "fixed-point"))]
@@ -995,19 +999,49 @@ pub fn stereo_itheta(x: &[CeltNorm], y: &[CeltNorm], stereo: bool, n: i32) -> i3
     let mut eside: OpusVal32 = OpusVal32::default();
     if stereo {
         for i in 0..nu {
-            let m: CeltNorm = pshr32(add32(x[i], y[i]), NORM_SHIFT - 13);
-            let s: CeltNorm = pshr32(sub32(x[i], y[i]), NORM_SHIFT - 13);
-            emid = mac16_16(emid, m, m);
-            eside = mac16_16(eside, s, s);
+            #[cfg(not(feature = "fixed-point"))]
+            {
+                let m: CeltNorm = pshr32(add32(x[i], y[i]), NORM_SHIFT - 13);
+                let s: CeltNorm = pshr32(sub32(x[i], y[i]), NORM_SHIFT - 13);
+                emid = mac16_16(emid, m, m);
+                eside = mac16_16(eside, s, s);
+            }
+            // C UB (signed overflow): with the CELT LFE band-energy clamp on a stereo stream
+            // (`OPUS_SET_LFE(1)` on a stereo encoder), `normalise_bands` scales bands far above
+            // unit energy, so `ADD32`/`SUB32` of `X[i]`, `Y[i]`, the rounding add of `PSHR32`
+            // and the `MAC16_16` sums overflow `opus_val32`. They wrap here as they do in C in
+            // practice (bit-exact with the oracle), instead of panicking in debug builds.
+            #[cfg(feature = "fixed-point")]
+            {
+                let m: CeltNorm = pshr32_ovflw(add32_ovflw(x[i], y[i]), NORM_SHIFT - 13);
+                let s: CeltNorm = pshr32_ovflw(sub32_ovflw(x[i], y[i]), NORM_SHIFT - 13);
+                emid = add32_ovflw(emid, mult16_16(m, m));
+                eside = add32_ovflw(eside, mult16_16(s, s));
+            }
         }
     } else {
         emid += celt_inner_prod_norm_shift(x, x, nu);
         eside += celt_inner_prod_norm_shift(y, y, nu);
     }
-    let mid: OpusVal32 = celt_sqrt32(emid);
-    let side: OpusVal32 = celt_sqrt32(eside);
+    // The stereo sums above wrap negative only in the C-UB case described there; libopus then
+    // runs the square roots and the arc tangent on those values with its assertions compiled
+    // out, which the `_release` variants reproduce.
     #[cfg(feature = "fixed-point")]
-    let itheta: i32 = celt_atan2p_norm(side, mid);
+    let wrapped = emid < 0 || eside < 0;
+    #[cfg(feature = "fixed-point")]
+    let (mid, side) = if wrapped {
+        (celt_sqrt32_release(emid), celt_sqrt32_release(eside))
+    } else {
+        (celt_sqrt32(emid), celt_sqrt32(eside))
+    };
+    #[cfg(not(feature = "fixed-point"))]
+    let (mid, side): (OpusVal32, OpusVal32) = (celt_sqrt32(emid), celt_sqrt32(eside));
+    #[cfg(feature = "fixed-point")]
+    let itheta: i32 = if wrapped {
+        celt_atan2p_norm_release(side, mid)
+    } else {
+        celt_atan2p_norm(side, mid)
+    };
     // C: `(int)floor(.5f+65536.f*16384*celt_atan2p_norm(side,mid))`.
     #[cfg(not(feature = "fixed-point"))]
     let itheta: i32 =

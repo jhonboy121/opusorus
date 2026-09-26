@@ -4,7 +4,11 @@
 # tests/run_opushd_vectors.sh (Opus HD / QEXT vectors), with OPUS_DEMO, OPUS_COMPARE and
 # QEXT_COMPARE pointing at the opusorus-tools binaries (release build).
 #
-# Usage: scripts/run_vectors.sh [--hd] [rate ...]    (default rates: 48000 24000 16000 12000 8000)
+# Usage: scripts/run_vectors.sh [--hd] [--fixed|--fixed-res24] [rate ...]
+#        (default rates: 48000 24000 16000 12000 8000)
+# --fixed / --fixed-res24 build the tools on the fixed-point decoder (16-bit / 24-bit
+# resolution). With --hd --fixed the RFC vectors at 96 kHz fail qext_compare's rms threshold:
+# a 16-bit output cannot get below the 1/sqrt(12) LSB quantisation floor (use --fixed-res24).
 #
 # Vectors: $OPUSORUS_VECTORS, else the first testdata/vectors found in this checkout or a parent
 # directory (fetch them with scripts/fetch_vectors.sh). The upstream scripts print
@@ -18,11 +22,14 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
 hd=0
+fixed=""
 rates=()
 for arg in "$@"; do
   case "$arg" in
     --hd) hd=1 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --fixed) fixed=fixed-point ;;
+    --fixed-res24) fixed=fixed-res24 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) rates+=("$arg") ;;
   esac
 done
@@ -43,9 +50,16 @@ else
   fi
 fi
 
-features=()
+feat=()
 if [ "$hd" -eq 1 ]; then
-  features=(--features qext)
+  feat+=(qext)
+fi
+if [ -n "$fixed" ]; then
+  feat+=("$fixed")
+fi
+features=()
+if [ "${#feat[@]}" -gt 0 ]; then
+  features=(--features "$(IFS=,; echo "${feat[*]}")")
 fi
 cargo build --release --manifest-path "$root/Cargo.toml" -p opusorus-tools --bins "${features[@]}"
 bin="${CARGO_TARGET_DIR:-$root/target}/release"

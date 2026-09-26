@@ -88,7 +88,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "fixed-point")]
 use crate::celt::arch::res2float;
 #[cfg(feature = "fixed-res24")]
-use crate::celt::arch::{COEF_ONE, add32, mult_coef, mult_coef_32, mult32_32_q16, res2int16};
+use crate::celt::arch::{COEF_ONE, add32, mult_coef, mult_coef_32, mult32_32_q16_ovflw, res2int16};
 use crate::celt::arch::{CeltCoef, OpusRes, extract16, imin, mult16_16_p15, qconst16, saturate};
 #[cfg(not(feature = "fixed-res24"))]
 use crate::celt::arch::{
@@ -514,12 +514,23 @@ impl Decoder {
     ///
     /// The largest footprint over the API rates is reported: 48 kHz (where the OSCE BWE may
     /// run) and, with QEXT, 96 kHz (larger CELT buffers).
+    ///
+    /// In the 16-bit fixed-point build (`fixed-point` without `fixed-res24`) the int16 decode
+    /// function writes `opus_res` samples directly and never grows `out`, so it is not counted
+    /// (decoding through [`Decoder::decode24`] or [`Decoder::decode_float`] adds up to 20 ms of
+    /// `opus_res` samples).
     #[must_use]
     pub fn get_size(channels: i32) -> usize {
         if !(1..=2).contains(&channels) {
             return 0;
         }
-        let out = |fs: i32| (fs / 50) as usize * channels as usize * size_of::<OpusRes>();
+        let out = |fs: i32| {
+            if cfg!(all(feature = "fixed-point", not(feature = "fixed-res24"))) {
+                0
+            } else {
+                (fs / 50) as usize * channels as usize * size_of::<OpusRes>()
+            }
+        };
         max_over_rates(|fs| Self::footprint_at(channels, fs) + out(fs))
     }
 
@@ -1072,8 +1083,12 @@ impl Decoder {
             let (q, decode_gain) = (qconst16(6.48814081e-4f32 as f64, 25), self.decode_gain);
             let gain = celt_exp2(extract16(mult16_16_p15(q, decode_gain)));
             for x in &mut pcm[..frame_size as usize * ch] {
+                // C: `MULT32_32_Q16(pcm[i], gain)`, documented to fit 32 bits, which it does not
+                // with a high `OPUS_SET_GAIN` (the 64-bit form wraps in the int64 to int32
+                // conversion, the 32-bit form overflows its `ADD32`s: C UB, wrapping in
+                // practice). Wrapping in both forms, as libopus.
                 #[cfg(feature = "fixed-res24")]
-                let v = mult32_32_q16(*x, gain);
+                let v = mult32_32_q16_ovflw(*x, gain);
                 #[cfg(not(feature = "fixed-res24"))]
                 let v = mult16_32_p16(*x, gain);
                 // Note: the `ENABLE_RES24` build also saturates to +-32767, i.e. to +-1/256 of

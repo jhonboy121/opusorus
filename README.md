@@ -9,6 +9,8 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
   and internal state match bit-for-bit.
 * Passes the RFC 6716/8251 conformance vectors (all rates, mono/stereo) and the Opus HD vectors,
   the upstream C test suite (through the C ABI), and ~7.5M differential fuzz executions.
+* Both libopus builds: the float codec (default) and the fixed-point codec (`fixed-point`,
+  `fixed-res24`), each bit-exact with the matching libopus build.
 * Performance on par with scalar libopus (see [docs/STATUS.md](docs/STATUS.md)).
 
 ## Features
@@ -21,15 +23,16 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
 | Opus HD / scalable quality extension (96 kHz) | `qext` | upstream `--enable-qext` |
 | Opus Custom modes | `custom-modes` | upstream `--enable-custom-modes` |
 | Deep PLC (FARGAN), DRED, OSCE (LACE/NoLACE) + BWE | `deep-plc`, `dred`, `osce` | weights loaded at runtime from a libopus weight blob (`scripts/fetch_dnn_models.sh`) |
-| Fixed-point build | `fixed-point`, `fixed-res24` | in progress, see [docs/FIXED_POINT.md](docs/FIXED_POINT.md) |
+| Fixed-point build (16- or 24-bit resolution) | `fixed-point`, `fixed-res24` | upstream `--enable-fixed-point` (+ `ENABLE_RES24`), see [docs/FIXED_POINT.md](docs/FIXED_POINT.md) |
 | `std` platform libm (bit-exact with C on the same platform) | `std` (default) | without it: pure-Rust `libm`, `no_std` |
 
 > **`fixed-point` / `fixed-res24` are NOT additive.** They *replace* the float implementation
 > with the integer one (bit-exact with a fixed-point libopus build), exactly like libopus'
 > configure switch, and cannot be combined with the DNN features (as upstream). Enabling them
-> anywhere in a dependency graph switches every user of `opusorus` in that build. The fixed-point
-> port is **in progress**: for now these features compile a reduced crate without the
-> encoder/decoder API. See [`docs/FIXED_POINT.md`](docs/FIXED_POINT.md).
+> anywhere in a dependency graph switches every user of `opusorus` in that build. The API is
+> the same; as in libopus the fixed-point decoder does not soft-clip, the encoder runs its
+> music/speech analysis only at complexity 10, and bitstreams differ from the float build's
+> (see the crate docs and [`docs/FIXED_POINT.md`](docs/FIXED_POINT.md)).
 
 Because of that, `--all-features` is not a valid configuration of this workspace; `just check`,
 `just clippy` and `just test` run the float and fixed-point "everything on" feature sets.
@@ -73,12 +76,12 @@ More in `crates/opusorus/examples/` (`roundtrip`, `encode_file`, `decode_file`).
 
 ```sh
 just check          # type-check everything
-just test           # unit + differential + libopus-suite tests (default and all features)
+just test           # unit + differential + libopus-suite tests (default, all float features, fixed-point builds)
 just clippy         # clippy -D warnings
 just cross          # wasm32, Android, iOS, host, no_std builds
 just cross-capi     # C ABI static library for Android/iOS
 just test-wasm      # library tests under wasmtime
-just vectors        # RFC 8251 + Opus HD conformance vectors
+just vectors        # RFC 8251 + Opus HD conformance vectors (float and fixed-point decoders)
 just bench          # benchmarks
 just size           # shared-library size comparison
 just fuzz-all       # fuzz campaign

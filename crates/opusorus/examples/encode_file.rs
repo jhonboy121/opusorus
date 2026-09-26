@@ -9,20 +9,13 @@
 //!
 //! The last partial frame is padded with silence.
 
-#![cfg_attr(
-    not(feature = "fixed-point"),
-    expect(clippy::print_stdout, reason = "command-line example")
-)]
+#![expect(clippy::print_stdout, reason = "command-line example")]
 
-#[cfg(not(feature = "fixed-point"))]
 use std::error::Error;
-#[cfg(not(feature = "fixed-point"))]
 use std::fs;
 
-#[cfg(not(feature = "fixed-point"))]
 use opusorus::{Application, Bitrate, Encoder};
 
-#[cfg(not(feature = "fixed-point"))]
 fn parse_arg<T: std::str::FromStr>(
     args: &[String],
     n: usize,
@@ -37,7 +30,6 @@ where
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -94,7 +86,3 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
-
-/// The in-progress fixed-point build (feature `fixed-point`) has no codec API yet.
-#[cfg(feature = "fixed-point")]
-fn main() {}

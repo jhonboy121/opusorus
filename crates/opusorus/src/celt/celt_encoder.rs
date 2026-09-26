@@ -100,10 +100,12 @@ use crate::{Error, Result};
 mod fixed;
 #[cfg(feature = "fixed-point")]
 pub use fixed::{
-    acos_approx, alloc_trim_analysis, celt_preemphasis, compute_vbr, dynalloc_analysis, l1_metric,
-    normalize_tone_input, patch_transient_decision, run_prefilter, stereo_analysis, tone_detect,
-    tone_lpc, transient_analysis,
+    alloc_trim_analysis, celt_preemphasis, compute_vbr, dynalloc_analysis, l1_metric,
+    patch_transient_decision, run_prefilter, stereo_analysis, tone_detect, transient_analysis,
 };
+// Called only inside `fixed` (by `tone_detect`); re-exported for the differential tests.
+#[cfg(all(feature = "fixed-point", feature = "internals"))]
+pub use fixed::{acos_approx, normalize_tone_input, tone_lpc};
 
 /// `OPUS_BAD_ARG`.
 const OPUS_BAD_ARG: i32 = -1;

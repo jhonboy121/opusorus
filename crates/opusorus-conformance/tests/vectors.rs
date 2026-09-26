@@ -30,14 +30,21 @@
 //!   if absent) is byte-identical to the oracle's compiled-in tables serialized in the same
 //!   order, so embedding it (`dnn-weights-embedded`) gives exactly the oracle's models.
 //!
+//! Fixed-point builds (`fixed-point`, `fixed-res24`, with `qext` / `custom-modes`) run the same
+//! procedure with the fixed-point decoder, and `opus_demo_matches_c` compares against the C
+//! `opus_demo` linked with the fixed-point oracle (its version line ends in `-fixed`; a 16-bit
+//! and a 24-bit fixed-point `libopus.a` have the same objects, so the right one is picked by a
+//! small C probe of `opus_decode24`'s resolution). In the 16-bit fixed-point build with `qext`
+//! the RFC vectors at 96 kHz are decoded with 16-bit resolution, which cannot meet
+//! `qext_compare`'s `rms` threshold (0.1 LSB, below the 1/sqrt(12) LSB rounding floor): those
+//! are accepted when the error is within that floor, and their output is asserted identical to
+//! the 16-bit fixed-point C `opus_demo`'s (`d_tvNN_96s` cases).
+//!
 //! The vectors are read from `testdata/vectors` (see `scripts/fetch_vectors.sh`), searched
 //! upwards from this crate (so git worktrees find the main checkout's copy) or at
 //! `$OPUSORUS_VECTORS`; the vector tests print a note and pass if they are absent. The C
 //! comparison is skipped (with a note) without a C compiler.
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -417,6 +424,27 @@ fn opushd_case(
     }
 }
 
+/// The 16-bit fixed-point build (`fixed-point` without `fixed-res24`): `opus_res` is 16-bit, so
+/// the 96 kHz float output is `RES2FLOAT` of 16-bit samples.
+#[cfg(feature = "qext")]
+const RES16: bool = cfg!(all(feature = "fixed-point", not(feature = "fixed-res24")));
+
+/// Whether a failed `qext_compare` log shows an error within the quantisation floor of a 16-bit
+/// output: `qext_compare` measures in 16-bit LSBs, and rounding a signal to 16 bits leaves a
+/// uniform error of rms `1/sqrt(12)` = 0.2887 LSB (less where the signal is silent), above the
+/// script's `rms` threshold of 0.1.
+#[cfg(feature = "qext")]
+fn at_16bit_floor(log: &str) -> bool {
+    let Some(rms) = log
+        .lines()
+        .find_map(|l| l.split_once("rms = ").map(|(_, r)| r.trim()))
+    else {
+        return false;
+    };
+    let rms: f64 = rms.parse().unwrap();
+    rms < 0.30
+}
+
 /// `(section title, bitstream, reference, extra opus_demo flags, qext_compare thresholds)`.
 #[cfg(feature = "qext")]
 type HdCase = (
@@ -471,6 +499,7 @@ fn opushd_vectors() {
     let mut section = "";
     let mut failed = Vec::new();
     let mut known = Vec::new();
+    let mut res16 = Vec::new();
     for ((title, bit, ..), res) in cases.iter().zip(&results) {
         if *title != section {
             section = title;
@@ -488,6 +517,8 @@ fn opushd_vectors() {
                     && log.contains("Range coder state mismatch between encoder and decoder")
                 {
                     known.push(name);
+                } else if RES16 && name.starts_with("testvector") && at_16bit_floor(log) {
+                    res16.push(name);
                 } else {
                     failed.push(name);
                 }
@@ -498,12 +529,27 @@ fn opushd_vectors() {
         failed.is_empty(),
         "Opus HD vector(s) failed (see the log above): {failed:?}"
     );
-    if known.is_empty() {
-        println!("All tests have passed successfully");
-    } else {
+    if !res16.is_empty() {
         println!(
-            "All RFC vectors at 96 kHz passed; {} Opus HD vectors stop with the range coder \
-             mismatch that libopus 1.6.1's own opus_demo reports on them: {known:?}",
+            "16-bit fixed-point build: {} RFC vectors at 96 kHz are limited by the 16-bit output \
+             resolution (rms within the 1/sqrt(12) LSB quantisation floor; the C fixed-point \
+             opus_demo gives the identical output, see opus_demo_matches_c): {res16:?}",
+            res16.len()
+        );
+    }
+    if known.is_empty() && res16.is_empty() {
+        println!("All tests have passed successfully");
+    } else if known.is_empty() {
+        println!("All other tests have passed successfully");
+    } else {
+        let rfc = if res16.is_empty() {
+            "All RFC vectors at 96 kHz passed"
+        } else {
+            "The other RFC vectors at 96 kHz passed"
+        };
+        println!(
+            "{rfc}; {} Opus HD vectors stop with the range coder mismatch that libopus 1.6.1's \
+             own opus_demo reports on them: {known:?}",
             known.len()
         );
     }
@@ -531,16 +577,18 @@ fn lib_config_matches(lib: &[u8]) -> bool {
         && has(b"-osce.o") == cfg!(feature = "osce")
 }
 
-/// The oracle's `libopus.a` built for this test binary: the newest
-/// `<profile>/build/opusorus-oracle-*/out/libopus.a` whose optional components match this
-/// crate's features.
+/// The oracle `libopus.a` files whose optional components match this crate's features
+/// (`<profile>/build/opusorus-oracle-*/out/libopus.a`), newest first.
 #[cfg(unix)]
-fn find_oracle_lib() -> Option<PathBuf> {
+fn find_oracle_libs() -> Vec<PathBuf> {
     let exe = std::env::current_exe().unwrap();
     // <target>/<profile>/deps/vectors-<hash>
-    let profile = exe.parent()?.parent()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(profile.join("build")).ok()? {
+    let profile = exe.parent().unwrap().parent().unwrap();
+    let Ok(dir) = std::fs::read_dir(profile.join("build")) else {
+        return Vec::new();
+    };
+    let mut libs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in dir {
         let entry = entry.unwrap();
         if !entry
             .file_name()
@@ -553,29 +601,102 @@ fn find_oracle_lib() -> Option<PathBuf> {
         let Ok(meta) = std::fs::metadata(&lib) else {
             continue;
         };
-        let mtime = meta.modified().unwrap();
-        if best.as_ref().is_some_and(|(t, _)| *t >= mtime) {
-            continue;
-        }
         if lib_config_matches(&std::fs::read(&lib).unwrap()) {
-            best = Some((mtime, lib));
+            libs.push((meta.modified().unwrap(), lib));
         }
     }
-    best.map(|(_, p)| p)
+    libs.sort_by_key(|l| core::cmp::Reverse(l.0));
+    libs.into_iter().map(|(_, p)| p).collect()
+}
+
+/// A C program that tells a 16-bit from a 24-bit (`ENABLE_RES24`) fixed-point libopus, which
+/// have the same objects and symbols: the 16-bit build's `opus_decode24` output is
+/// `RES2INT24` of 16-bit samples (low 8 bits zero). Exit status 24 or 16.
+#[cfg(unix)]
+const RES_PROBE_C: &str = r#"#include <math.h>
+#include "opus.h"
+int main(void) {
+   int err, f, i, low = 0;
+   opus_int32 pcm[960], out[960];
+   unsigned char pkt[1500];
+   OpusEncoder *enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_AUDIO, &err);
+   OpusDecoder *dec = opus_decoder_create(48000, 1, &err);
+   for (f = 0; f < 10; f++) {
+      int n;
+      for (i = 0; i < 960; i++) pcm[i] = (opus_int32)(4000000*sin((f*960 + i)*0.05));
+      n = opus_encode24(enc, pcm, 960, pkt, 1500);
+      if (n < 0 || opus_decode24(dec, pkt, n, out, 960, 0) != 960) return 1;
+      for (i = 0; i < 960; i++) low |= out[i] & 255;
+   }
+   return low ? 24 : 16;
+}
+"#;
+
+/// The oracle library for this test binary: the newest matching `libopus.a`, and in fixed-point
+/// builds the newest one with the right resolution (checked with [`RES_PROBE_C`]). `Err` if the
+/// C compiler cannot be run.
+#[cfg(unix)]
+fn find_oracle_lib(cc: &str, root: &Path) -> std::io::Result<PathBuf> {
+    let libs = find_oracle_libs();
+    if !cfg!(feature = "fixed-point") {
+        return Ok(libs
+            .into_iter()
+            .next()
+            .expect("oracle libopus.a for this configuration not found"));
+    }
+    let dir = tmp_dir("c");
+    let src = dir.join("res_probe.c");
+    std::fs::write(&src, RES_PROBE_C).unwrap();
+    let want = if cfg!(feature = "fixed-res24") {
+        24
+    } else {
+        16
+    };
+    for (i, lib) in libs.iter().enumerate() {
+        let exe = dir.join(format!("res_probe{i}"));
+        let out = std::process::Command::new(cc)
+            .arg("-w")
+            .arg(format!("-I{}", root.join("include").display()))
+            .arg(&src)
+            .arg(lib)
+            .args(["-lm", "-o"])
+            .arg(&exe)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "compiling the resolution probe failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let status = std::process::Command::new(&exe).status().unwrap();
+        if status.code() == Some(want) {
+            return Ok(lib.clone());
+        }
+    }
+    panic!("no oracle libopus.a with {want}-bit resolution found among {libs:?}");
 }
 
 /// Compiles the unmodified `src/opus_demo.c` against the oracle library. `None` (with a note)
 /// if no C compiler can be run.
 #[cfg(unix)]
 fn build_c_opus_demo() -> Option<PathBuf> {
-    let lib = find_oracle_lib().expect("oracle libopus.a for this configuration not found");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/libopus");
     let cc = match std::env::var_os("CC") {
         Some(cc) => cc.to_string_lossy().into_owned(),
         None => "cc".to_owned(),
     };
+    let lib = match find_oracle_lib(&cc, &root) {
+        Ok(lib) => lib,
+        Err(e) => {
+            eprintln!(
+                "cannot run the C compiler `{cc}` ({e}); skipping the C opus_demo comparison"
+            );
+            return None;
+        }
+    };
     let mut tag = String::new();
     for (on, t) in [
+        (cfg!(feature = "fixed-point"), "_fixed"),
+        (cfg!(feature = "fixed-res24"), "_res24"),
         (cfg!(feature = "qext"), "_qext"),
         (cfg!(feature = "custom-modes"), "_custom"),
         (DNN, "_deepplc"),
@@ -595,6 +716,13 @@ fn build_c_opus_demo() -> Option<PathBuf> {
             "-DHAVE_LRINT",
             "-DHAVE_LRINTF",
         ]);
+    // As the oracle's build (opus_demo.c itself has no FIXED_POINT code).
+    if cfg!(feature = "fixed-point") {
+        cmd.arg("-DFIXED_POINT=1");
+    }
+    if cfg!(feature = "fixed-res24") {
+        cmd.arg("-DENABLE_RES24");
+    }
     if cfg!(feature = "qext") {
         cmd.arg("-DENABLE_QEXT");
     }
@@ -651,12 +779,14 @@ fn case(name: &str, args: &[&str]) -> Case {
     }
 }
 
-/// Replaces the version line (the oracle is built without `PACKAGE_VERSION`).
+/// Replaces the version line (the oracle is built without `PACKAGE_VERSION`; fixed-point builds
+/// append `-fixed`).
 #[cfg(unix)]
 fn normalize_version(stderr: &str) -> String {
     let mut lines: Vec<&str> = stderr.split_inclusive('\n').collect();
     if let Some(first) = lines.first_mut()
         && (*first == "libopus unknown\n"
+            || *first == "libopus unknown-fixed\n"
             || *first == format!("{}\n", opusorus::celt::celt::opus_get_version_string()))
     {
         *first = "libopus <version>\n";
@@ -1135,6 +1265,22 @@ fn opus_demo_matches_c() {
     if cfg!(feature = "qext")
         && let Some(v) = vectors_dir("opushd")
     {
+        // The RFC vectors at 96 kHz as `run_opushd_vectors.sh` decodes them.
+        for n in 1..=12 {
+            let bit = path_str(&v.join(format!("testvector{n:02}.bit"))).to_owned();
+            phase2.push(case(
+                &format!("d_tv{n:02}_96s"),
+                &[
+                    "-d",
+                    "96000",
+                    "2",
+                    "-ignore_extensions",
+                    "-f32",
+                    &bit,
+                    "OUT",
+                ],
+            ));
+        }
         for n in 1..=6 {
             let bit = path_str(&v.join(format!("qext_vector{n:02}.bit"))).to_owned();
             phase2.push(case(

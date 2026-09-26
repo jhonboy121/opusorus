@@ -472,6 +472,13 @@ pub mod int64 {
     pub fn mult32_32_q16(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
         ((a.into() as i64 * b.into() as i64) >> 16) as i32
     }
+    /// [`mult32_32_q16`] for products that do not fit 32 bits after the shift (= it in the
+    /// 64-bit form: the `opus_int64` to `opus_val32` conversion wraps).
+    #[inline(always)]
+    #[must_use]
+    pub fn mult32_32_q16_ovflw(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
+        mult32_32_q16(a, b)
+    }
     /// `MULT32_32_Q31`: `(opus_val32)SHR((opus_int64)(a)*(opus_int64)(b),31)`.
     #[inline(always)]
     #[must_use]
@@ -555,6 +562,22 @@ pub mod int32 {
             super::shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
         )
     }
+    /// [`mult32_32_q16`] for products that do not fit 32 bits after the shift: the partial
+    /// products are summed with wrapping adds (the `ADD32`s overflow, C UB that wraps in
+    /// practice), which gives the 64-bit form's result (the sum is exact modulo 2^32).
+    #[inline(always)]
+    #[must_use]
+    pub fn mult32_32_q16_ovflw(a: impl Into<i32>, b: impl Into<i32>) -> i32 {
+        let (a, b) = (a.into(), b.into());
+        let lo = ((a & 0x0000ffff) as u32).wrapping_mul((b & 0x0000ffff) as u32) >> 16;
+        add32_ovflw(
+            add32_ovflw(
+                add32_ovflw(lo as i32, mult16_16su(shr32(a, 16), b & 0x0000ffff)),
+                mult16_16su(shr32(b, 16), a & 0x0000ffff),
+            ),
+            super::shl32(mult16_16(shr32(a, 16), shr32(b, 16)), 16),
+        )
+    }
     /// `MULT32_32_Q31`: `ADD32(ADD32(SHL(MULT16_16(SHR((a),16),SHR((b),16)),1),
     /// SHR(MULT16_16SU(SHR((a),16),((b)&0x0000ffff)),15)), SHR(MULT16_16SU(SHR((b),16),((a)&
     /// 0x0000ffff)),15))`.
@@ -632,6 +655,8 @@ fast_or_generic!(
     mult16_32_q15,
     /// `MULT32_32_Q16`: 32×32 multiplication, followed by a 16-bit shift right.
     mult32_32_q16,
+    /// `MULT32_32_Q16` whose result may not fit 32 bits (wraps; not a libopus macro).
+    mult32_32_q16_ovflw,
     /// `MULT32_32_Q31`: 32×32 multiplication, followed by a 31-bit shift right.
     mult32_32_q31,
     /// `MULT32_32_P31`: 32×32 multiplication, followed by a rounding 31-bit shift right.

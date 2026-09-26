@@ -4,11 +4,9 @@
 //! [options] <input> <output>` or `opus_demo -d <sampling rate (Hz)> <channels (1/2)> [options]
 //! <input> <output>`; run without arguments for the option list.
 
-#[cfg(not(feature = "fixed-point"))]
 use std::io::Write;
 use std::process::ExitCode;
 
-#[cfg(not(feature = "fixed-point"))]
 fn main() -> std::io::Result<ExitCode> {
     let mut args = Vec::new();
     for arg in std::env::args_os() {
@@ -30,9 +28,4 @@ fn main() -> std::io::Result<ExitCode> {
     stdout.flush()?;
     // The OS keeps the low 8 bits of the exit status, as for C's `return ret` from main.
     Ok(ExitCode::from(code as u8))
-}
-
-#[cfg(feature = "fixed-point")]
-fn main() -> std::io::Result<ExitCode> {
-    opusorus_tools::fixed_point_unavailable("opus_demo")
 }

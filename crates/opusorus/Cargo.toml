@@ -28,8 +28,7 @@ dred = ["deep-plc"]
 osce = ["deep-plc"]
 # FIXED-POINT BUILD (libopus `--enable-fixed-point`). NOT ADDITIVE: it *replaces* the float
 # implementation with the integer one (bit-exact with a libopus fixed-point build), exactly like
-# upstream's configure switch. While the fixed-point port is in progress (docs/FIXED_POINT.md),
-# enabling it compiles a reduced crate: only the modules already converted are available.
+# upstream's configure switch; the public API is the same (docs/FIXED_POINT.md, crate docs).
 # Cannot be combined with deep-plc/dred/osce (upstream configure refuses it too).
 fixed-point = []
 # 24-bit internal resolution for the fixed-point build (libopus `ENABLE_RES24`, which upstream

@@ -5,28 +5,18 @@
 //! cargo run --release -p opusorus --example roundtrip [bitrate_bps] [frequency_hz]
 //! ```
 
-#![cfg_attr(
-    not(feature = "fixed-point"),
-    expect(clippy::print_stdout, reason = "command-line example")
-)]
+#![expect(clippy::print_stdout, reason = "command-line example")]
 
-#[cfg(not(feature = "fixed-point"))]
 use std::error::Error;
 
-#[cfg(not(feature = "fixed-point"))]
 use opusorus::{Application, Bitrate, Decoder, Encoder};
 
-#[cfg(not(feature = "fixed-point"))]
 const FS: i32 = 48000;
-#[cfg(not(feature = "fixed-point"))]
 const CHANNELS: usize = 2;
 /// 20 ms frames.
-#[cfg(not(feature = "fixed-point"))]
 const FRAME_SIZE: usize = 960;
-#[cfg(not(feature = "fixed-point"))]
 const SECONDS: usize = 2;
 
-#[cfg(not(feature = "fixed-point"))]
 fn arg<T: std::str::FromStr>(n: usize, default: T) -> Result<T, Box<dyn Error>>
 where
     T::Err: Error + 'static,
@@ -37,7 +27,6 @@ where
     }
 }
 
-#[cfg(not(feature = "fixed-point"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let bitrate: i32 = arg(1, 64000)?;
     let freq: f64 = arg(2, 440.0)?;
@@ -94,7 +83,3 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("round-trip SNR: {snr:.2} dB");
     Ok(())
 }
-
-/// The in-progress fixed-point build (feature `fixed-point`) has no codec API yet.
-#[cfg(feature = "fixed-point")]
-fn main() {}

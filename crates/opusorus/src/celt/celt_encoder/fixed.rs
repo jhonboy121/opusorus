@@ -409,7 +409,14 @@ pub fn alloc_trim_analysis(
     let nb = m.nb_ebands as usize;
     for ch in 0..c as usize {
         for i in 0..(end - 1) as usize {
-            diff += shr32(band_log_e[i + ch * nb], 5) * (2 + 2 * i as i32 - end);
+            // C UB (signed overflow of the `opus_val32` sum): with up-sampled input and the end
+            // band left above the input bandwidth (direct CELT use; the Opus encoder limits it),
+            // the silent high bands have log energies near -14 and the weighted sum overflows
+            // at high rates. It wraps as in C in practice (bit-exact with the oracle) instead of
+            // panicking in debug builds.
+            diff = diff.wrapping_add(
+                shr32(band_log_e[i + ch * nb], 5).wrapping_mul(2 + 2 * i as i32 - end),
+            );
         }
     }
     diff /= c * (end - 1);

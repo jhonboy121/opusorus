@@ -15,8 +15,8 @@ publish = false
 # Not on by default: enabling `opusorus/qext` unconditionally would unify it into every workspace
 # build (`cargo test --workspace`) while the C oracle stays non-QEXT.
 qext = ["opusorus/qext"]
-# Fixed-point build of `opusorus` (docs/FIXED_POINT.md). The tools need the full float codec API,
-# so they are compiled out (the binaries only report that) until the fixed-point port is done.
+# Fixed-point build of `opusorus` (docs/FIXED_POINT.md): `opus_demo` on the fixed-point codec,
+# like upstream's tools in a `--enable-fixed-point` build (the compare tools are float code).
 fixed-point = ["opusorus/fixed-point"]
 fixed-res24 = ["fixed-point", "opusorus/fixed-res24"]
 # DNN features of `opus_demo` (libopus `--enable-deep-plc` / `--enable-dred` / `--enable-osce`):

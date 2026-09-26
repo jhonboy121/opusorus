@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-26 (after layer E)_
+_Last updated: 2026-09-26 (after FX5)_
 
 ## Summary
 The complete float codec is ported and verified bit-exact against libopus 1.6.1: CELT, SILK, hybrid,
@@ -9,8 +9,10 @@ QEXT (Opus HD, 96 kHz) and custom modes. DNN modules (deep PLC/FARGAN, DRED, OSC
 and bit-exact standalone; wiring them into the codec is in progress. The RFC 8251 and Opus HD
 conformance vectors decode bit-identically to C and pass opus_compare/qext_compare.
 
-Hardening phase (C ABI + upstream C test suite, Rust port of libopus tests, fuzzing, benchmarks,
-opus_demo, DNN integration) in progress. Remaining after that: fixed-point build, performance pass.
+The fixed-point build (`fixed-point`, `fixed-res24`, libopus `--enable-fixed-point`) is complete:
+the whole codec and the tools, bit-exact with a fixed-point libopus 1.6.1 in 16- and 24-bit
+resolution, with and without QEXT and custom modes; its decoder passes the RFC 8251 vectors
+(docs/FIXED_POINT.md).
 
 | Area | State |
 |---|---|
@@ -21,13 +23,14 @@ opus_demo, DNN integration) in progress. Remaining after that: fixed-point build
 | QEXT (Opus HD) | ✅ bit-exact, Opus HD vectors pass |
 | Custom modes | ✅ bit-exact |
 | DNN: deep PLC / DRED / OSCE+BWE | ✅ integrated, bit-exact vs C built with the same features (weights via runtime blob) |
-| Fixed-point build | 🟨 foundation done (fixed macros/mathops/static modes bit-exact vs a fixed oracle, gating in place); codec conversion planned in docs/FIXED_POINT.md |
+| Fixed-point build (`fixed-point`, `fixed-res24`, × `qext`, `custom-modes`) | ✅ bit-exact vs a fixed-point libopus oracle: all differential suites, libopus test-suite port (host + wasmtime), opus_demo vs the fixed C opus_demo, RFC 8251 vectors pass opus_compare (48 kHz quality 97.15/98.68 % 16-bit, 97.36/98.88 % 24-bit), Opus HD vectors pass qext_compare with `fixed-res24` |
+| Debug-build overflow hardening (public API) | ✅ C-UB overflows reachable from the API wrap like C (stereo LFE `stereo_itheta`; res24 decoder gain `MULT32_32_Q16`; CELT `alloc_trim_analysis`); public-API sweep 101 200 cases × 6 builds vs C and 40 000 Rust-only cases × 6 builds under wasmtime, 0 panics |
 | Conformance vectors (RFC 8251 all rates mono/stereo; Opus HD) | ✅ bit-exact vs C, opus_compare pass |
 | Fuzzing | ✅ 11 cargo-fuzz targets (differential vs C + invariants), ~7.5M execs default+QEXT, 0 crashes/divergences |
 | Benchmarks | ✅ see below (Rust ≈ scalar C; SILK decode 1.39×) |
 | Shared library size | ✅ measured (Rust 773–1029 KiB vs C 323–578 KiB) |
 | C ABI (`libopusorus` .so/.a, opus.h compatible) | ✅ upstream C test suite passes |
-| opus_demo port | ✅ byte-identical to C over 102–121 invocations |
+| opus_demo port | ✅ byte-identical to C over 102–133 invocations (float and fixed-point C opus_demo) |
 | Cross-platform build (wasm32 ×2, Android ×3, iOS ×3, linux x86_64/aarch64, thumbv7em no_std) | ✅ |
 | wasm32-wasip1 tests under wasmtime | ✅ |
 | clippy `-D warnings`, rustfmt | ✅ |
@@ -124,7 +127,15 @@ Mutation checks: injected one-character bugs were caught in 143 execs / ~1 min. 
 - RFC 8251 vectors: bit-exact vs C at 8/12/16/24/48 kHz mono+stereo; average opus_compare quality
   48k 97.41 % mono / 99.70 % stereo, 24k 91.63/91.91, 16k 84.72/84.65, 12k 81.95/82.14, 8k 73.23/73.52
   (identical to C).
+- Fixed-point decoder (bit-exact vs the fixed C decoder, all 12 vectors pass at every rate):
+  `fixed-point` 48k 97.15/98.68, 24k 91.62/91.91, 16k 84.69/84.65, 12k 81.96/82.17, 8k 73.23/73.53;
+  `fixed-res24` 48k 97.36/98.88, 24k 91.63/91.91, 16k 84.69/84.66, 12k 81.95/82.16, 8k 73.23/73.52
+  (with `qext`: 97.19/98.90 and 97.39/99.13 at 48k). Opus HD at 96 kHz with `fixed-res24` + `qext`:
+  all 12 RFC vectors pass qext_compare; the 16-bit `fixed-point` + `qext` output is limited to
+  16-bit resolution (9 vectors at rms 0.13–0.29 LSB > 0.1, identical to the 16-bit fixed C
+  opus_demo). See docs/FIXED_POINT.md.
 - Opus HD: all 12 RFC vectors pass at 96 kHz (qext_compare); qext_vector* bit-exact vs C.
 - Upstream C test programs (test_opus_api/decode/encode+regressions/padding/projection/extensions/custom)
   all PASS linked against `libopusorus` (C ABI); upstream opus_demo + run_vectors 120/120 match.
-- Rust port of the libopus test suite passes on host and under wasmtime (wasm32-wasip1).
+- Rust port of the libopus test suite passes on host and under wasmtime (wasm32-wasip1), in the
+  float and the fixed-point builds (`fixed-point`, `fixed-res24`, × `qext`, `custom-modes`).

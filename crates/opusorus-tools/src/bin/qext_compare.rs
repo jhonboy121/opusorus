@@ -5,7 +5,6 @@
 
 use std::process::ExitCode;
 
-#[cfg(not(feature = "fixed-point"))]
 fn main() -> std::io::Result<ExitCode> {
     let args: Vec<String> = std::env::args().collect();
     let code = opusorus_tools::compare::qext_compare_main(&args, &mut std::io::stderr().lock())?;
@@ -14,9 +13,4 @@ fn main() -> std::io::Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
-}
-
-#[cfg(feature = "fixed-point")]
-fn main() -> std::io::Result<ExitCode> {
-    opusorus_tools::fixed_point_unavailable("qext_compare")
 }

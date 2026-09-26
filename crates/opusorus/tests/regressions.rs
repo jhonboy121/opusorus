@@ -4,9 +4,6 @@
 //! The C functions ignore the return values of the CTL calls; the port checks that each one
 //! succeeds, except where C relies on an ignored failure (commented at the call).
 
-// Float-only: not compiled in fixed-point builds until this unit is converted
-// (docs/FIXED_POINT.md).
-#![cfg(not(feature = "fixed-point"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
