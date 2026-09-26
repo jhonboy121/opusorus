@@ -40,12 +40,15 @@ resolution, with and without QEXT and custom modes; its decoder passes the RFC 8
 | clippy `-D warnings`, rustfmt, rustdoc `-D warnings` | ✅ |
 | Upstream options `float-approx`, `assertions`, `fuzzing`, `disable-rfc8251` (phase G, PLAN D-030) | ✅ each vs the oracle built with the same define (`just test-options`): `float-approx` whole differential suite float/QEXT/custom/DNN + `celt_log2`/`celt_exp2`/`celt_isnan` on 44 M bit patterns; `assertions` whole suite float/fixed/QEXT/custom/DNN against an `ENABLE_ASSERTIONS` oracle, hard in release, each check kind fails on both sides (C abort in a child process); `fuzzing` seeded single-stream/multistream encoders (15 configs × 3 seeds, surround) + decoders + opus_demo vs C `opus_demo` bit-exact, float/fixed/res24/QEXT; `disable-rfc8251` whole suite float/fixed/QEXT, RFC 6716 vectors pass `run_vectors.sh` (48 kHz quality 97.43/99.66 % float; the RFC 8251 decoder fails them) |
 
-## Verification run (2026-09-26, after FX5)
+## Verification run (2026-09-27, final: all features)
 
-`just clippy`, `just doc`, `just test` (float default + all float features incl. DNN; fixed-point
-16/24-bit × QEXT/custom-modes incl. the C-ABI upstream C suite and bench parity), `just cross`,
-`just cross-capi`, `just test-wasm` (float + fixed), `just test-dnn`, `just vectors` (float + fixed):
-all pass.
+All pass: `just fmt`, `just clippy` (float, fixed-point, no_std, build-option feature sets),
+`just doc` (rustdoc `-D warnings`, float/DNN/fixed/options), `just test` (float default + all float
+features incl. DNN; fixed-point 16/24-bit × QEXT/custom modes incl. the upstream C suite through
+the C ABI and bench parity), `just test-options` (every upstream build option vs an oracle built
+with the same defines: 736 test binaries), `just cross` (wasm32 ×2, Android ×3, iOS ×3, host,
+thumbv7em no_std; float + fixed), `just cross-capi`, `just test-wasm` (float + fixed under
+wasmtime), `just test-dnn`, `just vectors` (RFC 8251/6716 + Opus HD, float + fixed).
 
 ## Environment
 Host: aarch64 Linux, rustc 1.98.1, clang 21 / gcc (oracle via `cc`).
