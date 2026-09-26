@@ -67,8 +67,10 @@ use std::path::{Path, PathBuf};
 
 /// Per-test scratch directory.
 fn tmp_dir(name: &str) -> PathBuf {
+    // Per process: concurrent runs of this test binary (different feature sets share
+    // CARGO_TARGET_TMPDIR) must not share (and delete) each other's temporary files.
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("vectors")
+        .join(format!("vectors-{}", std::process::id()))
         .join(name);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -271,7 +273,12 @@ struct VectorStep {
 
 fn vector_step(vectors: &Path, rate: u32, stereo: bool, n: u32) -> VectorStep {
     let channels = if stereo { "2" } else { "1" };
-    let dir = tmp_dir(&format!("rfc8251_{rate}_{channels}"));
+    // Keyed on the vector set too: the RFC 6716 and RFC 8251 runs decode in parallel threads of
+    // this binary and would otherwise share (and delete) the same `tmpNN.out` files.
+    let set = vectors
+        .file_name()
+        .map_or_else(|| "vectors".into(), |f| f.to_string_lossy().into_owned());
+    let dir = tmp_dir(&format!("{set}_{rate}_{channels}"));
     let tmp_out = dir.join(format!("tmp{n:02}.out"));
     let rate_s = rate.to_string();
     let bit = vectors.join(format!("testvector{n:02}.bit"));
