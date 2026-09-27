@@ -18,6 +18,18 @@ float-approx = [
     "opusorus-oracle/float-approx",
     "opus-sys-optimized/float-approx",
 ]
+# DNN benchmarks (float only): deep PLC under packet loss, LACE/NoLACE (OSCE) and DRED encoding,
+# opusorus vs the oracle vs the optimized CMake build, all with the same models (Rust loads the
+# oracle's weight blob; both C builds use their compiled-in weights).
+dnn = [
+    "opusorus/deep-plc",
+    "opusorus/dred",
+    "opusorus/osce",
+    "opusorus-oracle/deep-plc",
+    "opusorus-oracle/dred",
+    "opusorus-oracle/osce",
+    "opus-sys-optimized/dnn",
+]
 # Fixed-point builds (docs/FIXED_POINT.md): opusorus `fixed-point` vs the fixed-point oracle vs
 # upstream CMake with `OPUS_FIXED_POINT=ON`; the codec benchmarks use the native 16-bit
 # (`fixed-res24`: 24-bit) PCM API, and the Criterion groups get a `fixed_` (`fixed24_`) prefix.

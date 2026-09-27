@@ -28,6 +28,10 @@ pub fn sgemv16x1(
     let out = &mut out[..rows];
     let x = &x[..cols];
     out.fill(0.0);
+    // SIMD (bit-identical: same multiply and add per lane), else the scalar loop below.
+    if super::vec_simd::sgemv_blocks::<4>(out, weights, rows, cols, col_stride, x) {
+        return;
+    }
     let mut i = 0;
     while i < rows {
         let y = &mut out[i..i + 16];
@@ -53,6 +57,10 @@ pub fn sgemv8x1(
     let out = &mut out[..rows];
     let x = &x[..cols];
     out.fill(0.0);
+    // SIMD (bit-identical: same multiply and add per lane), else the scalar loop below.
+    if super::vec_simd::sgemv_blocks::<2>(out, weights, rows, cols, col_stride, x) {
+        return;
+    }
     let mut i = 0;
     while i < rows {
         let y = &mut out[i..i + 8];
@@ -153,6 +161,17 @@ pub fn sparse_cgemv8x4(
     let out = &mut out[..rows];
     out.fill(0.0);
     quantize_input(xq, &x[..cols]);
+    // SIMD (bit-identical, see `vec_simd`), else the scalar loop below.
+    if !super::vec_simd::sparse_cgemv8x4(out, w, idx, rows, xq) {
+        sparse_cgemv8x4_blocks(out, w, idx, rows, xq);
+    }
+    for (o, &s) in out.iter_mut().zip(&scale[..rows]) {
+        *o *= s;
+    }
+}
+
+/// The block loop of [`sparse_cgemv8x4`] (scalar).
+fn sparse_cgemv8x4_blocks(out: &mut [f32], w: &[i8], idx: &[i32], rows: usize, xq: &[i8]) {
     let mut ip = 0usize;
     let mut wp = 0usize;
     let mut i = 0;
@@ -182,9 +201,6 @@ pub fn sparse_cgemv8x4(
         }
         i += 8;
     }
-    for (o, &s) in out.iter_mut().zip(&scale[..rows]) {
-        *o *= s;
-    }
 }
 
 /// Port of dnn/vec.h:cgemv8x4 (signed-input variant). Here the quantized inputs are converted
@@ -195,6 +211,17 @@ pub fn cgemv8x4(out: &mut [f32], w: &[i8], scale: &[f32], rows: usize, cols: usi
     let out = &mut out[..rows];
     out.fill(0.0);
     quantize_input(xq, &x[..cols]);
+    // SIMD (bit-identical, see `vec_simd`), else the scalar loop below.
+    if !super::vec_simd::cgemv8x4(out, w, rows, cols, xq) {
+        cgemv8x4_blocks(out, w, rows, cols, xq);
+    }
+    for (o, &s) in out.iter_mut().zip(&scale[..rows]) {
+        *o *= s;
+    }
+}
+
+/// The block loop of [`cgemv8x4`] (scalar).
+fn cgemv8x4_blocks(out: &mut [f32], w: &[i8], rows: usize, cols: usize, xq: &[i8]) {
     let mut wp = 0usize;
     let mut i = 0;
     while i < rows {
@@ -220,9 +247,6 @@ pub fn cgemv8x4(out: &mut [f32], w: &[i8], scale: &[f32], rows: usize, cols: usi
             j += 4;
         }
         i += 8;
-    }
-    for (o, &s) in out.iter_mut().zip(&scale[..rows]) {
-        *o *= s;
     }
 }
 

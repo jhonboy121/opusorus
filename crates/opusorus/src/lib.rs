@@ -182,6 +182,8 @@ macro_rules! const_unless_fixed_debug {
 // modules that use them.
 #[macro_use]
 mod assertions;
+#[macro_use]
+mod simd;
 
 mod error;
 pub use error::{Error, Result};

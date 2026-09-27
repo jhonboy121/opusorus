@@ -218,8 +218,8 @@ cross-capi:
 test-wasm:
     CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1
     CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." cargo test -p opusorus --target wasm32-wasip1 --features fixed-point
-    # SIMD128 build: the fearless_simd FFT/MDCT kernels must match the scalar code bit for bit.
-    CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." RUSTFLAGS="-Ctarget-feature=+simd128" cargo test -p opusorus --target wasm32-wasip1 --features qext --lib simd
+    # SIMD128 build: the fearless_simd FFT/MDCT/DNN kernels must match the scalar code bit for bit.
+    CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir=." RUSTFLAGS="-Ctarget-feature=+simd128" cargo test -p opusorus --target wasm32-wasip1 --features qext,deep-plc --lib simd
 
 # RFC 6716/8251 through the Rust opus_demo/opus_compare, the Opus HD (QEXT) vectors with
 # qext_compare, the C opus_demo comparison (against the matching float or fixed-point C

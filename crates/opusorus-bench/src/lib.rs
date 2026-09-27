@@ -31,6 +31,8 @@ use opus_sys_optimized as copt;
 use opusorus_conformance::signals;
 use opusorus_oracle::{api as cscalar, sys};
 
+#[cfg(feature = "dnn")]
+pub mod dnn;
 pub mod micro;
 
 /// PCM sample type of the codec workloads: the native I/O of the build (`opus_res`).
@@ -135,7 +137,7 @@ impl std::error::Error for BenchError {}
 /// Result alias for this crate.
 pub type Result<T> = core::result::Result<T, BenchError>;
 
-fn rust_err(what: &str, e: opusorus::Error) -> BenchError {
+pub(crate) fn rust_err(what: &str, e: opusorus::Error) -> BenchError {
     BenchError(format!("rust {what}: {e:?}"))
 }
 
@@ -430,6 +432,24 @@ impl AnyDecoder {
         })
     }
 
+    /// Setter CTL.
+    ///
+    /// # Errors
+    /// If the implementation rejects the request.
+    pub fn ctl_set(&mut self, req: i32, val: i32) -> Result<()> {
+        match self {
+            Self::Rust(d) => d
+                .ctl_set(req, val)
+                .map_err(|x| rust_err(&format!("ctl {req}"), x)),
+            Self::CScalar(d) => d
+                .ctl_set(req, val)
+                .map_err(|x| c_err("c_scalar", &format!("ctl {req}"), x)),
+            Self::COpt(d) => d
+                .ctl_set(req, val)
+                .map_err(|x| c_err("c_opt", &format!("ctl {req}"), x)),
+        }
+    }
+
     /// Decodes one packet to PCM with the build's native API (`opus_decode_float`,
     /// `opus_decode` or `opus_decode24`); returns samples per channel.
     ///
@@ -441,7 +461,19 @@ impl AnyDecoder {
         pcm: &mut [Sample],
         frame_size: usize,
     ) -> Result<usize> {
-        let p = Some(packet);
+        self.decode_opt(Some(packet), pcm, frame_size)
+    }
+
+    /// [`AnyDecoder::decode`] with `None` meaning a lost packet (PLC).
+    ///
+    /// # Errors
+    /// If decoding fails.
+    pub fn decode_opt(
+        &mut self,
+        p: Option<&[u8]>,
+        pcm: &mut [Sample],
+        frame_size: usize,
+    ) -> Result<usize> {
         match self {
             Self::Rust(d) => native!(d.decode_float | decode | decode24(p, pcm, frame_size, false))
                 .map_err(|x| rust_err("decode", x)),
@@ -754,6 +786,9 @@ pub enum CodecBench {
     SurroundDecode,
     /// 5.1 surround encode at the given complexity.
     SurroundEncode(i32),
+    /// A DNN workload (feature `dnn`).
+    #[cfg(feature = "dnn")]
+    Dnn(dnn::DnnBench),
 }
 
 impl CodecBench {
@@ -771,6 +806,8 @@ impl CodecBench {
         for cx in ENCODE_COMPLEXITIES {
             v.push(Self::SurroundEncode(cx));
         }
+        #[cfg(feature = "dnn")]
+        v.extend(dnn::DnnBench::ALL.map(Self::Dnn));
         v
     }
 
@@ -784,6 +821,8 @@ impl CodecBench {
             Self::Encode(c, cx) => format!("{p}encode_c{cx}_{}", c.id),
             Self::SurroundDecode => format!("{p}decode_{}", SURROUND.id),
             Self::SurroundEncode(cx) => format!("{p}encode_c{cx}_{}", SURROUND.id),
+            #[cfg(feature = "dnn")]
+            Self::Dnn(d) => format!("{p}dnn_{}", d.id()),
         }
     }
 
@@ -795,6 +834,8 @@ impl CodecBench {
             Self::Encode(c, cx) => format!("encode {} (cx{cx})", c.id),
             Self::SurroundDecode => format!("decode {}", SURROUND.id),
             Self::SurroundEncode(cx) => format!("encode {} (cx{cx})", SURROUND.id),
+            #[cfg(feature = "dnn")]
+            Self::Dnn(d) => d.label().to_owned(),
         }
     }
 
@@ -848,6 +889,8 @@ impl CodecBench {
                     Ok(())
                 }))
             }
+            #[cfg(feature = "dnn")]
+            Self::Dnn(d) => d.runner(imp),
             Self::SurroundEncode(cx) => {
                 let input = SURROUND.samples();
                 let mut enc = AnyMsEncoder::new(imp, &SURROUND, cx)?;

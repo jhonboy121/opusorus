@@ -23,6 +23,7 @@ pub mod nnet_arch;
 pub mod parse_lpcnet_weights;
 pub mod tansig_table;
 pub mod vec;
+mod vec_simd;
 
 // Shared by the DNN features (compiled out in a `lossgen`-only build, which may be
 // fixed-point).

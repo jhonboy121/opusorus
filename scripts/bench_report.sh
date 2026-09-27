@@ -2,9 +2,11 @@
 # Runs the opusorus benchmarks (Rust vs scalar C oracle vs optimized upstream C) in release
 # mode and prints a markdown table (time per 20 ms frame, realtime factor, Rust/C ratios).
 #
-# Usage: scripts/bench_report.sh [--qext] [--fixed | --fixed-res24] [--runs N] [--quick]
+# Usage: scripts/bench_report.sh [--qext] [--dnn] [--fixed | --fixed-res24] [--runs N] [--quick]
 #                                [--report-only] [-- <criterion args>]
 #   --qext         also benchmark 96 kHz Opus HD (QEXT) encode/decode
+#   --dnn          also benchmark the DNN features (deep PLC, LACE/NoLACE, DRED encoding;
+#                  float only; needs scripts/fetch_dnn_models.sh)
 #   --fixed        fixed-point builds (16-bit opus_res): opusorus `fixed-point` vs the fixed
 #                  oracle vs upstream CMake with OPUS_FIXED_POINT=ON; native opus_encode /
 #                  opus_decode PCM; Criterion groups prefixed `fixed_`
@@ -30,6 +32,7 @@ runs=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --qext) feats+=(qext) ;;
+        --dnn) feats+=(dnn) ;;
         --fixed) feats+=(fixed-point) ;;
         --fixed-res24) feats+=(fixed-res24) ;;
         --runs) runs=$2; shift ;;

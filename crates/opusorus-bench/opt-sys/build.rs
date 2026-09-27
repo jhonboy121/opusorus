@@ -12,7 +12,8 @@
 //! With the `fixed-point` feature both are fixed-point builds (CMake `OPUS_FIXED_POINT=ON`; the
 //! oracle's `FIXED_POINT` sources and defines), with `fixed-res24` also `ENABLE_RES24`. On
 //! AArch64 the fixed CMake build needs one workaround (see `build_optimized`). With
-//! `float-approx` both define `FLOAT_APPROX` (CMake `OPUS_FLOAT_APPROX=ON`).
+//! `float-approx` both define `FLOAT_APPROX` (CMake `OPUS_FLOAT_APPROX=ON`). With `dnn` the
+//! optimized library also gets deep PLC, DRED and OSCE (compiled-in weights).
 //!
 //! Each library and its shim objects are archived together, then every defined global symbol
 //! is renamed `<prefix><name>` with `objcopy --redefine-syms`, so both link next to the
@@ -149,6 +150,7 @@ struct Config {
     fixed: bool,
     res24: bool,
     float_approx: bool,
+    dnn: bool,
 }
 
 fn build_optimized(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
@@ -171,6 +173,12 @@ fn build_optimized(root: &Path, out: &Path, csrc: &Path, cfg: Config) {
             "-DOPUS_FLOAT_APPROX={}",
             if cfg.float_approx { "ON" } else { "OFF" }
         ));
+    // DNN features (the scalar copy below does not need them: the codec-level scalar
+    // benchmarks use the oracle crate, built with the same DNN features).
+    let dnn = if cfg.dnn { "ON" } else { "OFF" };
+    for opt in ["OPUS_DEEP_PLC", "OPUS_DRED", "OPUS_OSCE"] {
+        cmd.arg(format!("-D{opt}={dnn}"));
+    }
     // Upstream CMake has no QEXT or RES24 option; configure's --enable-qext only defines
     // ENABLE_QEXT, and ENABLE_RES24 is a plain define too.
     let mut cflags = Vec::new();
@@ -293,6 +301,7 @@ fn main() {
         fixed: feature("FIXED_POINT"),
         res24: feature("FIXED_RES24"),
         float_approx: feature("FLOAT_APPROX"),
+        dnn: feature("DNN"),
     };
 
     build_optimized(&root, &out, &csrc, cfg);

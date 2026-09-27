@@ -19,6 +19,9 @@ fixed-point = []
 # 24-bit `opus_res` (`ENABLE_RES24`, autotools' default for fixed-point; CMake never sets it, so
 # it is passed in `CMAKE_C_FLAGS` like `ENABLE_QEXT`).
 fixed-res24 = ["fixed-point"]
+# The DNN features in the optimized library (CMake `OPUS_DEEP_PLC`, `OPUS_DRED`, `OPUS_OSCE`,
+# compiled-in weights from the fetched model data, scripts/fetch_dnn_models.sh). Float only.
+dnn = []
 # `FLOAT_APPROX` in both C libraries (CMake `OPUS_FLOAT_APPROX=ON` for the optimized one).
 float-approx = []
 

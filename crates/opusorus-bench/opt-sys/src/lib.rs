@@ -622,6 +622,15 @@ impl Decoder {
         })
     }
 
+    /// `opus_decoder_ctl(request, value)` for a setter request.
+    ///
+    /// # Errors
+    /// The C error code.
+    pub fn ctl_set(&mut self, request: i32, value: i32) -> CResult<()> {
+        // SAFETY: setter requests take one opus_int32 vararg.
+        check(unsafe { optopus_opus_decoder_ctl(self.ptr.as_ptr(), request, value) }).map(drop)
+    }
+
     /// `opus_decoder_ctl(request, &value)` for a getter request.
     ///
     /// # Errors

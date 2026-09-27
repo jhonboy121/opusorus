@@ -1,72 +1,14 @@
-//! Vertical SIMD (`fearless_simd`) kernels for the float FFT (celt/kiss_fft.c).
+//! Vertical SIMD (`fearless_simd`) kernels for the float FFT (celt/kiss_fft.c) and MDCT
+//! (celt/mdct.c), see [`crate::simd`].
 //!
-//! Every lane executes exactly the scalar operation sequence of the port (same operations, same
-//! order, no FMA contraction) on an independent butterfly, so the results are bit-identical to
-//! the scalar code and to the C oracle. IEEE `+`/`*` are commutative and `(-x)*y == -(x*y)`,
-//! which some kernels use to share work between lanes; nothing else is reassociated.
-//!
-//! The kernels run on the target's SIMD baseline (NEON on aarch64, SSE2 on x86/x86-64, SIMD128 on
-//! wasm32 built with `+simd128`); elsewhere [`fft_impl`] reports that no SIMD is available and the
-//! caller runs the scalar code.
+//! Each lane runs the scalar operation sequence on an independent butterfly or pair. IEEE
+//! `+`/`*` are commutative and `(-x)*y == -(x*y)`, which some kernels use to share work between
+//! lanes; nothing else is reassociated.
 
 use fearless_simd::{Select, Simd, SimdBase, SimdFrom, f32x4, mask32x4};
 
 use super::kiss_fft::{Interleaved, kf_bfly2, kf_bfly3, kf_bfly4, kf_bfly5};
 use super::static_modes::{KissFftState, KissTwiddleCpx};
-
-/// Runs `$body` with the target's baseline SIMD token bound to `$s` (`Some(result)`), or returns
-/// `None` if the target has no supported SIMD baseline.
-macro_rules! with_simd {
-    ($s:ident => $body:expr) => {{
-        #[cfg(target_arch = "aarch64")]
-        let token = fearless_simd::Level::baseline().as_neon();
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let token = fearless_simd::Level::baseline().as_sse2();
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        let token = fearless_simd::Level::baseline().as_wasm_simd128();
-        #[cfg(any(
-            target_arch = "aarch64",
-            target_arch = "x86",
-            target_arch = "x86_64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        ))]
-        #[cfg(test)]
-        let token =
-            token.filter(|_| !tests::SCALAR_ONLY.load(core::sync::atomic::Ordering::Relaxed));
-        let r = token.map(|$s| {
-            $s.vectorize(
-                #[inline(always)]
-                || $body,
-            )
-        });
-        #[cfg(not(any(
-            target_arch = "aarch64",
-            target_arch = "x86",
-            target_arch = "x86_64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )))]
-        // No SIMD: the caller runs the scalar code. The body is still type-checked (with the
-        // scalar fallback token, never executed) so it stays warning-free on these targets.
-        let r = if false {
-            let $s = fearless_simd::Fallback::new();
-            Some($body)
-        } else {
-            None
-        };
-        r
-    }};
-}
-
-/// [`with_simd!`] for kernels that do a prefix of the work: evaluates to the `$body` result
-/// (how far the kernel got) with SIMD, and to `$none` (nothing done) without.
-macro_rules! simd_done {
-    ($none:expr; $s:ident => $body:expr) => {
-        match with_simd!($s => $body) {
-            Some(done) => done,
-            None => $none,
-        }
-    };
-}
 
 /// Four complex values, one per lane (`r` and `i` deinterleaved).
 #[derive(Clone, Copy)]
@@ -653,15 +595,10 @@ mod tests {
     //! MDCTs of the static modes, all shifts and strides, bit for bit.
 
     use alloc::{format, vec, vec::Vec};
-    use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::celt::kiss_fft::{opus_fft, opus_fft_impl};
     use crate::celt::mdct::{clt_mdct_backward, clt_mdct_forward};
     use crate::celt::static_modes::{CeltMode, KissFftCpx, STATIC_MODE_LIST};
-
-    /// Makes the SIMD entry points report "no SIMD" (tests only). Other tests running meanwhile
-    /// are unaffected: both paths give the same results.
-    pub(super) static SCALAR_ONLY: AtomicBool = AtomicBool::new(false);
 
     struct Lcg(u32);
     impl Lcg {
@@ -676,15 +613,6 @@ mod tests {
 
     fn bits(x: &[f32]) -> Vec<u32> {
         x.iter().map(|v| v.to_bits()).collect()
-    }
-
-    /// Runs `f` once with SIMD and once scalar-only; both results must be bit-identical.
-    fn both<T: PartialEq + core::fmt::Debug>(what: &str, mut f: impl FnMut() -> T) {
-        let simd = f();
-        SCALAR_ONLY.store(true, Ordering::Relaxed);
-        let scalar = f();
-        SCALAR_ONLY.store(false, Ordering::Relaxed);
-        assert_eq!(simd, scalar, "{what}");
     }
 
     fn modes() -> &'static [&'static CeltMode] {
@@ -703,7 +631,7 @@ mod tests {
                         .chunks(2)
                         .map(|c| KissFftCpx { r: c[0], i: c[1] })
                         .collect();
-                    both(&format!("opus_fft {n}"), || {
+                    crate::simd::assert_simd_eq_scalar(&format!("opus_fft {n}"), || {
                         let mut out = vec![KissFftCpx::default(); n];
                         opus_fft(st, &fin, &mut out);
                         out.iter()
@@ -747,22 +675,28 @@ mod tests {
                         };
                         let input = rng.vec(n2 + ov);
                         let out0 = rng.vec(stride * n2);
-                        both(&format!("forward n={n} stride={stride} ov={ov}"), || {
-                            let mut out = out0.clone();
-                            clt_mdct_forward(
-                                &mode.mdct, &input, &mut out, &window, ov, shift, stride,
-                            );
-                            bits(&out)
-                        });
+                        crate::simd::assert_simd_eq_scalar(
+                            &format!("forward n={n} stride={stride} ov={ov}"),
+                            || {
+                                let mut out = out0.clone();
+                                clt_mdct_forward(
+                                    &mode.mdct, &input, &mut out, &window, ov, shift, stride,
+                                );
+                                bits(&out)
+                            },
+                        );
                         let input = rng.vec(stride * n2);
                         let out0 = rng.vec((n2 + ov / 2).max(ov) + 3);
-                        both(&format!("backward n={n} stride={stride} ov={ov}"), || {
-                            let mut out = out0.clone();
-                            clt_mdct_backward(
-                                &mode.mdct, &input, &mut out, &window, ov, shift, stride,
-                            );
-                            bits(&out)
-                        });
+                        crate::simd::assert_simd_eq_scalar(
+                            &format!("backward n={n} stride={stride} ov={ov}"),
+                            || {
+                                let mut out = out0.clone();
+                                clt_mdct_backward(
+                                    &mode.mdct, &input, &mut out, &window, ov, shift, stride,
+                                );
+                                bits(&out)
+                            },
+                        );
                     }
                 }
             }
