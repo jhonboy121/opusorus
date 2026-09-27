@@ -40,7 +40,7 @@ pub const COEF_SHIFT: i32 = 16;
 /// `QCONST32(x, COEF_SHIFT-1)` stored in a `kiss_twiddle_scalar` (`x` is an `f`-suffixed C
 /// literal).
 #[cfg(feature = "fixed-point")]
-const fn coef_const(x: f32) -> KissTwiddleScalar {
+pub(crate) const fn coef_const(x: f32) -> KissTwiddleScalar {
     super::arch::qconst32(x as f64, COEF_SHIFT - 1) as KissTwiddleScalar
 }
 
@@ -55,7 +55,7 @@ pub(crate) trait CpxBuf {
     fn st(&mut self, i: usize, v: KissFftCpx);
     /// The buffer as interleaved `re, im` scalars, if it is laid out that way (the SIMD FFT
     /// works on those).
-    #[cfg(not(feature = "fixed-point"))]
+    #[cfg(not(feature = "fixed-point-debug"))]
     #[inline(always)]
     fn interleaved(&mut self) -> Option<&mut [KissFftScalar]> {
         None
@@ -90,7 +90,7 @@ impl CpxBuf for Interleaved<'_> {
         p[0] = v.r;
         p[1] = v.i;
     }
-    #[cfg(not(feature = "fixed-point"))]
+    #[cfg(not(feature = "fixed-point-debug"))]
     #[inline(always)]
     fn interleaved(&mut self) -> Option<&mut [KissFftScalar]> {
         Some(self.0)
@@ -767,10 +767,10 @@ pub(crate) fn opus_fft_impl_buf<B: CpxBuf + ?Sized>(
     fout: &mut B,
     mut downshift: i32,
 ) {
-    // Float build: vertical SIMD butterflies (bit-identical) when the target has SIMD.
-    #[cfg(not(feature = "fixed-point"))]
+    // Vertical SIMD butterflies (bit-identical) when the build and target have them.
+    #[cfg(not(feature = "fixed-point-debug"))]
     if let Some(buf) = fout.interleaved()
-        && super::simd::fft_impl(st, buf).is_some()
+        && super::fft_simd::fft_impl(st, buf, downshift).is_some()
     {
         return;
     }
@@ -853,17 +853,18 @@ pub fn opus_fft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) 
     let bitrev = &st.bitrev[..n];
     let fin = &fin[..n];
     let fout = &mut fout[..n];
-    // Float build: the SIMD FFT needs interleaved scalars, which `[KissFftCpx]` cannot be viewed
-    // as in safe code; run it on a copy (up to the 480-point analysis FFT).
-    #[cfg(not(feature = "fixed-point"))]
+    // The SIMD FFT needs interleaved scalars, which `[KissFftCpx]` cannot be viewed as in safe
+    // code; run it on a copy (up to the 480-point analysis FFT). Not with `fixed-point-debug`,
+    // which has no SIMD FFT (the scaling below would be counted twice).
+    #[cfg(not(feature = "fixed-point-debug"))]
     if n <= SIMD_FFT_MAX {
-        let mut buf = [0f32; 2 * SIMD_FFT_MAX];
+        let mut buf = [KissFftScalar::default(); 2 * SIMD_FFT_MAX];
         let pairs = buf[..2 * n].as_chunks_mut::<2>().0;
         // Bit-reverse the input
         for (x, &rev) in fin.iter().zip(bitrev) {
             pairs[rev as usize] = [s_mul2(x.r, scale), s_mul2(x.i, scale)];
         }
-        if super::simd::fft_impl(st, &mut buf[..2 * n]).is_some() {
+        if super::fft_simd::fft_impl(st, &mut buf[..2 * n], scale_shift).is_some() {
             for (o, &[r, i]) in fout.iter_mut().zip(buf[..2 * n].as_chunks::<2>().0) {
                 *o = KissFftCpx { r, i };
             }
@@ -879,8 +880,8 @@ pub fn opus_fft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) 
     opus_fft_impl_buf(st, fout, scale_shift);
 }
 
-/// Largest `nfft` for which [`opus_fft`] (float build) runs the SIMD FFT on a stack copy.
-#[cfg(not(feature = "fixed-point"))]
+/// Largest `nfft` for which [`opus_fft`] runs the SIMD FFT on a stack copy.
+#[cfg(not(feature = "fixed-point-debug"))]
 const SIMD_FFT_MAX: usize = 480;
 
 /// Port of celt/kiss_fft.c:opus_ifft_c (the `opus_ifft` macro): unscaled inverse FFT.

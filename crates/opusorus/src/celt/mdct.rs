@@ -167,6 +167,10 @@ pub fn clt_mdct_forward(
     }
     let n4 = n >> 2;
     let trig = &l.trig[trig_off..];
+    #[cfg(not(feature = "fixed-point-debug"))]
+    let trig_ok = super::mdct_simd::trig_q15_ok(l);
+    #[cfg(feature = "fixed-point-debug")]
+    let trig_ok = false;
 
     // Perf: C allocates the FFT buffer `f2` as a VLA of `N4` values. A safe Rust stack array
     // has to be initialized, and zeroing one of the worst-case size costs more than the whole
@@ -184,6 +188,7 @@ pub fn clt_mdct_forward(
             overlap,
             stride,
             &mut f2[..2 * n4],
+            trig_ok,
         );
     } else if n4 <= 480 {
         let mut f2 = [0 as KissFftScalar; 2 * 480];
@@ -196,6 +201,7 @@ pub fn clt_mdct_forward(
             overlap,
             stride,
             &mut f2[..2 * n4],
+            trig_ok,
         );
     } else {
         let mut f2 = [0 as KissFftScalar; MAX_MDCT_N2];
@@ -208,6 +214,7 @@ pub fn clt_mdct_forward(
             overlap,
             stride,
             &mut f2[..2 * n4],
+            trig_ok,
         );
     }
 }
@@ -229,7 +236,11 @@ fn clt_mdct_forward_impl(
     overlap: usize,
     stride: usize,
     f2: &mut [KissFftScalar],
+    trig_ok: bool,
 ) {
+    // The checking arithmetic of `fixed-point-debug` has no SIMD kernels.
+    #[cfg(feature = "fixed-point-debug")]
+    let _ = trig_ok;
     let scale = st.scale;
     // Allows us to scale with MULT16_32_Q16(), which is faster than MULT16_32_Q15() on ARM.
     #[cfg(feature = "fixed-point")]
@@ -242,6 +253,12 @@ fn clt_mdct_forward_impl(
 
     #[cfg(feature = "fixed-point")]
     let mut maxval: i32 = 1;
+    // `maxval` of the pairs the SIMD kernel stores (float build: unused).
+    #[cfg_attr(
+        feature = "fixed-point-debug",
+        allow(unused_mut, reason = "no SIMD kernel with `fixed-point-debug`")
+    )]
+    let mut simd_maxval = KissFftScalar::default();
     // Pre-rotation of the folded pair (C f[2i], f[2i+1]), stored in bit-reversed order.
     #[cfg_attr(
         not(feature = "fixed-point"),
@@ -292,14 +309,16 @@ fn clt_mdct_forward_impl(
             pre_rotate(f2, i, re, im);
             i += 1;
         }
-        // Float build: SIMD for the bulk of the middle block (bit-identical).
-        #[cfg(not(feature = "fixed-point"))]
+        // SIMD for the bulk of the middle block (bit-identical; not with the checking
+        // arithmetic of `fixed-point-debug`).
+        #[cfg(not(feature = "fixed-point-debug"))]
         if i == k0 {
             #[cfg(feature = "qext")]
             let simd_scale = None;
             #[cfg(not(feature = "qext"))]
             let simd_scale = Some(scale);
-            i = super::simd::mdct_forward_pre_mid(
+            let simd_max;
+            (i, simd_max) = super::mdct_simd::mdct_forward_pre_mid(
                 input,
                 trig0,
                 trig1,
@@ -309,7 +328,9 @@ fn clt_mdct_forward_impl(
                 n2,
                 ov2,
                 (k0, n4.saturating_sub(k0)),
+                trig_ok,
             );
+            simd_maxval = simd_max;
         }
         while i < n4.saturating_sub(k0) {
             let xp1 = ov2 + 2 * i;
@@ -340,6 +361,10 @@ fn clt_mdct_forward_impl(
         }
     }
     #[cfg(feature = "fixed-point")]
+    let maxval = max32(maxval, simd_maxval);
+    #[cfg(not(feature = "fixed-point"))]
+    let _ = simd_maxval;
+    #[cfg(feature = "fixed-point")]
     let headroom = imax(0, imin(scale_shift, 28 - celt_ilog2(maxval)));
     #[cfg(feature = "fixed-point")]
     let downshift = scale_shift - headroom;
@@ -353,16 +378,18 @@ fn clt_mdct_forward_impl(
     {
         // out[2*stride*i] and out[stride*(N2-1-2i)]
         let out = &mut out[..stride * (n2 - 1) + 1];
-        // Float build: SIMD for the first pairs (bit-identical), the rest below.
-        #[cfg(not(feature = "fixed-point"))]
+        // SIMD for the first pairs (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point-debug"))]
         let done = {
             #[cfg(feature = "qext")]
             let simd_scale = Some(scale);
             #[cfg(not(feature = "qext"))]
             let simd_scale = None;
-            super::simd::mdct_forward_post(f2, trig0, trig1, simd_scale, out, stride)
+            super::mdct_simd::mdct_forward_post(
+                f2, trig0, trig1, simd_scale, headroom, out, stride, trig_ok,
+            )
         };
-        #[cfg(feature = "fixed-point")]
+        #[cfg(feature = "fixed-point-debug")]
         let done = 0;
         let f2 = f2.as_chunks::<2>().0;
         for (i, ((&[fr, fi], &t0), &t1)) in f2.iter().zip(trig0).zip(trig1).enumerate().skip(done) {
@@ -435,6 +462,8 @@ pub fn clt_mdct_backward(
     let n2 = n >> 1;
     let n4 = n >> 2;
     let t = &l.trig[trig_off..trig_off + n2];
+    #[cfg(not(feature = "fixed-point-debug"))]
+    let trig_ok = super::mdct_simd::trig_q15_ok(l);
     let ov2 = overlap >> 1;
     // x1 = in[2*stride*i], x2 = in[stride*(N2-1-2i)]
     let input = &input[..stride * (n2 - 1) + 1];
@@ -463,10 +492,12 @@ pub fn clt_mdct_backward(
         let (t0s, t1s) = t.split_at(n4);
         let yp = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
         let bitrev = &l.kfft[shift].bitrev[..n4];
-        // Float build: SIMD for the first pairs (bit-identical), the rest below.
-        #[cfg(not(feature = "fixed-point"))]
-        let done = super::simd::mdct_backward_pre(input, stride, t0s, t1s, bitrev, yp);
-        #[cfg(feature = "fixed-point")]
+        // SIMD for the first pairs (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point-debug"))]
+        let done = super::mdct_simd::mdct_backward_pre(
+            input, stride, pre_shift, t0s, t1s, bitrev, yp, trig_ok,
+        );
+        #[cfg(feature = "fixed-point-debug")]
         let done = 0;
         for (i, ((&rev, &t0), &t1)) in bitrev.iter().zip(t0s).zip(t1s).enumerate().skip(done) {
             let x1 = shl32_ovflw(input[2 * stride * i], pre_shift);
@@ -488,10 +519,16 @@ pub fn clt_mdct_backward(
     // Post-rotate and de-shuffle from both ends of the buffer at once to make it in-place.
     {
         let (t0s, t1s) = t.split_at(n4);
-        // Float build: SIMD for the first steps (bit-identical), the rest below.
-        #[cfg(not(feature = "fixed-point"))]
-        let done = super::simd::mdct_backward_post(&mut out[ov2..ov2 + n2], t0s, t1s);
-        #[cfg(feature = "fixed-point")]
+        // SIMD for the first steps (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point-debug"))]
+        let done = super::mdct_simd::mdct_backward_post(
+            &mut out[ov2..ov2 + n2],
+            t0s,
+            t1s,
+            post_shift,
+            trig_ok,
+        );
+        #[cfg(feature = "fixed-point-debug")]
         let done = 0;
         let y = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
         // Loop to (N4+1)>>1 to handle odd N4. When N4 is odd, the middle pair is computed
@@ -524,10 +561,10 @@ pub fn clt_mdct_backward(
         // x2 = out[i] and x1 = out[overlap-1-i] with window[i] (`w1`) and
         // window[overlap-1-i] (`w2`), for i < overlap/2.
         let h = overlap / 2;
-        // Float build: SIMD for the first steps (bit-identical), the rest below.
-        #[cfg(not(feature = "fixed-point"))]
-        let done = super::simd::mdct_backward_mirror(&mut out[..overlap], &window[..overlap]);
-        #[cfg(feature = "fixed-point")]
+        // SIMD for the first steps (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point-debug"))]
+        let done = super::mdct_simd::mdct_backward_mirror(&mut out[..overlap], &window[..overlap]);
+        #[cfg(feature = "fixed-point-debug")]
         let done = 0;
         let (front, back) = out[..overlap].split_at_mut(overlap - h);
         let (wfront, wback) = window[..overlap].split_at(overlap - h);

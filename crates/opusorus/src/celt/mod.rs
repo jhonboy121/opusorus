@@ -15,18 +15,20 @@ pub mod cwrs;
 pub mod entcode;
 pub mod entdec;
 pub mod entenc;
+#[cfg(not(feature = "fixed-point-debug"))]
+mod fft_simd;
 pub mod kiss_fft;
 pub mod laplace;
 pub mod mathops;
 pub mod mdct;
+#[cfg(not(feature = "fixed-point-debug"))]
+mod mdct_simd;
 #[cfg(feature = "qext")]
 pub mod mini_kfft;
 pub mod modes;
 pub mod pitch;
 pub mod quant_bands;
 pub mod rate;
-#[cfg(not(feature = "fixed-point"))]
-mod simd;
 pub mod static_modes;
 #[cfg(feature = "fixed-point")]
 pub mod static_modes_fixed;

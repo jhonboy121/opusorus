@@ -42,6 +42,13 @@ Found by the `differential_custom` fuzz target (Opus Custom + QEXT):
 9. An end band below 3 makes dynalloc read out of bounds; an end band beyond `effEBands` reads past `X`.
 10. Inputs that break `start < end`, start bands other than 0/17, and NaN input hit `celt_assert`s (abort with `ENABLE_HARDENING`).
 
+11. Fixed point, Opus Custom 32000 Hz / 640 samples, mono (`celt_encoder` test `custom_api`):
+    the C encoder's first packet differs between otherwise identical runs depending on the
+    memory layout of the test binary (e.g. it changes when the Rust side is built with
+    `CARGO_INCREMENTAL=0`), while the Rust output stays the same — the signature of a read of
+    uninitialized memory in C, like 8 and 9 (not located further: valgrind cannot run the test
+    binary on the aarch64 host). The test passes in the default build configuration.
+
 Also: `opus_packet_*` on empty packets reads `data[0]` (the port returns `BadArg`/`InvalidPacket`),
 and `clt_compute_extra_allocation` reads an uninitialised `follower` entry with fewer than 5 bands
 (the port zero-initialises).

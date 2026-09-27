@@ -32,7 +32,8 @@ macro_rules! with_simd {
             #[cfg(test)]
             let token = token.filter(|_| !$crate::simd::scalar_only());
             token.map(|$s| {
-                $s.vectorize(
+                fearless_simd::Simd::vectorize(
+                    $s,
                     #[inline(always)]
                     || $body,
                 )
