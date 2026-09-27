@@ -85,12 +85,13 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 | Decoder memory footprint (rest) | Done (see STATUS "Decoder memory"): with the DNN features Rust ≤ C; without them Rust 36/49 KB vs C 18/27 KB (mono/stereo). Remaining: the `quant_all_bands` scratch (`BandsScratch`, celt/bands.rs, ≈12 KB per CELT decoder) could become stack arrays; the int16/int24 `out` buffer (20 ms) stays on the heap because a stack array would be zeroed per call. `justfile` `float_all` can now include `opusorus-capi/osce` (test_opus_api's 256 KiB bound holds). |
 | DNN fuzz targets, custom-modes fuzz target | fuzz crate has no DNN/OpusCustom targets yet |
 | Fixed-point test restrictions now obsolete | `opusorus-conformance/tests/opus_encoder.rs` (`lfe_allowed`: LFE only on mono encoders in fixed builds) and `celt_encoder.rs` (`run_streams` limits the end band of up-sampled fixed-point streams) worked around the two C-UB overflows that FX5 made wrapping; both could now be lifted (owned by the FX4/FX3 units) |
-| FFT/MDCT vectorisation | contiguous per-stage twiddles could let LLVM vectorise butterflies (still bit-exact) |
+| FFT/MDCT vectorisation | done with fearless_simd (D-031); contiguous per-stage twiddles would remove the twiddle gathers of the SIMD butterflies (still bit-exact) |
 
 ## Performance log
 
 | Date | Item | Result |
 |---|---|---|
+| 2026-09-27 | fearless_simd float FFT/MDCT (D-031) | MDCT fwd 1920 3.36→2.53 µs (C NEON 2.87), MDCT bwd 3.29→2.30 µs (2.58), FFT 480 2.50→1.92 µs (2.18); bit-exact |
 | 2026-09-26 | Decoder memory footprint | decode benches vs before: CELT stereo +0.3 %, surround 5.1 +0.7 % (stack arrays for the C VLAs, zeroed per frame), hybrid/SILK ±0.1–0.3 %; all within criterion's noise threshold |
 | 2026-09-26 | Performance pass | SILK decode 1.39→0.83× C scalar; all codec benches 0.70–0.90× C scalar, 0.88–1.10× C NEON; C ABI release −7.8% sections |
 | 2026-09-26 | Full benchmark suite (layer E) | Rust ≈ C scalar (0.87–1.05×), SILK decode 1.39×; vs C NEON 1.07–1.37× |

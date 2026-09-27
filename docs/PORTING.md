@@ -3,6 +3,8 @@
 opusorus is a **faithful, function-by-function** port of libopus v1.6.1 (`vendor/libopus`). The
 goal is output that is **bit-exact** with the C library compiled by `crates/opusorus-oracle`
 (float build, `-ffp-contract=off`, no SIMD intrinsics, `ENABLE_HARDENING`).
+SIMD in the port (`fearless_simd`, `celt/simd.rs`) is vertical only: every lane repeats the scalar
+operation sequence, so it is bit-identical to the scalar code (PLAN D-031).
 
 ## 1. Layout and ownership
 

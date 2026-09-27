@@ -14,7 +14,7 @@ categories = ["multimedia::audio", "multimedia::encoding", "no-std"]
 default = ["std"]
 # Use std's float math (the platform libm). Required for bit-exactness with the C oracle on the
 # same platform. Without it, the pure-Rust `libm` crate is used (no_std).
-std = []
+std = ["fearless_simd/std"]
 # Opus HD / scalable quality extension (libopus `--enable-qext`).
 qext = []
 # Opus Custom modes (libopus `--enable-custom-modes`).
@@ -84,6 +84,8 @@ internals = []
 
 [dependencies]
 libm = { workspace = true }
+# Safe SIMD for the float FFT/MDCT (vertical: bit-identical to the scalar code, docs/PLAN.md D-031).
+fearless_simd = { workspace = true }
 
 [lints]
 workspace = true

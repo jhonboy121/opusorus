@@ -19,7 +19,7 @@ use super::kiss_fft::{
 };
 #[cfg(feature = "fixed-point")]
 use super::mathops::{celt_ilog2, celt_zlog2};
-use super::static_modes::{KissFftCpx, KissFftState, MdctLookup};
+use super::static_modes::{KissFftState, MdctLookup};
 
 #[cfg(feature = "custom-modes")]
 use super::static_modes::MAXFACTORS;
@@ -174,19 +174,46 @@ pub fn clt_mdct_forward(
     // larger).
     debug_assert!(n4 <= MAX_MDCT_N2 / 2);
     if n4 <= 120 {
-        let mut f2 = [KissFftCpx::default(); 120];
-        clt_mdct_forward_impl(st, trig, input, out, window, overlap, stride, &mut f2[..n4]);
+        let mut f2 = [0 as KissFftScalar; 2 * 120];
+        clt_mdct_forward_impl(
+            st,
+            trig,
+            input,
+            out,
+            window,
+            overlap,
+            stride,
+            &mut f2[..2 * n4],
+        );
     } else if n4 <= 480 {
-        let mut f2 = [KissFftCpx::default(); 480];
-        clt_mdct_forward_impl(st, trig, input, out, window, overlap, stride, &mut f2[..n4]);
+        let mut f2 = [0 as KissFftScalar; 2 * 480];
+        clt_mdct_forward_impl(
+            st,
+            trig,
+            input,
+            out,
+            window,
+            overlap,
+            stride,
+            &mut f2[..2 * n4],
+        );
     } else {
-        let mut f2 = [KissFftCpx::default(); MAX_MDCT_N2 / 2];
-        clt_mdct_forward_impl(st, trig, input, out, window, overlap, stride, &mut f2[..n4]);
+        let mut f2 = [0 as KissFftScalar; MAX_MDCT_N2];
+        clt_mdct_forward_impl(
+            st,
+            trig,
+            input,
+            out,
+            window,
+            overlap,
+            stride,
+            &mut f2[..2 * n4],
+        );
     }
 }
 
 /// Body of [`clt_mdct_forward`] after the size computation: `trig` starts at this shift's
-/// table and `f2` is the C `f2` buffer (`N4` values).
+/// table and `f2` is the C `f2` buffer (`N4` complex values, interleaved `re, im`).
 ///
 /// Perf: C writes the windowed and folded input to a buffer `f` and pre-rotates it in a
 /// second loop; here each folded pair is pre-rotated right away (the same operations per
@@ -201,13 +228,13 @@ fn clt_mdct_forward_impl(
     window: &[CeltCoef],
     overlap: usize,
     stride: usize,
-    f2: &mut [KissFftCpx],
+    f2: &mut [KissFftScalar],
 ) {
     let scale = st.scale;
     // Allows us to scale with MULT16_32_Q16(), which is faster than MULT16_32_Q15() on ARM.
     #[cfg(feature = "fixed-point")]
     let scale_shift = st.scale_shift - 1;
-    let n4 = f2.len();
+    let n4 = f2.len() / 2;
     let n2 = 2 * n4;
     // trig[i] and trig[N4 + i]
     let (trig0, trig1) = trig[..n2].split_at(n4);
@@ -216,26 +243,28 @@ fn clt_mdct_forward_impl(
     #[cfg(feature = "fixed-point")]
     let mut maxval: i32 = 1;
     // Pre-rotation of the folded pair (C f[2i], f[2i+1]), stored in bit-reversed order.
-    let mut pre_rotate = |i: usize, re: KissFftScalar, im: KissFftScalar| {
-        let t0 = trig0[i];
-        let t1 = trig1[i];
-        let yr = sub32(s_mul(re, t0), s_mul(im, t1));
-        let yi = add32(s_mul(im, t0), s_mul(re, t1));
-        // For QEXT, it's best to scale before the FFT, but otherwise it's best to scale
-        // after. For floating-point it doesn't matter.
-        #[cfg(feature = "qext")]
-        let yc = KissFftCpx { r: yr, i: yi };
-        #[cfg(not(feature = "qext"))]
-        let yc = KissFftCpx {
-            r: s_mul2(yr, scale),
-            i: s_mul2(yi, scale),
+    #[cfg_attr(
+        not(feature = "fixed-point"),
+        expect(unused_mut, reason = "the fixed-point build updates `maxval`")
+    )]
+    let mut pre_rotate =
+        |f2: &mut [KissFftScalar], i: usize, re: KissFftScalar, im: KissFftScalar| {
+            let t0 = trig0[i];
+            let t1 = trig1[i];
+            let yr = sub32(s_mul(re, t0), s_mul(im, t1));
+            let yi = add32(s_mul(im, t0), s_mul(re, t1));
+            // For QEXT, it's best to scale before the FFT, but otherwise it's best to scale
+            // after. For floating-point it doesn't matter.
+            #[cfg(feature = "qext")]
+            let yc = [yr, yi];
+            #[cfg(not(feature = "qext"))]
+            let yc = [s_mul2(yr, scale), s_mul2(yi, scale)];
+            #[cfg(feature = "fixed-point")]
+            {
+                maxval = max32(maxval, max32(abs32(yc[0]), abs32(yc[1])));
+            }
+            f2.as_chunks_mut::<2>().0[bitrev[i] as usize] = yc;
         };
-        #[cfg(feature = "fixed-point")]
-        {
-            maxval = max32(maxval, max32(abs32(yc.r), abs32(yc.i)));
-        }
-        f2[bitrev[i] as usize] = yc;
-    };
 
     let ov2 = overlap >> 1;
     let k0 = (overlap + 3) >> 2;
@@ -260,14 +289,33 @@ fn clt_mdct_forward_impl(
                 s_mul(input[xp1], window[wp1]),
                 s_mul(input[xp2 - n2], window[wp2]),
             );
-            pre_rotate(i, re, im);
+            pre_rotate(f2, i, re, im);
             i += 1;
+        }
+        // Float build: SIMD for the bulk of the middle block (bit-identical).
+        #[cfg(not(feature = "fixed-point"))]
+        if i == k0 {
+            #[cfg(feature = "qext")]
+            let simd_scale = None;
+            #[cfg(not(feature = "qext"))]
+            let simd_scale = Some(scale);
+            i = super::simd::mdct_forward_pre_mid(
+                input,
+                trig0,
+                trig1,
+                bitrev,
+                simd_scale,
+                f2,
+                n2,
+                ov2,
+                (k0, n4.saturating_sub(k0)),
+            );
         }
         while i < n4.saturating_sub(k0) {
             let xp1 = ov2 + 2 * i;
             let xp2 = n2 - 1 + ov2 - 2 * i;
             // Real part arranged as a-bR, Imag part arranged as -c-dR
-            pre_rotate(i, input[xp2], input[xp1]);
+            pre_rotate(f2, i, input[xp2], input[xp1]);
             i += 1;
         }
         // wp1 = window + 2*j, wp2 = window + overlap - 1 - 2*j
@@ -286,7 +334,7 @@ fn clt_mdct_forward_impl(
                 s_mul(input[xp1], window[wp2]),
                 s_mul(input[xp2 + n2], window[wp1]),
             );
-            pre_rotate(i, re, im);
+            pre_rotate(f2, i, re, im);
             i += 1;
             j += 1;
         }
@@ -299,17 +347,29 @@ fn clt_mdct_forward_impl(
     let (headroom, downshift) = (0, 0);
 
     // N/4 complex FFT, does not downscale anymore
-    opus_fft_impl_buf(st, f2, downshift);
+    opus_fft_impl_buf(st, &mut Interleaved(f2), downshift);
 
     // Post-rotate
     {
         // out[2*stride*i] and out[stride*(N2-1-2i)]
         let out = &mut out[..stride * (n2 - 1) + 1];
-        for (i, ((fp, &t0), &t1)) in f2.iter().zip(trig0).zip(trig1).enumerate() {
+        // Float build: SIMD for the first pairs (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point"))]
+        let done = {
+            #[cfg(feature = "qext")]
+            let simd_scale = Some(scale);
+            #[cfg(not(feature = "qext"))]
+            let simd_scale = None;
+            super::simd::mdct_forward_post(f2, trig0, trig1, simd_scale, out, stride)
+        };
+        #[cfg(feature = "fixed-point")]
+        let done = 0;
+        let f2 = f2.as_chunks::<2>().0;
+        for (i, ((&[fr, fi], &t0), &t1)) in f2.iter().zip(trig0).zip(trig1).enumerate().skip(done) {
             #[cfg(feature = "qext")]
             let (t0, t1) = (s_mul2(t0, scale), s_mul2(t1, scale));
-            let yr = pshr32(sub32(s_mul(fp.i, t1), s_mul(fp.r, t0)), headroom);
-            let yi = pshr32(add32(s_mul(fp.r, t1), s_mul(fp.i, t0)), headroom);
+            let yr = pshr32(sub32(s_mul(fi, t1), s_mul(fr, t0)), headroom);
+            let yi = pshr32(add32(s_mul(fr, t1), s_mul(fi, t0)), headroom);
             out[2 * stride * i] = yr;
             out[stride * (n2 - 1 - 2 * i)] = yi;
         }
@@ -403,7 +463,12 @@ pub fn clt_mdct_backward(
         let (t0s, t1s) = t.split_at(n4);
         let yp = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
         let bitrev = &l.kfft[shift].bitrev[..n4];
-        for (i, ((&rev, &t0), &t1)) in bitrev.iter().zip(t0s).zip(t1s).enumerate() {
+        // Float build: SIMD for the first pairs (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point"))]
+        let done = super::simd::mdct_backward_pre(input, stride, t0s, t1s, bitrev, yp);
+        #[cfg(feature = "fixed-point")]
+        let done = 0;
+        for (i, ((&rev, &t0), &t1)) in bitrev.iter().zip(t0s).zip(t1s).enumerate().skip(done) {
             let x1 = shl32_ovflw(input[2 * stride * i], pre_shift);
             let x2 = shl32_ovflw(input[stride * (n2 - 1 - 2 * i)], pre_shift);
             let yr = add32_ovflw(s_mul(x2, t0), s_mul(x1, t1));
@@ -423,6 +488,11 @@ pub fn clt_mdct_backward(
     // Post-rotate and de-shuffle from both ends of the buffer at once to make it in-place.
     {
         let (t0s, t1s) = t.split_at(n4);
+        // Float build: SIMD for the first steps (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point"))]
+        let done = super::simd::mdct_backward_post(&mut out[ov2..ov2 + n2], t0s, t1s);
+        #[cfg(feature = "fixed-point")]
+        let done = 0;
         let y = out[ov2..ov2 + n2].as_chunks_mut::<2>().0;
         // Loop to (N4+1)>>1 to handle odd N4. When N4 is odd, the middle pair is computed
         // twice (here: once, with the same result).
@@ -431,8 +501,12 @@ pub fn clt_mdct_backward(
         let (mid, back) = rest.split_at_mut(n4 - 2 * half);
         let ta = t0s.iter().zip(t1s);
         let tb = t0s.iter().rev().zip(t1s.iter().rev());
-        for (((p0, p1), (&ta0, &ta1)), (&tb0, &tb1)) in
-            front.iter_mut().zip(back.iter_mut().rev()).zip(ta).zip(tb)
+        for (((p0, p1), (&ta0, &ta1)), (&tb0, &tb1)) in front
+            .iter_mut()
+            .zip(back.iter_mut().rev())
+            .zip(ta)
+            .zip(tb)
+            .skip(done)
         {
             [*p0, *p1] = backward_post_step(*p0, *p1, (ta0, ta1), (tb0, tb1), post_shift);
         }
@@ -450,6 +524,11 @@ pub fn clt_mdct_backward(
         // x2 = out[i] and x1 = out[overlap-1-i] with window[i] (`w1`) and
         // window[overlap-1-i] (`w2`), for i < overlap/2.
         let h = overlap / 2;
+        // Float build: SIMD for the first steps (bit-identical), the rest below.
+        #[cfg(not(feature = "fixed-point"))]
+        let done = super::simd::mdct_backward_mirror(&mut out[..overlap], &window[..overlap]);
+        #[cfg(feature = "fixed-point")]
+        let done = 0;
         let (front, back) = out[..overlap].split_at_mut(overlap - h);
         let (wfront, wback) = window[..overlap].split_at(overlap - h);
         for (((yp1, xp1), &w1), &w2) in front[..h]
@@ -457,6 +536,7 @@ pub fn clt_mdct_backward(
             .zip(back.iter_mut().rev())
             .zip(&wfront[..h])
             .zip(wback.iter().rev())
+            .skip(done)
         {
             let x1 = *xp1;
             let x2 = *yp1;

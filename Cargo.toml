@@ -7,7 +7,7 @@ default-members = ["crates/opusorus"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "BSD-3-Clause"
 repository = "https://github.com/opusorus/opusorus"
 authors = ["opusorus contributors"]
@@ -16,6 +16,7 @@ authors = ["opusorus contributors"]
 opusorus = { path = "crates/opusorus" }
 opusorus-oracle = { path = "crates/opusorus-oracle" }
 libm = "0.2"
+fearless_simd = { version = "1.0", default-features = false, features = ["libm"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

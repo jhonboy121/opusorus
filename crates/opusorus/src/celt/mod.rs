@@ -25,6 +25,8 @@ pub mod modes;
 pub mod pitch;
 pub mod quant_bands;
 pub mod rate;
+#[cfg(not(feature = "fixed-point"))]
+mod simd;
 pub mod static_modes;
 #[cfg(feature = "fixed-point")]
 pub mod static_modes_fixed;

@@ -52,7 +52,8 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 
 Upstream options intentionally not offered (PLAN D-026): `--disable-hardening` (only removes
 safety checks; the port is always hardened), `--enable-rtcd/asm/intrinsics/check-asm`,
-`--disable-dot-product` (C SIMD/assembly selection; the port has no C SIMD kernels), and
+`--disable-dot-product` (C SIMD/assembly selection; the port has no C SIMD kernels; its own
+bit-exact `fearless_simd` kernels are always on where the target has SIMD, PLAN D-031), and
 `SMALL_FOOTPRINT` (not exposed by any upstream build system). Upstream-internal debug/training
 instrumentation that no build option enables (`RESYNTH`, `MLP_TRAINING`, `WRITE_FEATURES`,
 `DEBUG_PRINT`, `silk/debug.c` timers) is not ported.

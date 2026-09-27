@@ -53,6 +53,13 @@ pub(crate) trait CpxBuf {
     fn ld(&self, i: usize) -> KissFftCpx;
     /// Stores element `i`.
     fn st(&mut self, i: usize, v: KissFftCpx);
+    /// The buffer as interleaved `re, im` scalars, if it is laid out that way (the SIMD FFT
+    /// works on those).
+    #[cfg(not(feature = "fixed-point"))]
+    #[inline(always)]
+    fn interleaved(&mut self) -> Option<&mut [KissFftScalar]> {
+        None
+    }
 }
 
 impl CpxBuf for [KissFftCpx] {
@@ -82,6 +89,11 @@ impl CpxBuf for Interleaved<'_> {
         let p = &mut self.0.as_chunks_mut::<2>().0[i];
         p[0] = v.r;
         p[1] = v.i;
+    }
+    #[cfg(not(feature = "fixed-point"))]
+    #[inline(always)]
+    fn interleaved(&mut self) -> Option<&mut [KissFftScalar]> {
+        Some(self.0)
     }
 }
 
@@ -201,7 +213,7 @@ fn c_sub(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
 
 /// Port of celt/kiss_fft.c:kf_bfly2 (radix-2 butterfly).
 #[inline]
-fn kf_bfly2<B: CpxBuf + ?Sized>(fout: &mut B, m: i32, n: i32) {
+pub(crate) fn kf_bfly2<B: CpxBuf + ?Sized>(fout: &mut B, m: i32, n: i32) {
     #[cfg(feature = "custom-modes")]
     if m == 1 {
         celt_assert!(m == 1);
@@ -261,7 +273,7 @@ fn kf_bfly2<B: CpxBuf + ?Sized>(fout: &mut B, m: i32, n: i32) {
 
 /// Port of celt/kiss_fft.c:kf_bfly4 (radix-4 butterfly).
 #[inline]
-fn kf_bfly4<B: CpxBuf + ?Sized>(
+pub(crate) fn kf_bfly4<B: CpxBuf + ?Sized>(
     fout: &mut B,
     fstride: usize,
     st: &KissFftState,
@@ -346,7 +358,7 @@ fn kf_bfly4<B: CpxBuf + ?Sized>(
 
 /// Port of celt/kiss_fft.c:kf_bfly3 (radix-3 butterfly).
 #[inline]
-fn kf_bfly3<B: CpxBuf + ?Sized>(
+pub(crate) fn kf_bfly3<B: CpxBuf + ?Sized>(
     fout: &mut B,
     fstride: usize,
     st: &KissFftState,
@@ -415,7 +427,7 @@ fn kf_bfly3<B: CpxBuf + ?Sized>(
 
 /// Port of celt/kiss_fft.c:kf_bfly5 (radix-5 butterfly).
 #[inline]
-fn kf_bfly5<B: CpxBuf + ?Sized>(
+pub(crate) fn kf_bfly5<B: CpxBuf + ?Sized>(
     fout: &mut B,
     fstride: usize,
     st: &KissFftState,
@@ -755,6 +767,13 @@ pub(crate) fn opus_fft_impl_buf<B: CpxBuf + ?Sized>(
     fout: &mut B,
     mut downshift: i32,
 ) {
+    // Float build: vertical SIMD butterflies (bit-identical) when the target has SIMD.
+    #[cfg(not(feature = "fixed-point"))]
+    if let Some(buf) = fout.interleaved()
+        && super::simd::fft_impl(st, buf).is_some()
+    {
+        return;
+    }
     // One extra entry compared to C (`fstride[MAXFACTORS]`) so a state with MAXFACTORS stages
     // cannot index out of bounds (C would write past the array).
     let mut fstride = [0i32; MAXFACTORS + 1];
@@ -834,6 +853,23 @@ pub fn opus_fft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) 
     let bitrev = &st.bitrev[..n];
     let fin = &fin[..n];
     let fout = &mut fout[..n];
+    // Float build: the SIMD FFT needs interleaved scalars, which `[KissFftCpx]` cannot be viewed
+    // as in safe code; run it on a copy (up to the 480-point analysis FFT).
+    #[cfg(not(feature = "fixed-point"))]
+    if n <= SIMD_FFT_MAX {
+        let mut buf = [0f32; 2 * SIMD_FFT_MAX];
+        let pairs = buf[..2 * n].as_chunks_mut::<2>().0;
+        // Bit-reverse the input
+        for (x, &rev) in fin.iter().zip(bitrev) {
+            pairs[rev as usize] = [s_mul2(x.r, scale), s_mul2(x.i, scale)];
+        }
+        if super::simd::fft_impl(st, &mut buf[..2 * n]).is_some() {
+            for (o, &[r, i]) in fout.iter_mut().zip(buf[..2 * n].as_chunks::<2>().0) {
+                *o = KissFftCpx { r, i };
+            }
+            return;
+        }
+    }
     // Bit-reverse the input
     for (x, &rev) in fin.iter().zip(bitrev) {
         let o = &mut fout[rev as usize];
@@ -842,6 +878,10 @@ pub fn opus_fft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) 
     }
     opus_fft_impl_buf(st, fout, scale_shift);
 }
+
+/// Largest `nfft` for which [`opus_fft`] (float build) runs the SIMD FFT on a stack copy.
+#[cfg(not(feature = "fixed-point"))]
+const SIMD_FFT_MAX: usize = 480;
 
 /// Port of celt/kiss_fft.c:opus_ifft_c (the `opus_ifft` macro): unscaled inverse FFT.
 pub fn opus_ifft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) {
