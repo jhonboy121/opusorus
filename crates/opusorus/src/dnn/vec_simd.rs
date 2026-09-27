@@ -14,9 +14,11 @@
 //! targets use the portable version (i8 -> i16 products, exact since `|w*x| <= 16384`, widened
 //! to i32 and summed pairwise).
 
-use fearless_simd::{Bytes, Simd, SimdBase, f32x4, i8x16, i16x8, i32x4, u32x4};
-#[cfg(target_arch = "aarch64")]
+#[cfg(not(feature = "fast"))]
+use fearless_simd::{Bytes, i8x16, i16x8, u32x4};
+#[cfg(all(target_arch = "aarch64", not(feature = "fast")))]
 use fearless_simd::{Neon, SimdInto};
+use fearless_simd::{Simd, SimdBase, f32x4, i32x4};
 
 /// The four quantized inputs `x[0..4]` as one native-endian word (their memory layout).
 #[inline(always)]
@@ -33,6 +35,7 @@ fn pair_add<S: Simd>(s: S, a: i32x4<S>, b: i32x4<S>) -> i32x4<S> {
 
 /// Row sums of four rows held two per i16x8 (`ab` = products of rows 0,1 and `cd` = of rows
 /// 2,3, four each): `[sum0, sum1, sum2, sum3]`.
+#[cfg(not(feature = "fast"))]
 #[inline(always)]
 fn row_sums4<S: Simd>(s: S, ab: i16x8<S>, cd: i16x8<S>) -> i32x4<S> {
     let (r0, r1) = s.widen_i16x8(ab);
@@ -42,6 +45,7 @@ fn row_sums4<S: Simd>(s: S, ab: i16x8<S>, cd: i16x8<S>) -> i32x4<S> {
 
 /// Portable 8x4 block: returns `y0 + sums(rows 0..4)`, `y1 + sums(rows 4..8)` of the block `wb`
 /// (32 weights, 4 per row) with the inputs `x[0..4]`.
+#[cfg(not(feature = "fast"))]
 #[inline(always)]
 fn block<S: Simd>(
     s: S,
@@ -60,6 +64,7 @@ fn block<S: Simd>(
     (y0 + s.cvt_f32_i32x4(lo), y1 + s.cvt_f32_i32x4(hi))
 }
 
+#[cfg(not(feature = "fast"))]
 #[cfg(target_arch = "aarch64")]
 fearless_simd::kernel!(
     /// NEON 8x4 block, same results as [`block`].
@@ -101,17 +106,21 @@ enum Cols<'a> {
     Sparse(&'a [i32]),
 }
 
-/// The row-group/block loops shared by both products; `blk` adds one block to `(y0, y1)`.
+/// A way to accumulate the 8 row sums of a row group: the bit-exact one adds each block's sums
+/// to float outputs, the `fast` one keeps integer partial sums over all blocks.
+/// A value of the type serves as the prototype (it carries the SIMD token).
+trait Acc: Copy {
+    /// Starts a row group whose outputs are `y` (zero).
+    fn init(self, y: &[f32; 8]) -> Self;
+    /// Adds the block `wb` with inputs `x`.
+    fn add(self, wb: &[i8; 32], x: &[i8; 4]) -> Self;
+    /// Writes the row group's outputs.
+    fn finish(self, y: &mut [f32; 8]);
+}
+
+/// The row-group/block loops shared by both products and both accumulation schemes.
 #[inline(always)]
-fn gemv<S: Simd>(
-    s: S,
-    out: &mut [f32],
-    w: &[i8],
-    rows: usize,
-    cols: Cols<'_>,
-    xq: &[i8],
-    blk: impl Fn(&[i8; 32], &[i8; 4], f32x4<S>, f32x4<S>) -> (f32x4<S>, f32x4<S>),
-) {
+fn gemv<A: Acc>(proto: A, out: &mut [f32], w: &[i8], rows: usize, cols: Cols<'_>, xq: &[i8]) {
     let ys = out[..rows].as_chunks_mut::<8>().0;
     let wblocks = w.as_chunks::<32>().0;
     match cols {
@@ -123,8 +132,8 @@ fn gemv<S: Simd>(
             }
             // The weights of each group of 8 rows (`nb` blocks each).
             let mut wgroups = wblocks[..ys.len() * nb].chunks_exact(nb);
-            // Four row groups at a time: independent float accumulation chains (each row still
-            // adds its blocks in order), which hides the add latency.
+            // Four row groups at a time: independent accumulation chains (each row still adds
+            // its blocks in order), which hides the add latency.
             let (ys4, ys_rest) = ys.as_chunks_mut::<4>();
             for y in ys4 {
                 let (Some(w0), Some(w1), Some(w2), Some(w3)) = (
@@ -135,50 +144,226 @@ fn gemv<S: Simd>(
                 ) else {
                     return;
                 };
-                let mut acc: [(f32x4<S>, f32x4<S>); 4] = core::array::from_fn(|g| {
-                    (
-                        f32x4::from_slice(s, &y[g][..4]),
-                        f32x4::from_slice(s, &y[g][4..]),
-                    )
-                });
+                let mut acc: [A; 4] = core::array::from_fn(|g| proto.init(&y[g]));
                 for (jb, xj) in xs.iter().enumerate() {
-                    acc[0] = blk(&w0[jb], xj, acc[0].0, acc[0].1);
-                    acc[1] = blk(&w1[jb], xj, acc[1].0, acc[1].1);
-                    acc[2] = blk(&w2[jb], xj, acc[2].0, acc[2].1);
-                    acc[3] = blk(&w3[jb], xj, acc[3].0, acc[3].1);
+                    acc[0] = acc[0].add(&w0[jb], xj);
+                    acc[1] = acc[1].add(&w1[jb], xj);
+                    acc[2] = acc[2].add(&w2[jb], xj);
+                    acc[3] = acc[3].add(&w3[jb], xj);
                 }
-                for (yg, (a0, a1)) in y.iter_mut().zip(acc) {
-                    a0.store_slice(&mut yg[..4]);
-                    a1.store_slice(&mut yg[4..]);
+                for (yg, a) in y.iter_mut().zip(acc) {
+                    a.finish(yg);
                 }
             }
             for (y, w) in ys_rest.iter_mut().zip(wgroups) {
-                let (mut y0, mut y1) =
-                    (f32x4::from_slice(s, &y[..4]), f32x4::from_slice(s, &y[4..]));
+                let mut a = proto.init(y);
                 for (xj, wb) in xs.iter().zip(w) {
-                    (y0, y1) = blk(wb, xj, y0, y1);
+                    a = a.add(wb, xj);
                 }
-                y0.store_slice(&mut y[..4]);
-                y1.store_slice(&mut y[4..]);
+                a.finish(y);
             }
         }
         Cols::Sparse(idx) => {
             let mut ip = 0usize;
             let mut wblocks = wblocks.iter();
             for y in ys {
-                let (mut y0, mut y1) =
-                    (f32x4::from_slice(s, &y[..4]), f32x4::from_slice(s, &y[4..]));
+                let mut a = proto.init(y);
                 let colblocks = idx[ip] as usize;
                 let pos = &idx[ip + 1..ip + 1 + colblocks];
                 ip += 1 + colblocks;
                 for (&p, wb) in pos.iter().zip(wblocks.by_ref().take(colblocks)) {
                     let p = p as usize;
                     let xj = &xq[p..p + 4].as_chunks::<4>().0[0];
-                    (y0, y1) = blk(wb, xj, y0, y1);
+                    a = a.add(wb, xj);
                 }
-                y0.store_slice(&mut y[..4]);
-                y1.store_slice(&mut y[4..]);
+                a.finish(y);
             }
+        }
+    }
+}
+
+/// Bit-exact accumulation (portable): float outputs, each block's exact sums added in order.
+#[cfg(not(feature = "fast"))]
+#[derive(Clone, Copy)]
+struct ExactPortable<S: Simd>(S, f32x4<S>, f32x4<S>);
+
+#[cfg(not(feature = "fast"))]
+impl<S: Simd> Acc for ExactPortable<S> {
+    #[inline(always)]
+    fn init(self, y: &[f32; 8]) -> Self {
+        let s = self.0;
+        Self(
+            s,
+            f32x4::from_slice(s, &y[..4]),
+            f32x4::from_slice(s, &y[4..]),
+        )
+    }
+    #[inline(always)]
+    fn add(self, wb: &[i8; 32], x: &[i8; 4]) -> Self {
+        let (y0, y1) = block(self.0, wb, x, self.1, self.2);
+        Self(self.0, y0, y1)
+    }
+    #[inline(always)]
+    fn finish(self, y: &mut [f32; 8]) {
+        self.1.store_slice(&mut y[..4]);
+        self.2.store_slice(&mut y[4..]);
+    }
+}
+
+/// Bit-exact accumulation with the NEON block.
+#[cfg(not(feature = "fast"))]
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+struct ExactNeon(Neon, f32x4<Neon>, f32x4<Neon>);
+
+#[cfg(not(feature = "fast"))]
+#[cfg(target_arch = "aarch64")]
+impl Acc for ExactNeon {
+    #[inline(always)]
+    fn init(self, y: &[f32; 8]) -> Self {
+        let s = self.0;
+        Self(
+            s,
+            f32x4::from_slice(s, &y[..4]),
+            f32x4::from_slice(s, &y[4..]),
+        )
+    }
+    #[inline(always)]
+    fn add(self, wb: &[i8; 32], x: &[i8; 4]) -> Self {
+        let (y0, y1) = block_neon(self.0, wb, x, self.1, self.2);
+        Self(self.0, y0, y1)
+    }
+    #[inline(always)]
+    fn finish(self, y: &mut [f32; 8]) {
+        self.1.store_slice(&mut y[..4]);
+        self.2.store_slice(&mut y[4..]);
+    }
+}
+
+#[cfg(feature = "fast")]
+mod fast {
+    //! `fast` accumulation (PLAN D-032): each row's dot product is summed in int32 over all
+    //! blocks (exact; at most `2048*16384 < 2^31`) and converted to float once, as upstream's
+    //! NEON/AVX builds do, instead of adding every block's sum to a float. More accurate, but
+    //! rounded differently from the reference.
+
+    #[cfg(target_arch = "aarch64")]
+    use fearless_simd::{Neon, SimdInto};
+    use fearless_simd::{Simd, SimdBase, i8x16, i16x8, i32x4};
+
+    use super::{Acc, pair_add, x_word};
+
+    /// Portable: eight i32x4 accumulators of per-column products, one per row.
+    #[derive(Clone, Copy)]
+    pub(super) struct IntPortable<S: Simd>(S, [i32x4<S>; 8]);
+
+    impl<S: Simd> IntPortable<S> {
+        #[inline(always)]
+        pub(super) fn proto(s: S) -> Self {
+            Self(s, [i32x4::splat(s, 0); 8])
+        }
+    }
+
+    impl<S: Simd> Acc for IntPortable<S> {
+        #[inline(always)]
+        fn init(self, _y: &[f32; 8]) -> Self {
+            Self::proto(self.0)
+        }
+        #[inline(always)]
+        fn add(self, wb: &[i8; 32], x: &[i8; 4]) -> Self {
+            use fearless_simd::Bytes;
+            let s = self.0;
+            let bytes: i8x16<S> = fearless_simd::u32x4::splat(s, x_word(x)).bitcast();
+            let xpat: i16x8<S> = s.widen_i8x16(bytes).0;
+            let (w01, w23) = s.widen_i8x16(i8x16::from_slice(s, &wb[..16]));
+            let (w45, w67) = s.widen_i8x16(i8x16::from_slice(s, &wb[16..32]));
+            let mut a = self.1;
+            for (k, p) in [w01, w23, w45, w67].into_iter().enumerate() {
+                let (r0, r1) = s.widen_i16x8(p * xpat);
+                a[2 * k] += r0;
+                a[2 * k + 1] += r1;
+            }
+            Self(s, a)
+        }
+        #[inline(always)]
+        fn finish(self, y: &mut [f32; 8]) {
+            let s = self.0;
+            let a = self.1;
+            let lo = pair_add(s, pair_add(s, a[0], a[1]), pair_add(s, a[2], a[3]));
+            let hi = pair_add(s, pair_add(s, a[4], a[5]), pair_add(s, a[6], a[7]));
+            s.cvt_f32_i32x4(lo).store_slice(&mut y[..4]);
+            s.cvt_f32_i32x4(hi).store_slice(&mut y[4..]);
+        }
+    }
+
+    /// NEON: `smull` + `sadalp` into four accumulators of pairwise partial sums (rows 0,1 /
+    /// 2,3 / 4,5 / 6,7), reduced with `addp` at the end.
+    #[cfg(target_arch = "aarch64")]
+    #[derive(Clone, Copy)]
+    pub(super) struct IntNeon(Neon, [i32x4<Neon>; 4]);
+
+    #[cfg(target_arch = "aarch64")]
+    impl IntNeon {
+        #[inline(always)]
+        pub(super) fn proto(neon: Neon) -> Self {
+            Self(neon, [i32x4::splat(neon, 0); 4])
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fearless_simd::kernel!(
+        #[inline(always)]
+        fn add_neon(
+            neon: Neon,
+            a: [i32x4<Neon>; 4],
+            wb: &[i8; 32],
+            x: &[i8; 4],
+        ) -> [i32x4<Neon>; 4] {
+            use core::arch::aarch64::*;
+            let xv = vreinterpret_s8_u32(vdup_n_u32(x_word(x)));
+            let w0: int8x16_t = i8x16::from_slice(neon, &wb[..16]).into();
+            let w1: int8x16_t = i8x16::from_slice(neon, &wb[16..32]).into();
+            let p = [
+                vmull_s8(vget_low_s8(w0), xv),
+                vmull_s8(vget_high_s8(w0), xv),
+                vmull_s8(vget_low_s8(w1), xv),
+                vmull_s8(vget_high_s8(w1), xv),
+            ];
+            core::array::from_fn(|k| {
+                let acc: int32x4_t = a[k].into();
+                vpadalq_s16(acc, p[k]).simd_into(neon)
+            })
+        }
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    fearless_simd::kernel!(
+        #[inline(always)]
+        fn finish_neon(neon: Neon, a: [i32x4<Neon>; 4], y: &mut [f32; 8]) {
+            use core::arch::aarch64::*;
+            let a: [int32x4_t; 4] = a.map(Into::into);
+            let lo = vcvtq_f32_s32(vpaddq_s32(a[0], a[1]));
+            let hi = vcvtq_f32_s32(vpaddq_s32(a[2], a[3]));
+            let lo: fearless_simd::f32x4<Neon> = lo.simd_into(neon);
+            let hi: fearless_simd::f32x4<Neon> = hi.simd_into(neon);
+            lo.store_slice(&mut y[..4]);
+            hi.store_slice(&mut y[4..]);
+        }
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    impl Acc for IntNeon {
+        #[inline(always)]
+        fn init(self, _y: &[f32; 8]) -> Self {
+            Self::proto(self.0)
+        }
+        #[inline(always)]
+        fn add(self, wb: &[i8; 32], x: &[i8; 4]) -> Self {
+            Self(self.0, add_neon(self.0, self.1, wb, x))
+        }
+        #[inline(always)]
+        fn finish(self, y: &mut [f32; 8]) {
+            finish_neon(self.0, self.1, y);
         }
     }
 }
@@ -206,18 +391,24 @@ fn gemv_any(out: &mut [f32], w: &[i8], rows: usize, cols: Cols<'_>, xq: &[i8]) -
     }
     #[cfg(target_arch = "aarch64")]
     if let Some(neon) = neon_token!() {
+        #[cfg(not(feature = "fast"))]
+        let proto = ExactNeon(neon, f32x4::splat(neon, 0.0), f32x4::splat(neon, 0.0));
+        #[cfg(feature = "fast")]
+        let proto = fast::IntNeon::proto(neon);
         neon.vectorize(
             #[inline(always)]
-            || {
-                gemv(neon, out, w, rows, cols, xq, |wb, x, y0, y1| {
-                    block_neon(neon, wb, x, y0, y1)
-                })
-            },
+            || gemv(proto, out, w, rows, cols, xq),
         );
         return true;
     }
-    with_simd!(s => gemv(s, out, w, rows, cols, xq, |wb, x, y0, y1| block(s, wb, x, y0, y1)))
-        .is_some()
+    with_simd!(s => {
+        #[cfg(not(feature = "fast"))]
+        let proto = ExactPortable(s, f32x4::splat(s, 0.0), f32x4::splat(s, 0.0));
+        #[cfg(feature = "fast")]
+        let proto = fast::IntPortable::proto(s);
+        gemv(proto, out, w, rows, cols, xq);
+    })
+    .is_some()
 }
 
 /// Block loop of `cgemv8x4` (output rows `0..rows` start at zero, `xq` holds the `cols`
@@ -276,7 +467,16 @@ fn sgemv_simd<S: Simd, const N: usize>(
             let w = &weights[j * col_stride + i..][..b];
             let xv = f32x4::splat(s, xj);
             for (v, a) in acc.iter_mut().enumerate() {
-                *a += f32x4::from_slice(s, &w[4 * v..4 * v + 4]) * xv;
+                let wv = f32x4::from_slice(s, &w[4 * v..4 * v + 4]);
+                // `fast`: fused multiply-add where the target has it (PLAN D-032).
+                #[cfg(feature = "fast")]
+                {
+                    *a = s.mul_add_f32x4(wv, xv, *a);
+                }
+                #[cfg(not(feature = "fast"))]
+                {
+                    *a += wv * xv;
+                }
             }
         }
         for (v, a) in acc.iter().enumerate() {
@@ -292,7 +492,20 @@ mod tests {
     use alloc::{format, vec::Vec};
 
     use crate::dnn::vec::{cgemv8x4, sgemv, sparse_cgemv8x4};
-    use crate::simd::assert_simd_eq_scalar;
+    /// Bit-exact builds: SIMD == scalar. `fast`: SIMD within `tol(i)` of the scalar reference
+    /// for output `i` (the kernels round differently, PLAN D-032).
+    fn check(what: &str, f: impl FnMut() -> Vec<f32>, tol: impl Fn(usize) -> f32) {
+        #[cfg(not(feature = "fast"))]
+        {
+            let _ = &tol;
+            let mut f = f;
+            crate::simd::assert_simd_eq_scalar(what, || {
+                f().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            });
+        }
+        #[cfg(feature = "fast")]
+        crate::simd::assert_simd_close_scalar(what, f, tol);
+    }
 
     struct Lcg(u32);
     impl Lcg {
@@ -318,11 +531,23 @@ mod tests {
         ] {
             let w: Vec<f32> = (0..cols * stride).map(|_| rng.f() * 3.0).collect();
             let x: Vec<f32> = (0..cols).map(|_| rng.f() * 100.0).collect();
-            assert_simd_eq_scalar(&format!("sgemv {rows}x{cols}"), || {
-                let mut out = alloc::vec![1f32; rows];
-                sgemv(&mut out, &w, rows, cols, stride, &x);
-                out.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-            });
+            // Reordering/fusing bound: cols roundings of sums below sum|w*x|.
+            let mag: f32 = (0..cols)
+                .map(|j| {
+                    (0..rows)
+                        .map(|i| (w[j * stride + i] * x[j]).abs())
+                        .fold(0.0, f32::max)
+                })
+                .sum();
+            check(
+                &format!("sgemv {rows}x{cols}"),
+                || {
+                    let mut out = alloc::vec![1f32; rows];
+                    sgemv(&mut out, &w, rows, cols, stride, &x);
+                    out
+                },
+                |_| 2.0 * cols as f32 * f32::EPSILON * mag,
+            );
         }
     }
 
@@ -333,11 +558,19 @@ mod tests {
             let w: Vec<i8> = (0..rows * cols).map(|_| rng.next() as i8).collect();
             let scale: Vec<f32> = (0..rows).map(|_| rng.f()).collect();
             let x: Vec<f32> = (0..cols).map(|_| rng.f()).collect();
-            assert_simd_eq_scalar(&format!("cgemv8x4 {rows}x{cols}"), || {
-                let mut out = alloc::vec![0f32; rows];
-                cgemv8x4(&mut out, &w, &scale, rows, cols, &x);
-                out.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-            });
+            // Integer vs per-block float accumulation: at most one rounding per block of a sum
+            // below 65536 * blocks, times the scale.
+            let blocks = (cols / 4) as f32;
+            let tol = |i: usize| blocks * blocks * 65536.0 * f32::EPSILON * scale[i].abs();
+            check(
+                &format!("cgemv8x4 {rows}x{cols}"),
+                || {
+                    let mut out = alloc::vec![0f32; rows];
+                    cgemv8x4(&mut out, &w, &scale, rows, cols, &x);
+                    out
+                },
+                tol,
+            );
             // Sparse: a random subset of 4-column blocks per 8-row group.
             let mut idx = Vec::new();
             let mut nblocks = 0;
@@ -351,11 +584,15 @@ mod tests {
                 idx.extend(blocks);
             }
             let ws: Vec<i8> = (0..32 * nblocks).map(|_| rng.next() as i8).collect();
-            assert_simd_eq_scalar(&format!("sparse_cgemv8x4 {rows}x{cols}"), || {
-                let mut out = alloc::vec![0f32; rows];
-                sparse_cgemv8x4(&mut out, &ws, &idx, &scale, rows, cols, &x);
-                out.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-            });
+            check(
+                &format!("sparse_cgemv8x4 {rows}x{cols}"),
+                || {
+                    let mut out = alloc::vec![0f32; rows];
+                    sparse_cgemv8x4(&mut out, &ws, &idx, &scale, rows, cols, &x);
+                    out
+                },
+                tol,
+            );
         }
     }
 }

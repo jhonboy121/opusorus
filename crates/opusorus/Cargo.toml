@@ -79,6 +79,12 @@ fuzzing = []
 # libopus `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`): the original RFC 6716 decoder behaviour
 # (folding, mono phase inversion), without the RFC 8251 bitstream fixes.
 disable-rfc8251 = []
+# Faster float kernels that are NOT bit-exact with the reference (PLAN D-032): FMA, reassociated
+# SIMD reductions and integer accumulation across the int8 blocks of the DNN products (as
+# libopus' own NEON/AVX builds do). Output differs from the reference at the rounding level;
+# conformance is checked with `opus_compare` and cross-codec tests (`just test-fast`). The
+# fixed-point codec is integer and unaffected (only the float lossgen model changes there).
+fast = []
 # Exposes internal modules (unstable, for differential tests and benchmarks only).
 internals = []
 

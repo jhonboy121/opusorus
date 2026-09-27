@@ -30,6 +30,8 @@ dnn = [
     "opusorus-oracle/osce",
     "opus-sys-optimized/dnn",
 ]
+# opusorus with the non-bit-exact `fast` kernels (PLAN D-032); the parity tests do not apply.
+fast = ["opusorus/fast"]
 # Fixed-point builds (docs/FIXED_POINT.md): opusorus `fixed-point` vs the fixed-point oracle vs
 # upstream CMake with `OPUS_FIXED_POINT=ON`; the codec benchmarks use the native 16-bit
 # (`fixed-res24`: 24-bit) PCM API, and the Criterion groups get a `fixed_` (`fixed24_`) prefix.

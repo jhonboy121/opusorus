@@ -90,20 +90,29 @@ macro_rules! simd_done {
 /// Makes [`with_simd!`] report "no SIMD" (tests only), so self-tests can compare the SIMD and
 /// scalar paths. Other tests running meanwhile are unaffected: both paths give the same results.
 #[cfg(test)]
-#[allow(dead_code, reason = "unused in builds without SIMD kernels (fixed point)")]
+#[allow(
+    dead_code,
+    reason = "unused in builds without SIMD kernels (fixed point)"
+)]
 pub(crate) static SCALAR_ONLY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Current value of [`SCALAR_ONLY`].
 #[cfg(test)]
-#[allow(dead_code, reason = "unused in builds without SIMD kernels (fixed point)")]
+#[allow(
+    dead_code,
+    reason = "unused in builds without SIMD kernels (fixed point)"
+)]
 pub(crate) fn scalar_only() -> bool {
     SCALAR_ONLY.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Runs `f` once with SIMD and once scalar-only and asserts both results are equal (tests only).
 #[cfg(test)]
-#[allow(dead_code, reason = "unused in builds without SIMD kernels (fixed point)")]
+#[allow(
+    dead_code,
+    reason = "unused in builds without SIMD kernels (fixed point)"
+)]
 pub(crate) fn assert_simd_eq_scalar<T: PartialEq + core::fmt::Debug>(
     what: &str,
     mut f: impl FnMut() -> T,
@@ -114,4 +123,28 @@ pub(crate) fn assert_simd_eq_scalar<T: PartialEq + core::fmt::Debug>(
     let scalar = f();
     SCALAR_ONLY.store(false, Ordering::Relaxed);
     assert_eq!(simd, scalar, "{what}");
+}
+
+/// `fast` builds (PLAN D-032): runs `f` with SIMD and scalar-only and asserts every SIMD output
+/// is within `tol(i)` of the scalar reference (tests only).
+#[cfg(all(test, feature = "fast"))]
+#[allow(dead_code, reason = "unused in builds without fast kernels")]
+pub(crate) fn assert_simd_close_scalar(
+    what: &str,
+    mut f: impl FnMut() -> alloc::vec::Vec<f32>,
+    tol: impl Fn(usize) -> f32,
+) {
+    use core::sync::atomic::Ordering;
+    let simd = f();
+    SCALAR_ONLY.store(true, Ordering::Relaxed);
+    let scalar = f();
+    SCALAR_ONLY.store(false, Ordering::Relaxed);
+    assert_eq!(simd.len(), scalar.len(), "{what}");
+    for (i, (a, b)) in simd.iter().zip(&scalar).enumerate() {
+        assert!(
+            (a - b).abs() <= tol(i),
+            "{what}: output {i}: fast {a} vs reference {b} (tolerance {})",
+            tol(i)
+        );
+    }
 }

@@ -62,6 +62,10 @@ clippy: dnn-blob
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools -p opusorus-capi -p opusorus-bench --all-targets --features {{options_all}},opusorus-conformance/qext,opusorus-conformance/custom-modes,opusorus-conformance/deep-plc,opusorus-conformance/dred,opusorus-conformance/osce,opusorus-capi/float-approx,opusorus-capi/assertions,opusorus-capi/fuzzing,opusorus-capi/disable-rfc8251,opusorus-bench/float-approx -- -D warnings
     cargo clippy -p opusorus -p opusorus-oracle -p opusorus-conformance -p opusorus-tools --all-targets --features {{options_all}},opusorus-conformance/fixed-res24,opusorus-conformance/qext -- -D warnings
     cargo clippy -p opusorus --no-default-features --features float-approx,assertions,fuzzing,disable-rfc8251 -- -D warnings
+    # `fast` (non-bit-exact kernels, PLAN D-032), with the DNN benchmarks.
+    cargo clippy -p opusorus -p opusorus-bench -p opusorus-tools --all-targets --features opusorus/internals,opusorus/fast,opusorus-bench/dnn,opusorus-bench/qext,opusorus-tools/dred -- -D warnings
+    cargo clippy -p opusorus --no-default-features --features fast,deep-plc -- -D warnings
+    cargo clippy -p opusorus-bench --all-targets --features dnn -- -D warnings
 
 # All tests (unit + differential vs C oracle + vectors): default, every float feature (DNN weights
 # loaded at runtime; `test-dnn` covers compiled-in weights), and the fixed-point builds: the full
@@ -135,6 +139,19 @@ test-dnn-extras: dnn-blob dnn-blob-debug-float
     OPUSORUS_DNN_BLOB="$OPUSORUS_DNN_DEBUG_FLOAT_BLOB" cargo test -p opusorus-conformance --features qext,dred,osce,dnn-debug-float,opusorus-tools/dred,opusorus-tools/dnn-weights-embedded --test vectors
     cargo test -p opusorus-conformance --features osce-training-data --test osce_training_data
     cargo test -p opusorus-conformance --features osce-training-data,dred,qext --test osce_training_data
+# `fast` (non-bit-exact kernels, PLAN D-032): the fast kernels against the reference kernels
+# within error bounds (library unit tests), opusorus `fast` against the C oracle and the optimized
+# C build (decoding incl. PLC/deep PLC/OSCE, encoding quality), and the RFC 8251 / Opus HD vectors
+# through opus_compare / qext_compare. The bit-exact suites are not run with `fast`.
+test-fast: dnn-blob
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    ./scripts/fetch_vectors.sh
+    cargo test -p opusorus --features fast,qext,dred,osce --lib
+    cargo test -p opusorus-bench --features fast,dnn,qext --test fast -- --nocapture
+    cargo test -p opusorus-conformance --features opusorus/fast,qext --test vectors -- rfc8251_vectors opushd_vectors
+    cargo test -p opusorus-conformance --features opusorus/fast,deep-plc,dred,osce,opusorus-tools/dred --test vectors -- rfc8251_vectors
+
 # Upstream build options vs the oracle built with the same defines: float-approx (FLOAT_APPROX)
 # and disable-rfc8251 (DISABLE_UPDATE_DRAFT, RFC 6716 vectors) over the whole differential
 # suite, float/fixed-point/QEXT/custom modes (float-approx also with the DNN features);

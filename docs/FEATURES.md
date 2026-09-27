@@ -49,6 +49,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ ported & verified vs o
 | O13 | Internal checks (`celt_assert`, `celt_sig_assert`, `silk_assert`) as hard assertions in every profile | `--enable-assertions` (`ENABLE_ASSERTIONS`) | `assertions` | ✅ |
 | O14 | Random encoder decisions from a process-wide glibc-compatible `rand()` (`opusorus::glibc_rand`) | `--enable-fuzzing` (`FUZZING`) | `fuzzing` | ✅ |
 | O15 | Pre-RFC 8251 bitstream behaviour (RFC 6716 folding, mono phase inversion on); passes the RFC 6716 vectors | `--disable-rfc8251` (`DISABLE_UPDATE_DRAFT`) | `disable-rfc8251` | ✅ |
+| O16 | Faster float kernels, **not bit-exact** with the reference (PLAN D-032): integer accumulation of the DNN int8 products (as upstream's NEON/AVX builds), FMA in the DNN float products; checked against the C oracle and upstream's optimized build with tolerances and through `opus_compare` (`just test-fast`) | (upstream's SIMD builds) | `fast` | ✅ |
 
 Upstream options intentionally not offered (PLAN D-026): `--disable-hardening` (only removes
 safety checks; the port is always hardened), `--enable-rtcd/asm/intrinsics/check-asm`,

@@ -7,6 +7,9 @@
 //!   packets of the expected mode, and gives identical integer results (range coder,
 //!   resampler) and near-identical float kernel results (fixed-point kernels: identical).
 //! * Every configuration really runs in the intended coding mode.
+//!
+//! Not built with `fast` (non-bit-exact kernels, checked by `tests/fast.rs` instead).
+#![cfg(not(feature = "fast"))]
 
 use opus_sys_optimized::{KissFftScalar, Micro, Resampler, Variant};
 use opusorus::celt::kiss_fft::opus_fft;

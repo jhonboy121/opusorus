@@ -91,6 +91,7 @@ Status: ⬜ pending · 🟨 in progress · ✅ bit-exact vs oracle
 
 | Date | Item | Result |
 |---|---|---|
+| 2026-09-27 | `fast` feature (D-032), DNN: int8 products with int32 accumulation (NEON `smull`+`sadalp`), FMA `sgemv` | deep PLC SILK 268→199 µs (C NEON 198), hybrid 281→212 (213), LACE 70→57 (55), NoLACE 239→185 (173), DRED encode 196→191 (190); `just test-fast` green |
 | 2026-09-27 | fearless_simd DNN kernels (D-031): int8 `cgemv8x4`/`sparse_cgemv8x4` (exact integer block sums, NEON `smull`/`saddlp` via `kernel!`, 4 interleaved row groups), float `sgemv16x1`/`8x1`; new `dnn` benches (`opusorus-bench --features dnn`) | deep PLC 20 % loss SILK 1143→268 µs (C NEON 198), hybrid 1156→281 (213), LACE 250→70 (55), NoLACE 975→239 (173), DRED encode 282→196 (190); bit-exact |
 | 2026-09-27 | fearless_simd float FFT/MDCT (D-031) | MDCT fwd 1920 3.36→2.53 µs (C NEON 2.87), MDCT bwd 3.29→2.30 µs (2.58), FFT 480 2.50→1.92 µs (2.18); bit-exact |
 | 2026-09-26 | Decoder memory footprint | decode benches vs before: CELT stereo +0.3 %, surround 5.1 +0.7 % (stack arrays for the C VLAs, zeroed per frame), hybrid/SILK ±0.1–0.3 %; all within criterion's noise threshold |
