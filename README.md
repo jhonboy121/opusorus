@@ -13,6 +13,16 @@ A complete, **pure safe-Rust** port of the [Opus](https://opus-codec.org) audio 
   `fixed-res24`), each bit-exact with the matching libopus build.
 * Performance on par with scalar libopus (see [docs/STATUS.md](docs/STATUS.md)).
 
+> [!WARNING]
+> **AI-assisted port, for personal use.** This codebase was produced with heavy AI assistance
+> (translation, tests, tooling and documentation), with a human directing and reviewing the work.
+> It is maintained **for the author's personal projects only**: it is not an official Opus/Xiph.Org
+> project, not endorsed by the libopus authors, not published to crates.io, and comes with no
+> support, stability guarantees or security review beyond what is described here. The extensive
+> differential testing against libopus reduces, but does not eliminate, the risk of porting bugs.
+> If you need Opus in production, use [libopus](https://opus-codec.org) itself. Use this code at
+> your own risk; see [LICENSE](LICENSE).
+
 ## Features
 
 | Feature | Cargo feature | Notes |
@@ -81,6 +91,25 @@ More in `crates/opusorus/examples/` (`roundtrip`, `encode_file`, `decode_file`).
 | `crates/opusorus-bench` | criterion benchmarks: Rust vs C scalar vs C NEON |
 | `fuzz/` | cargo-fuzz targets (differential and invariant) |
 
+## Building
+
+Requirements:
+
+* Rust stable, rustc 1.89 or newer (`rust-toolchain.toml` pins the stable channel with the
+  cross-compilation targets and `rustfmt`/`clippy`).
+* The `opusorus` library itself needs nothing else. It builds for `no_std` targets without the
+  default `std` feature.
+* For tests and benchmarks: a C compiler (`cc`, clang or gcc), which builds the vendored libopus
+  oracle, and [`just`](https://github.com/casey/just). The DNN features need the libopus model
+  weights (`scripts/fetch_dnn_models.sh`), and `just vectors` needs the conformance vectors
+  (`scripts/fetch_vectors.sh`).
+
+```sh
+cargo build --release                        # the codec library (float build)
+cargo build --release -p opusorus-capi       # libopusorus.so / .a (C ABI)
+cargo run --release -p opusorus-tools --bin opus_demo -- -h
+```
+
 ## Development
 
 ```sh
@@ -101,4 +130,12 @@ Docs: [feature list](docs/FEATURES.md) · [tracker](docs/TRACKER.md) · [status,
 
 ## License
 
-BSD-3-Clause, like libopus (this is a derivative work of libopus; see `vendor/libopus/COPYING`).
+BSD-3-Clause, as required by libopus: opusorus is a derivative work of libopus, so its copyright
+notice, license conditions and disclaimer are retained in [LICENSE](LICENSE), together with the
+Opus royalty-free patent license references. Redistributions (source or binary) must keep that
+notice. The vendored C sources in `vendor/libopus` are unmodified and carry their own
+[COPYING](vendor/libopus/COPYING).
+
+Opus is specified in [RFC 6716](https://datatracker.ietf.org/doc/html/rfc6716) (updated by
+[RFC 8251](https://datatracker.ietf.org/doc/html/rfc8251)). All credit for the codec design and the
+reference implementation goes to the libopus authors listed in LICENSE.
